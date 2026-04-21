@@ -43,17 +43,15 @@ function wireTabs() {
     btn.addEventListener('click', () => applyView(btn.dataset.view))
   })
 
-  // Click anywhere on a bet tile to expand — exclude Kalshi link & other buttons
+  // Click anywhere on a pitcher card to expand — exclude Kalshi links
   document.addEventListener('click', e => {
     if (e.target.closest('a')) return
-    const tile = e.target.closest('.pc-bet-tile')
-    if (!tile) return
-    const detail = tile.querySelector('.pc-bet-detail')
-    if (!detail) return
-    const btn    = tile.querySelector('.pc-detail-toggle')
-    const isOpen = detail.classList.toggle('open')
-    detail.hidden = false
-    if (btn) { btn.classList.toggle('open', isOpen); btn.title = isOpen ? 'Hide details' : 'Show details' }
+    const card = e.target.closest('.pitcher-card')
+    if (!card) return
+    const body = card.querySelector('.pc-body')
+    if (!body) return
+    const isOpen = card.classList.toggle('open')
+    body.hidden = !isOpen
   })
 }
 
@@ -296,210 +294,175 @@ function renderDaySummary(date, data) {
 }
 
 function buildPitcherCard(p) {
+  const KALSHI_FEE = 0.07
   const card = document.createElement('article')
   let colorCls = 'pending'
   if (p.pending === 0) {
-    if (p.losses === 0 && p.wins > 0)        colorCls = 'win'
-    else if (p.wins === 0 && p.losses > 0)   colorCls = 'loss'
-    else if (p.wins > 0 && p.losses > 0)     colorCls = 'mixed'
+    if (p.losses === 0 && p.wins > 0)      colorCls = 'win'
+    else if (p.wins === 0 && p.losses > 0) colorCls = 'loss'
+    else if (p.wins > 0 && p.losses > 0)   colorCls = 'mixed'
   }
   card.className = `pitcher-card ${colorCls}`
   if (p.pitcher_id) card.dataset.pitcherId = p.pitcher_id
 
+  // ── Collapsed header ────────────────────────────────────────────────────
   const pnlCls = p.pnl >= 0 ? 'good' : 'bad'
-  const pnlStr = p.pnl != null
+  const pnlStr = p.pnl != null && (p.wins + p.losses) > 0
     ? `<span class="${pnlCls}">${p.pnl >= 0 ? '+' : ''}${fmt$(p.pnl)}</span>`
-    : '<span class="muted">—</span>'
-
-  // Actual Ks badge — shown when settled
-  const actualKsBadge = p.actual_ks != null
-    ? `<div class="pc-actual-ks">Threw <strong>${p.actual_ks}</strong> Ks</div>`
     : ''
 
-  // Recent starts heat map
+  let statusChips = ''
+  if (p.pending > 0 && p.wins === 0 && p.losses === 0) {
+    statusChips = `<span class="pc-chip pending">${p.pending} pending</span>`
+  } else {
+    if (p.wins   > 0) statusChips += `<span class="pc-chip win">${p.wins}W</span>`
+    if (p.losses > 0) statusChips += `<span class="pc-chip loss">${p.losses}L</span>`
+    if (p.pending > 0) statusChips += `<span class="pc-chip pending">${p.pending} live</span>`
+  }
+
+  // Total $ at risk for this pitcher
+  let totalRisk = 0
+  for (const b of p.bets) {
+    const mid = b.market_mid != null ? Number(b.market_mid) / 100 : 0.5
+    const hs  = (b.spread ?? 4) / 200
+    const fill = b.side === 'YES' ? mid + hs : (1 - mid) + hs
+    totalRisk += (b.bet_size ?? 0) * fill
+  }
+
+  // ── Expanded body ────────────────────────────────────────────────────────
+
+  // Signals — pull from first bet (same per pitcher)
+  const s = p.bets[0] || {}
+  const firstName = p.pitcher_name.split(' ').pop()  // last name for text
+
+  const lambdaStr   = s.lambda       != null ? s.lambda.toFixed(1) : null
+  const parkStr     = s.park_factor  != null && Math.abs(s.park_factor - 1) > 0.01
+                        ? `×${s.park_factor.toFixed(2)}` : 'neutral'
+  const umpStr      = s.ump_name     != null ? `${s.ump_name}${s.ump_factor != null && Math.abs(s.ump_factor - 1) > 0.01 ? ` (×${s.ump_factor.toFixed(2)})` : ''}` : '—'
+  const wxStr       = s.weather_mult != null && Math.abs(s.weather_mult - 1) > 0.01
+                        ? `×${s.weather_mult.toFixed(2)}` : 'neutral'
+  const veloStr     = s.velo_trend_mph != null ? `${s.velo_trend_mph >= 0 ? '+' : ''}${s.velo_trend_mph.toFixed(1)} mph` : null
+  const k9Str       = s.k9_season    != null ? s.k9_season.toFixed(1) : null
+  const whiffStr    = s.savant_whiff != null ? `${(s.savant_whiff * 100).toFixed(1)}%` : null
+  const avgEdgeCents = p.bets.reduce((sum, b) => sum + (b.edge != null ? Number(b.edge) * 100 : 0), 0) / p.bets.length
+
+  const signalItems = [
+    lambdaStr  ? `<div class="pc-sig"><span>Exp. Ks</span><b>${lambdaStr}</b></div>` : '',
+    k9Str      ? `<div class="pc-sig"><span>K/9</span><b>${k9Str}</b></div>` : '',
+    whiffStr   ? `<div class="pc-sig"><span>Whiff%</span><b>${whiffStr}</b></div>` : '',
+    `<div class="pc-sig"><span>Avg edge</span><b class="good">+${avgEdgeCents.toFixed(1)}¢</b></div>`,
+    `<div class="pc-sig"><span>Park</span><b>${parkStr}</b></div>`,
+    `<div class="pc-sig"><span>Umpire</span><b>${umpStr}</b></div>`,
+    veloStr    ? `<div class="pc-sig"><span>Velo trend</span><b>${veloStr}</b></div>` : '',
+    `<div class="pc-sig"><span>Weather</span><b>${wxStr}</b></div>`,
+  ].filter(Boolean).join('')
+
+  // Why picked — pitcher-level summary
+  const whyParts = []
+  if (lambdaStr) whyParts.push(`Model expects ${firstName} to average ~${lambdaStr} Ks today.`)
+  if (avgEdgeCents >= 5) whyParts.push(`Market is consistently underpricing him — avg ${avgEdgeCents.toFixed(1)}¢ edge across all thresholds.`)
+  if (s.park_factor != null && s.park_factor < 0.97) whyParts.push(`Pitcher-friendly ballpark helps.`)
+  if (s.park_factor != null && s.park_factor > 1.03) whyParts.push(`Hitter-friendly park — factor into expectations.`)
+  if (s.ump_factor  != null && s.ump_factor  > 1.03) whyParts.push(`Umpire ${s.ump_name} calls a big strike zone.`)
+  if (s.ump_factor  != null && s.ump_factor  < 0.97) whyParts.push(`Umpire ${s.ump_name} has a tight zone — could suppress Ks.`)
+  if (s.velo_trend_mph != null && s.velo_trend_mph >= 0.5)  whyParts.push(`Velocity trending up +${s.velo_trend_mph.toFixed(1)} mph.`)
+  if (s.velo_trend_mph != null && s.velo_trend_mph <= -0.5) whyParts.push(`Velocity trending down ${s.velo_trend_mph.toFixed(1)} mph — watch closely.`)
+  const whyText = whyParts.join(' ') || 'Picked based on model edge vs. market price.'
+
+  // Heat map
   const heatMap = (() => {
-    if (!p.recent_ks || !p.recent_ks.length) return ''
+    if (!p.recent_ks?.length) return ''
     const thresholds = [...new Set(p.bets.map(b => b.strike))].sort((a,b) => a - b)
     if (!thresholds.length) return ''
     const cols = p.recent_ks.map((ks, i) => {
-      const cells = thresholds.map(t => {
-        const hit = ks >= t
-        return `<div class="hm-cell ${hit ? 'hm-hit' : 'hm-miss'}" title="${ks} Ks (${hit ? 'over' : 'under'} ${t}+)">${ks}</div>`
-      })
-      return `<div class="hm-col">
-        <div class="hm-start-label">S-${p.recent_ks.length - i}</div>
-        ${cells.join('')}
-      </div>`
+      const cells = thresholds.map(t =>
+        `<div class="hm-cell ${ks >= t ? 'hm-hit' : 'hm-miss'}" title="${ks} Ks vs ${t}+">${ks}</div>`
+      )
+      return `<div class="hm-col"><div class="hm-start-label">S-${p.recent_ks.length - i}</div>${cells.join('')}</div>`
     })
     const rowLabels = thresholds.map(t => `<div class="hm-row-label">${t}+</div>`).join('')
     return `<div class="pc-heatmap">
       <div class="hm-header">Last ${p.recent_ks.length} starts</div>
       <div class="hm-body">
-        <div class="hm-labels">
-          <div class="hm-corner"></div>
-          ${rowLabels}
-        </div>
+        <div class="hm-labels"><div class="hm-corner"></div>${rowLabels}</div>
         <div class="hm-cols">${cols.join('')}</div>
       </div>
     </div>`
   })()
 
-  const betTiles = p.bets.map(b => {
+  // Bet rows — flat list, no expand
+  const betRows = p.bets.map(b => {
     const mid        = b.market_mid != null ? Number(b.market_mid) : null
     const face       = b.bet_size   != null ? Number(b.bet_size)   : null
     const halfSpread = (b.spread ?? 4) / 2
-    // Fill at ask price (mid + halfSpread for YES, (100-mid) + halfSpread for NO)
     const fillCents  = mid != null ? (b.side === 'YES' ? mid + halfSpread : (100 - mid) + halfSpread) : null
     const winCents   = mid != null ? (b.side === 'YES' ? (100 - mid) - halfSpread : mid - halfSpread) : null
-    // Kalshi takes 7% of gross winnings
-    const KALSHI_FEE = 0.07
     const wager  = fillCents != null && face != null ? fmt$(face * fillCents / 100) : '—'
     const potWin = winCents  != null && face != null ? fmt$(face * winCents / 100 * (1 - KALSHI_FEE)) : '—'
+    const edgeStr = b.edge != null ? `+${(b.edge * 100).toFixed(1)}¢` : ''
+    const midStr  = b.market_mid != null ? `${b.market_mid}¢ mid` : ''
 
-    // Plain-English description of what we're betting on
     const direction = b.side === 'YES'
-      ? `Will throw <strong>${b.strike}+</strong> strikeouts`
-      : `Will throw <strong>fewer than ${b.strike}</strong> strikeouts`
+      ? `<strong>${b.strike}+</strong> Ks YES`
+      : `Under <strong>${b.strike}</strong> Ks NO`
 
-    let resultBadge, moneyLine
+    let badge, moneyStr
     if (b.result === 'win') {
-      resultBadge = `<span class="pc-badge pc-badge--win">✓ WIN</span>`
-      moneyLine   = `<span class="pc-money-win">+${fmt$(b.pnl)}</span>`
+      badge    = `<span class="pc-badge pc-badge--win">✓ WIN</span>`
+      moneyStr = `<span class="pc-money-win">+${fmt$(b.pnl)}</span>`
     } else if (b.result === 'loss') {
-      resultBadge = `<span class="pc-badge pc-badge--loss">✗ LOSS</span>`
-      moneyLine   = `<span class="pc-money-loss">${fmt$(b.pnl)}</span>`
+      badge    = `<span class="pc-badge pc-badge--loss">✗ LOSS</span>`
+      moneyStr = `<span class="pc-money-loss">${fmt$(b.pnl)}</span>`
     } else {
-      resultBadge = `<span class="pc-badge pc-badge--pending">In Progress</span>`
-      moneyLine   = `<span class="pc-money-potential">Could win ${potWin}</span>`
+      badge    = `<span class="pc-badge pc-badge--pending">Pending</span>`
+      moneyStr = `<span class="pc-money-potential">→ ${potWin}</span>`
     }
 
-    const tileCls = b.result === 'win' ? 'pc-bet-tile--win'
-      : b.result === 'loss' ? 'pc-bet-tile--loss' : ''
-
-    // Technical detail drawer (hidden by default, shown on click)
-    const modelPct    = b.model_prob    != null ? `${(b.model_prob * 100).toFixed(1)}%` : '—'
-    const rawPct      = b.raw_model_prob != null ? `${(b.raw_model_prob * 100).toFixed(1)}%` : modelPct
-    const edgeCents   = b.edge          != null ? `+${(b.edge * 100).toFixed(1)}¢` : '—'
-    const midCents    = b.market_mid    != null ? `${b.market_mid}¢` : '—'
-    const spreadCents = b.spread        != null ? `${b.spread}¢` : '—'
-    const kellyPct    = b.kelly_fraction != null ? `${(b.kelly_fraction * 100).toFixed(1)}%` : '—'
-    const lambdaVal   = b.lambda        != null ? b.lambda.toFixed(2) : '—'
-    const parkVal     = b.park_factor   != null && b.park_factor !== 1 ? `×${b.park_factor.toFixed(2)}` : 'neutral'
-    const umpVal      = b.ump_name      != null ? `${b.ump_name} (×${b.ump_factor?.toFixed(2) ?? '—'})` : '—'
-    const veloVal     = b.velo_trend_mph != null ? `${b.velo_trend_mph >= 0 ? '+' : ''}${b.velo_trend_mph.toFixed(1)} mph` : '—'
-    const wxVal       = b.weather_mult  != null && b.weather_mult !== 1 ? `×${b.weather_mult.toFixed(2)}` : 'neutral'
-
-    // Plain-English explainer — what this Kalshi contract actually is
-    const firstName = p.pitcher_name.split(' ')[0]
-    const betExplainer = (() => {
-      const winAmt  = winCents  != null && face != null ? fmt$(face * winCents / 100 * (1 - KALSHI_FEE)) : null
-      const riskAmt = fillCents != null && face != null ? fmt$(face * fillCents / 100) : null
-      if (b.side === 'YES') {
-        return `This is a Kalshi contract that pays out if ${firstName} records ${b.strike} or more strikeouts today. ` +
-          (winAmt && riskAmt ? `If he hits that mark, we win ${winAmt}. If he falls short, we lose ${riskAmt}.` : '')
-      } else {
-        return `This is a Kalshi contract that pays out if ${firstName} finishes with fewer than ${b.strike} strikeouts today. ` +
-          (winAmt && riskAmt ? `If he stays under, we win ${winAmt}. If he reaches ${b.strike}+, we lose ${riskAmt}.` : '')
-      }
-    })()
-
-    // Why we picked it — template-driven synopsis from model data
-    const whyPicked = (() => {
-      const parts = []
-      if (b.lambda != null) {
-        const lambdaNum = Number(b.lambda)
-        if (b.side === 'YES') {
-          parts.push(`Our model expects ${firstName} to average around ${lambdaNum.toFixed(1)} strikeouts today, which makes ${b.strike}+ look achievable.`)
-        } else {
-          parts.push(`Our model expects ${firstName} to average around ${lambdaNum.toFixed(1)} strikeouts today, which makes staying under ${b.strike} look likely.`)
-        }
-      }
-      if (b.model_prob != null && b.market_mid != null) {
-        const mktPct = b.market_mid
-        const ourPct = Math.round(b.model_prob * 100)
-        const diff   = ourPct - mktPct
-        if (Math.abs(diff) >= 3) {
-          parts.push(`Kalshi is pricing this at ${mktPct}¢ but we think the true odds are closer to ${ourPct}¢ — a ${Math.abs(diff)}¢ gap in our favor.`)
-        }
-      }
-      const flags = []
-      if (b.park_factor != null && b.park_factor < 0.97) flags.push(`pitcher-friendly ballpark`)
-      if (b.park_factor != null && b.park_factor > 1.03) flags.push(`hitter-friendly ballpark`)
-      if (b.ump_factor  != null && b.ump_factor  > 1.03) flags.push(`an ump who calls a big strike zone`)
-      if (b.ump_factor  != null && b.ump_factor  < 0.97) flags.push(`an ump with a tight strike zone`)
-      if (b.velo_trend_mph != null && b.velo_trend_mph <= -0.5) flags.push(`velocity trending down lately`)
-      if (b.velo_trend_mph != null && b.velo_trend_mph >= 0.5)  flags.push(`velocity trending up lately`)
-      if (b.weather_mult != null && b.weather_mult < 0.97) flags.push(`weather conditions that suppress offense`)
-      if (b.weather_mult != null && b.weather_mult > 1.03) flags.push(`weather that tends to boost scoring`)
-      if (flags.length) parts.push(`Other factors: ${flags.join(', ')}.`)
-      return parts.join(' ') || 'Picked based on model edge vs. market price.'
-    })()
-
     const kalshiBtn = b.ticker
-      ? `<a class="pc-kalshi-btn" href="https://kalshi.com/markets/kxmlbks/${b.ticker}" target="_blank" rel="noopener">Place Bet →</a>`
+      ? `<a class="pc-kalshi-btn" href="https://kalshi.com/markets/kxmlbks/${b.ticker}" target="_blank" rel="noopener">Bet →</a>`
       : ''
 
-    return `<div class="pc-bet-tile ${tileCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}">
-      <div class="pc-bet-main">
-        <div class="pc-bet-desc">${direction}</div>
-        <div class="pc-ks-progress" hidden>
-          <div class="pc-ks-bar"><div class="pc-ks-fill"></div></div>
-          <span class="pc-ks-label"></span>
-        </div>
-        <div class="pc-bet-bottom">
-          <span class="pc-bet-wager">Bet ${wager}</span>
-          ${moneyLine}
-          ${resultBadge}
-          ${kalshiBtn}
-          <button class="pc-detail-toggle" title="Show details">▼</button>
-        </div>
+    const rowCls = b.result === 'win' ? 'pc-bet-row--win' : b.result === 'loss' ? 'pc-bet-row--loss' : ''
+
+    return `<div class="pc-bet-row ${rowCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}">
+      <div class="pc-bet-row-left">
+        <span class="pc-bet-row-desc">${direction}</span>
+        <span class="pc-bet-row-meta">${[edgeStr, midStr].filter(Boolean).join(' · ')}</span>
       </div>
-      <div class="pc-bet-detail" hidden>
-        <p class="pc-detail-explainer">${betExplainer}</p>
-        <p class="pc-detail-why"><strong>Why we picked it:</strong> ${whyPicked}</p>
-        <div class="pc-detail-grid">
-          <div class="pc-detail-item"><span>Model probability</span><b>${modelPct}${b.raw_model_prob != null ? ` <span class="muted" style="font-size:12px">(raw ${rawPct})</span>` : ''}</b></div>
-          <div class="pc-detail-item"><span>Market price</span><b>${midCents}</b></div>
-          <div class="pc-detail-item"><span>Our edge</span><b class="good">${edgeCents}</b></div>
-          <div class="pc-detail-item"><span>Spread</span><b>${spreadCents}</b></div>
-          <div class="pc-detail-item"><span>Kelly fraction</span><b>${kellyPct}</b></div>
-          <div class="pc-detail-item"><span>Lambda (exp Ks)</span><b>${lambdaVal}</b></div>
-          <div class="pc-detail-item"><span>Park factor</span><b>${parkVal}</b></div>
-          <div class="pc-detail-item"><span>Umpire</span><b>${umpVal}</b></div>
-          <div class="pc-detail-item"><span>Velo trend</span><b>${veloVal}</b></div>
-          <div class="pc-detail-item"><span>Weather</span><b>${wxVal}</b></div>
-        </div>
+      <div class="pc-ks-progress" hidden>
+        <div class="pc-ks-bar"><div class="pc-ks-fill"></div></div>
+        <span class="pc-ks-label"></span>
+      </div>
+      <div class="pc-bet-row-right">
+        <span class="pc-bet-wager">${wager}</span>
+        ${moneyStr}
+        ${badge}
+        ${kalshiBtn}
       </div>
     </div>`
   }).join('')
 
-  // Summary line at bottom
-  let summaryLine = ''
-  if (p.pending > 0 && p.wins === 0 && p.losses === 0) {
-    summaryLine = `<span class="muted">${p.pending} bet${p.pending > 1 ? 's' : ''} in progress</span>`
-  } else {
-    const parts = []
-    if (p.wins   > 0) parts.push(`<span class="good">${p.wins} won</span>`)
-    if (p.losses > 0) parts.push(`<span class="bad">${p.losses} lost</span>`)
-    if (p.pending > 0) parts.push(`<span class="muted">${p.pending} pending</span>`)
-    summaryLine = parts.join(' · ')
-  }
-
   card.innerHTML = `
-    <div class="pc-head">
-      <div class="pc-head-left">
+    <div class="pc-header">
+      <div class="pc-header-left">
         <div class="pc-pitcher">${esc(p.pitcher_name)}</div>
         <div class="pc-meta">${esc(p.game || p.team || '—')}</div>
       </div>
-      <div class="pc-head-right">
-        ${actualKsBadge}
+      <div class="pc-header-right">
+        <div class="pc-actual-ks">${p.actual_ks != null ? `<strong>${p.actual_ks}</strong> Ks` : ''}</div>
+        <div class="pc-header-chips">${statusChips}</div>
+        <div class="pc-header-risk">${fmt$(totalRisk)} at risk</div>
+        ${pnlStr ? `<div class="pc-header-pnl">${pnlStr}</div>` : ''}
+        <div class="pc-expand-arrow">›</div>
       </div>
     </div>
-    ${heatMap}
-    <div class="pc-bet-tiles">${betTiles}</div>
-    <div class="pc-footer">
-      <div class="pc-wl">${summaryLine}</div>
-      <div class="pc-total">${pnlStr}</div>
+    <div class="pc-body" hidden>
+      <div class="pc-signals-section">
+        <div class="pc-signals">${signalItems}</div>
+        <p class="pc-why-text">${whyText}</p>
+      </div>
+      ${heatMap}
+      <div class="pc-bet-rows">${betRows}</div>
     </div>`
 
   return card
@@ -572,75 +535,57 @@ function updatePitcherCardLive(p) {
   const card = document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(String(p.pitcher_id))}"]`)
   if (!card) return
 
-  // Update/create actual Ks badge
-  let ksBadge = card.querySelector('.pc-actual-ks')
-  if (!ksBadge) {
-    ksBadge = document.createElement('div')
-    ksBadge.className = 'pc-actual-ks'
-    const headRight = card.querySelector('.pc-head-right')
-    if (headRight) headRight.appendChild(ksBadge)
-  }
-  const ksStrong = ksBadge.querySelector('strong')
-  if (ksStrong) {
-    ksStrong.textContent = p.ks
-    ksStrong.style.color = p.is_final ? '' : 'var(--accent)'
-  } else {
-    ksBadge.innerHTML = `Threw <strong style="color:var(--accent)">${p.ks}</strong> Ks`
+  // Update Ks count in collapsed header
+  const ksBadge = card.querySelector('.pc-actual-ks')
+  if (ksBadge) {
+    ksBadge.innerHTML = p.is_final
+      ? `<strong>${p.ks}</strong> Ks`
+      : `<strong style="color:var(--accent)">${p.ks}</strong> Ks`
   }
 
-  // Inning badge in header
+  // Live status badge (inning) — shown in collapsed header
   let statusBadge = card.querySelector('.pc-live-badge')
   if (!statusBadge) {
     statusBadge = document.createElement('span')
-    statusBadge.className = 'pc-live-badge'
-    const headRight = card.querySelector('.pc-head-right')
-    if (headRight) headRight.prepend(statusBadge)
+    card.querySelector('.pc-header-right')?.prepend(statusBadge)
   }
   statusBadge.textContent = p.inning
   statusBadge.className = `pc-live-badge${p.is_final ? ' final' : ' pulsing'}`
 
-  // Update each pending bet tile
+  // TTO3 warning on meta line
+  if (p.tto3) {
+    const meta = card.querySelector('.pc-meta')
+    if (meta && !meta.querySelector('.tto-warn'))
+      meta.insertAdjacentHTML('beforeend', ' <span class="tto-warn">⚠ Pitch limit</span>')
+  }
+
+  // Update each bet row
   for (const bs of p.bet_statuses) {
-    const tile = card.querySelector(`.pc-bet-tile[data-bet-id="${bs.id}"]`)
-    if (!tile) continue
-    const badge = tile.querySelector('.pc-badge')
+    const row = card.querySelector(`.pc-bet-row[data-bet-id="${bs.id}"]`)
+    if (!row) continue
+    const badge = row.querySelector('.pc-badge')
     if (!badge || !badge.classList.contains('pc-badge--pending')) continue
 
-    const isNo = tile.querySelector('.pc-bet-desc')?.textContent?.includes('fewer') ?? false
+    const isNo = row.dataset.side === 'NO'
 
     // Progress bar
-    const prog = tile.querySelector('.pc-ks-progress')
+    const prog = row.querySelector('.pc-ks-progress')
     if (prog && !p.is_final) {
-      const pct    = Math.min(bs.ks / bs.strike * 100, 100)
-      const fill   = prog.querySelector('.pc-ks-fill')
-      const label  = prog.querySelector('.pc-ks-label')
-      prog.hidden  = false
-      if (fill) { fill.style.width = `${pct}%`; fill.className = `pc-ks-fill${bs.needed === 0 && !isNo ? ' hit' : ''}` }
+      const pct   = Math.min(bs.ks / bs.strike * 100, 100)
+      const fill  = prog.querySelector('.pc-ks-fill')
+      const label = prog.querySelector('.pc-ks-label')
+      prog.hidden = false
+      if (fill)  { fill.style.width = `${pct}%`; fill.className = `pc-ks-fill${bs.needed === 0 && !isNo ? ' hit' : ''}` }
       if (label) label.textContent = isNo ? `${bs.ks} Ks (need < ${bs.strike})` : `${bs.ks} / ${bs.strike} Ks`
     }
 
     if (!isNo) {
-      if (bs.needed === 0) {
-        badge.textContent = '✓ HIT'; badge.className = 'pc-badge pc-badge--win'
-      } else {
-        badge.textContent = `Needs ${bs.needed} more`
-      }
+      if (bs.needed === 0) { badge.textContent = '✓ HIT';  badge.className = 'pc-badge pc-badge--win' }
+      else                 { badge.textContent = `Need ${bs.needed} more` }
     } else {
-      if (bs.ks >= bs.strike) {
-        badge.textContent = '✗ Over'; badge.className = 'pc-badge pc-badge--loss'
-      } else if (p.is_final) {
-        badge.textContent = '✓ Safe'; badge.className = 'pc-badge pc-badge--win'
-      } else {
-        badge.textContent = `At ${bs.ks} of ${bs.strike}`
-      }
-    }
-  }
-
-  // TTO3 warning
-  if (p.tto3) {
-    const meta = card.querySelector('.pc-meta')
-    if (meta && !meta.querySelector('.tto-warn')) {
-      meta.insertAdjacentHTML('beforeend', ' <span class="tto-warn">⚠ Pitch limit warning</span>')
+      if (bs.ks >= bs.strike)  { badge.textContent = '✗ Over'; badge.className = 'pc-badge pc-badge--loss' }
+      else if (p.is_final)     { badge.textContent = '✓ Safe'; badge.className = 'pc-badge pc-badge--win' }
+      else                     { badge.textContent = `At ${bs.ks} of ${bs.strike}` }
     }
   }
 }

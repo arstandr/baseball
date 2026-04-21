@@ -1154,7 +1154,8 @@ router.get('/ks/daily', wrap(async (req, res) => {
             strike, side, model_prob, market_mid, edge, lambda, actual_ks,
             result, pnl, bet_size, kelly_fraction, ticker, live_bet,
             park_factor, ump_factor, ump_name, velo_adj, bb_penalty,
-            spread, k9_career, k9_season,
+            spread, k9_career, k9_season, k9_l5,
+            savant_k_pct, savant_whiff, savant_fbv,
             weather_mult, velo_trend_mph, raw_model_prob
      FROM ks_bets
      WHERE bet_date = ? AND live_bet = 0
@@ -1199,6 +1200,10 @@ router.get('/ks/daily', wrap(async (req, res) => {
       weather_mult:   b.weather_mult,
       velo_trend_mph: b.velo_trend_mph,
       raw_model_prob: b.raw_model_prob != null ? roundTo(b.raw_model_prob, 4) : null,
+      k9_season:      b.k9_season,
+      savant_k_pct:   b.savant_k_pct,
+      savant_whiff:   b.savant_whiff,
+      savant_fbv:     b.savant_fbv,
     })
   }
 
