@@ -543,25 +543,30 @@ a:hover { text-decoration: underline; }
 
 /* Overall header progress bar */
 .pc-overall-bar {
-  height: 4px; background: var(--border-2); overflow: hidden;
+  height: 3px; background: rgba(255,255,255,0.05); overflow: hidden;
+  margin: 0 14px 0; border-radius: 2px; display: none;
 }
 .pc-overall-fill {
-  height: 100%; background: rgba(0,212,170,0.5); transition: width 0.5s ease;
+  height: 100%; background: rgba(0,212,170,0.5); transition: width 0.6s ease, background 0.4s;
 }
 .pc-overall-fill.good { background: var(--good); }
+.pc-overall-fill.warn { background: var(--warn); }
 .pc-overall-fill.bad  { background: rgba(248,81,73,0.6); }
 
-/* Per-bet Ks progress bars — always visible */
+/* Per-bet progress bars — hidden until game starts */
 .pc-ks-progress {
-  display: flex; align-items: center; gap: 10px;
+  display: none; align-items: center; gap: 10px;
 }
 .pc-ks-bar {
-  flex: 1; height: 8px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden; min-width: 80px;
+  flex: 1; height: 5px; background: rgba(255,255,255,0.07); border-radius: 3px; overflow: hidden; min-width: 60px;
 }
 .pc-ks-fill {
-  height: 100%; background: rgba(0,212,170,0.5); border-radius: 4px;
-  transition: width 0.4s ease; width: 0%;
+  height: 100%; background: rgba(0,212,170,0.4); border-radius: 3px;
+  transition: width 0.6s ease, background 0.4s; width: 0%;
 }
+.pc-ks-fill.good { background: var(--good); }
+.pc-ks-fill.warn { background: var(--warn); }
+.pc-ks-fill.bad  { background: rgba(248,81,73,0.6); }
 .pc-ks-fill.hit  { background: var(--good); }
 .pc-ks-fill.miss { background: rgba(248,81,73,0.6); }
 .pc-ks-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }

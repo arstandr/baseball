@@ -810,23 +810,13 @@ function updatePitcherCardLive(p) {
     liveRow.innerHTML = `<span class="pc-live-chip live">${parts}${blowout}</span>${pace}`
   }
 
-  // ── Overall progress bar ──────────────────────────────────────────────────
+  // ── Overall bar — show only once game starts, fill by coverage % ─────────
+  const overallBar  = card.querySelector('.pc-overall-bar')
   const overallFill = card.querySelector('.pc-overall-fill')
-  if (overallFill) {
-    let winning = 0
-    for (const bs of p.bet_statuses) {
-      const isNo = bs.side === 'NO'
-      if (bs.result === 'win') winning++
-      else if (!bs.result) {
-        if (!isNo && bs.ks >= bs.strike) winning++
-        else if (isNo && bs.ks < bs.strike) winning++
-      }
-    }
-    const total = p.bet_statuses.length
-    const pct = total > 0 ? Math.round(winning / total * 100) : 0
-    overallFill.style.width = `${pct}%`
-    overallFill.className = `pc-overall-fill ${pct >= 60 ? 'good' : winning === 0 && total > 0 ? 'bad' : ''}`
+  if (overallBar && !isWarmup) {
+    overallBar.style.display = 'block'
   }
+  // fill updated later once per-bet probs are computed (see coverageEl block)
 
   // ── Update each bet row (badge + progress bar) ────────────────────────────
   for (const bs of p.bet_statuses) {
@@ -837,16 +827,13 @@ function updatePitcherCardLive(p) {
     const isNo = row.dataset.side === 'NO'
 
     const prog = row.querySelector('.pc-ks-progress')
-    if (prog) {
-      const pct  = Math.min(bs.ks / bs.strike * 100, 100)
+    if (prog && !isWarmup) {
+      prog.style.display = 'flex'
       const fill = prog.querySelector('.pc-ks-fill')
       const lbl  = prog.querySelector('.pc-ks-label')
-      const onTrack = !isNo ? bs.ks >= bs.strike : bs.ks < bs.strike
-      if (fill) {
-        fill.style.width = `${pct}%`
-        fill.className   = `pc-ks-fill${!p.is_final && onTrack && !isNo ? ' hit' : isNo && bs.ks >= bs.strike ? ' miss' : ''}`
-      }
       if (lbl) lbl.textContent = isNo ? `${bs.ks} Ks (need < ${bs.strike})` : `${bs.ks} / ${bs.strike} Ks`
+      // Fill and color updated in coverage block below
+      if (fill) fill.dataset.betId = bs.id
     }
 
     if (!isNo) {
@@ -885,9 +872,18 @@ function updatePitcherCardLive(p) {
       continue
     }
 
-    const pct = Math.round(prob * 100)
+    const pct    = Math.round(prob * 100)
+    const colCls = pct >= 60 ? 'good' : pct >= 40 ? 'warn' : 'bad'
     coverChip.textContent = `${pct}%`
-    coverChip.className = `pc-bet-cover ${pct >= 60 ? 'good' : pct >= 40 ? 'warn' : 'bad'}`
+    coverChip.className = `pc-bet-cover ${colCls}`
+
+    // Drive the per-bet progress bar with coverage probability
+    const fill = row.querySelector('.pc-ks-fill')
+    if (fill) {
+      fill.style.width  = `${pct}%`
+      fill.className    = `pc-ks-fill ${colCls}`
+    }
+
     if (!bs.result) { coverSum += pct; coverCount++ }
   }
 
@@ -895,9 +891,15 @@ function updatePitcherCardLive(p) {
   const coverageEl = card.querySelector('.pc-coverage')
   if (coverageEl && coverCount > 0) {
     const avgPct = Math.round(coverSum / coverCount)
+    const colCls = avgPct >= 60 ? 'good' : avgPct >= 40 ? 'warn' : 'bad'
     coverageEl.textContent = `${avgPct}% cover`
-    coverageEl.className = `pc-coverage ${avgPct >= 60 ? 'good' : avgPct >= 40 ? 'warn' : 'bad'}`
+    coverageEl.className = `pc-coverage ${colCls}`
     card.dataset.coverage = avgPct
+    // Drive the overall bar with the same avg coverage
+    if (overallFill) {
+      overallFill.style.width = `${avgPct}%`
+      overallFill.className   = `pc-overall-fill ${colCls}`
+    }
   }
 }
 
