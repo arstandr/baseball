@@ -751,11 +751,30 @@ a:hover { text-decoration: underline; }
   transition: border-color 0.15s, background 0.15s;
 }
 .lb-chip:hover { border-color: var(--accent); background: rgba(0,212,170,0.06); }
-.lb-chip--live {
-  border-color: rgba(0,212,170,0.5);
-  box-shadow: 0 0 8px rgba(0,212,170,0.25), inset 0 0 0 1px rgba(0,212,170,0.1);
+.lb-chip--live { border-color: var(--border-2); }
+.lb-chip--final { opacity: 0.5; }
+.lb-chip--green {
+  border-color: rgba(63,185,80,0.6);
+  background: rgba(63,185,80,0.1);
+  box-shadow: 0 0 10px rgba(63,185,80,0.3);
 }
-.lb-chip--final { opacity: 0.55; }
+.lb-chip--yellow {
+  border-color: rgba(210,153,34,0.6);
+  background: rgba(210,153,34,0.08);
+  box-shadow: 0 0 10px rgba(210,153,34,0.25);
+}
+.lb-chip--red {
+  border-color: rgba(248,81,73,0.6);
+  background: rgba(248,81,73,0.1);
+  box-shadow: 0 0 10px rgba(248,81,73,0.3);
+}
+/* pulsing animation for actively live chips */
+.lb-chip--live.lb-chip--green  { animation: pulse-green  2s ease-in-out infinite; }
+.lb-chip--live.lb-chip--yellow { animation: pulse-yellow 2s ease-in-out infinite; }
+.lb-chip--live.lb-chip--red    { animation: pulse-red    2s ease-in-out infinite; }
+@keyframes pulse-green  { 0%,100%{box-shadow:0 0 8px rgba(63,185,80,0.3)}  50%{box-shadow:0 0 18px rgba(63,185,80,0.6)} }
+@keyframes pulse-yellow { 0%,100%{box-shadow:0 0 8px rgba(210,153,34,0.25)} 50%{box-shadow:0 0 18px rgba(210,153,34,0.5)} }
+@keyframes pulse-red    { 0%,100%{box-shadow:0 0 8px rgba(248,81,73,0.3)}  50%{box-shadow:0 0 18px rgba(248,81,73,0.6)} }
 .lb-name { font-size: 12px; font-weight: 700; color: var(--text); }
 .lb-status { font-size: 11px; font-family: var(--mono); }
 .lb-pregame { color: var(--text-dim); }

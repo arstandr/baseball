@@ -588,6 +588,8 @@ async function pollLive(date) {
     updatePitcherCardLive(p)
   }
 
+  updateBannerChipColors(data.pitchers)
+
   // Re-sort: live first → pre-game by start time → final at bottom
   const list = document.getElementById('pitcher-list')
   if (list) {
@@ -695,6 +697,30 @@ function renderLiveBanner(data) {
       statusEl.textContent = `${p.ks}K · ${p.ip.toFixed(1)}IP · ${p.inning}${warn}`
       statusEl.className   = 'lb-status lb-live'
       chip.classList.add('lb-chip--live')
+    }
+  }
+}
+
+function updateBannerChipColors(pitchers) {
+  const banner = document.getElementById('live-banner')
+  if (!banner || banner.hidden) return
+  for (const p of pitchers) {
+    const chip = p.pitcher_id
+      ? banner.querySelector(`.lb-chip[data-pitcher-id="${p.pitcher_id}"]`)
+      : null
+    if (!chip) continue
+    const card = p.pitcher_id
+      ? document.querySelector(`.pitcher-card[data-pitcher-id="${p.pitcher_id}"]`)
+      : null
+    const coverage  = card ? Number(card.dataset.coverage || 0) : 0
+    const isWarmup  = !p.is_final && p.pitches === 0 && p.ip === 0
+    const hasData   = p.is_final || !isWarmup
+
+    chip.classList.remove('lb-chip--green', 'lb-chip--yellow', 'lb-chip--red')
+    if (hasData) {
+      if (coverage >= 60)      chip.classList.add('lb-chip--green')
+      else if (coverage >= 40) chip.classList.add('lb-chip--yellow')
+      else                     chip.classList.add('lb-chip--red')
     }
   }
 }
