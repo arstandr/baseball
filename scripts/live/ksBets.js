@@ -20,11 +20,19 @@ import { toKalshiAbbr, getAuthHeaders } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport } from '../../lib/discord.js'
 
 const args = process.argv.slice(2)
-const MODE     = args[0] || 'report'
-const dateArg  = args.includes('--date')     ? args[args.indexOf('--date')     + 1] : null
-const daysArg  = args.includes('--days')     ? Number(args[args.indexOf('--days')     + 1]) : 30
-const minEdge  = args.includes('--min-edge') ? Number(args[args.indexOf('--min-edge') + 1]) : 0.05
-const BET_SIZE = args.includes('--bet-size') ? Number(args[args.indexOf('--bet-size') + 1]) : 100
+const MODE         = args[0] || 'report'
+const dateArg      = args.includes('--date')     ? args[args.indexOf('--date')     + 1] : null
+const daysArg      = args.includes('--days')     ? Number(args[args.indexOf('--days')     + 1]) : 30
+const minEdge      = args.includes('--min-edge') ? Number(args[args.indexOf('--min-edge') + 1]) : 0.05
+const BET_SIZE     = args.includes('--bet-size') ? Number(args[args.indexOf('--bet-size') + 1]) : 100
+
+// Portfolio risk cap: max % of bankroll to risk per day.
+// Budget is allocated proportionally to each bet's edge — higher edge = more dollars.
+const DAILY_RISK_PCT = args.includes('--risk-pct')
+  ? Number(args[args.indexOf('--risk-pct') + 1]) / 100
+  : Number(process.env.DAILY_RISK_PCT || 0.20)  // default 20%
+const STARTING_BANKROLL = Number(process.env.STARTING_BANKROLL || 5000)
+const MIN_BET_FACE = 5   // don't log bets below $5 face value
 
 const TODAY    = dateArg || new Date().toISOString().slice(0, 10)
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
@@ -131,9 +139,45 @@ async function logEdges() {
     return
   }
 
+  // ── Edge-weighted portfolio allocation ────────────────────────────────────
+  // 1. Compute current bankroll
+  const settled = await db.all(
+    `SELECT SUM(pnl) as total FROM ks_bets WHERE result IS NOT NULL AND bet_date < ?`,
+    [TODAY],
+  )
+  const bankroll    = STARTING_BANKROLL + Number(settled[0]?.total || 0)
+  const dailyBudget = bankroll * DAILY_RISK_PCT
+
+  // 2. For each bet, compute fill fraction (what fraction of face value you put at risk)
+  //    fill = cost/face: YES → mid + halfSpread; NO → (100-mid) + halfSpread  (in cents /100)
+  const withFill = edgesJson.map(e => {
+    const mid  = (e.market_mid ?? 50) / 100
+    const hs   = (e.spread     ??  4) / 200
+    const fill = e.side === 'YES' ? mid + hs : (1 - mid) + hs
+    const edgeVal = Math.max(Number(e.edge) || 0, 0.001)  // floor to avoid div-by-zero
+    return { ...e, _fill: fill, _edgeVal: edgeVal }
+  })
+
+  // 3. Allocate budget proportional to edge (higher edge → more dollars at risk)
+  const totalEdge = withFill.reduce((s, e) => s + e._edgeVal, 0)
+  const sized = withFill.map(e => {
+    const riskAlloc = (e._edgeVal / totalEdge) * dailyBudget  // $ at risk for this bet
+    const faceValue = Math.round(riskAlloc / e._fill)         // face value of contract
+    return { ...e, _face: Math.max(faceValue, MIN_BET_FACE) }
+  })
+
+  console.log(
+    `[ks-bets] Bankroll $${bankroll.toFixed(0)} · daily budget $${dailyBudget.toFixed(0)} (${(DAILY_RISK_PCT*100).toFixed(0)}%) · ${sized.length} bets`
+  )
+  // Show top 5 allocations
+  const top5 = [...sized].sort((a,b) => b._face - a._face).slice(0, 5)
+  for (const e of top5) {
+    console.log(`  ${e.pitcher.padEnd(26)} ${e.side} ${e.strike}+  edge=${(e._edgeVal*100).toFixed(1)}¢  face=$${e._face}  risk=$${(e._face*e._fill).toFixed(0)}`)
+  }
+
   const now = new Date().toISOString()
   let logged = 0
-  for (const e of edgesJson) {
+  for (const e of sized) {
     await db.upsert('ks_bets', {
       bet_date:     TODAY,
       logged_at:    now,
@@ -158,28 +202,27 @@ async function logEdges() {
       savant_whiff: e.savant_whiff ?? null,
       savant_fbv:    e.savant_fbv    ?? null,
       whiff_flag:    e.whiff_flag    ?? null,
-      ticker:          e.ticker,
-      bet_size:        e.bet_size        ?? BET_SIZE,
-      kelly_fraction:  e.kelly_fraction  ?? null,
-      raw_model_prob:  e.raw_model_prob  ?? null,
-      capital_at_risk: e.bet_size != null && e.market_mid != null
-        ? Math.round(e.bet_size * e.market_mid) / 100
-        : null,
-      park_factor:   e.park_factor   ?? null,
-      weather_mult:  e.weather_note  ? (e.weather_mult ?? null) : null,
-      ump_factor:    e.ump_factor    ?? null,
-      ump_name:      e.ump_name      ?? null,
-      velo_adj:      e.velo_adj      ?? null,
+      ticker:        e.ticker,
+      bet_size:      e._face,
+      kelly_fraction: e.kelly_fraction ?? null,
+      raw_model_prob: e.raw_model_prob ?? null,
+      capital_at_risk: Math.round(e._face * e._fill * 100) / 100,
+      park_factor:    e.park_factor   ?? null,
+      weather_mult:   e.weather_note  ? (e.weather_mult ?? null) : null,
+      ump_factor:     e.ump_factor    ?? null,
+      ump_name:       e.ump_name      ?? null,
+      velo_adj:       e.velo_adj      ?? null,
       velo_trend_mph: e.velo_trend_mph ?? null,
-      bb_penalty:    e.bb_penalty    ?? null,
+      bb_penalty:     e.bb_penalty    ?? null,
       raw_adj_factor: e.raw_adj_factor ?? null,
-      spread:        e.spread        ?? null,
-      live_bet:      0,
+      spread:         e.spread        ?? null,
+      live_bet:       0,
     }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
     logged++
   }
 
-  console.log(`[ks-bets] Logged ${logged} edge bets for ${TODAY}`)
+  const totalRisk = sized.reduce((s, e) => s + e._face * e._fill, 0)
+  console.log(`[ks-bets] Logged ${logged} bets · total at risk $${totalRisk.toFixed(0)} of $${bankroll.toFixed(0)} (${(totalRisk/bankroll*100).toFixed(1)}%)`)
 
   // Cache today's Kalshi open prices for real-price backtest
   try {
