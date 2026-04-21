@@ -616,31 +616,49 @@ function updatePitcherCardLive(p) {
   const card = document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(String(p.pitcher_id))}"]`)
   if (!card) return
 
-  // Update Ks count in collapsed header
-  const ksBadge = card.querySelector('.pc-actual-ks')
-  if (ksBadge) {
-    ksBadge.innerHTML = p.is_final
-      ? `<strong>${p.ks}</strong> Ks`
-      : `<strong style="color:var(--accent)">${p.ks}</strong> Ks`
+  // ── K pace projection ─────────────────────────────────────────────────────
+  // k_rate (Ks/IP this game) × estimated remaining IP → projected final Ks
+  const AVG_PITCH_LIMIT = 95
+  let projKs = null
+  if (!p.is_final && p.ip > 0 && p.pitches > 0) {
+    const kPerIp        = p.ks / p.ip
+    const pitchesPerIp  = p.pitches / p.ip
+    const remainPitches = Math.max(0, AVG_PITCH_LIMIT - p.pitches)
+    const remainIp      = remainPitches / pitchesPerIp
+    projKs = Math.round((p.ks + kPerIp * remainIp) * 10) / 10
   }
 
-  // Live status badge (inning) — shown in collapsed header
-  let statusBadge = card.querySelector('.pc-live-badge')
-  if (!statusBadge) {
-    statusBadge = document.createElement('span')
-    card.querySelector('.pc-header-right')?.prepend(statusBadge)
-  }
-  statusBadge.textContent = p.inning
-  statusBadge.className = `pc-live-badge${p.is_final ? ' final' : ' pulsing'}`
+  // ── Score / danger flags ──────────────────────────────────────────────────
+  const scoreDiff = p.home_score != null && p.away_score != null
+    ? Math.abs(p.home_score - p.away_score) : null
+  const isBlowout = scoreDiff != null && scoreDiff >= 5 && !p.is_final
 
-  // TTO3 warning on meta line
-  if (p.tto3) {
-    const meta = card.querySelector('.pc-meta')
-    if (meta && !meta.querySelector('.tto-warn'))
-      meta.insertAdjacentHTML('beforeend', ' <span class="tto-warn">⚠ Pitch limit</span>')
+  // ── Build / update live info row in collapsed header ─────────────────────
+  let liveRow = card.querySelector('.pc-live-row')
+  if (!liveRow) {
+    liveRow = document.createElement('div')
+    liveRow.className = 'pc-live-row'
+    card.querySelector('.pc-header-left')?.appendChild(liveRow)
   }
 
-  // Update overall header bar
+  if (p.is_final) {
+    liveRow.innerHTML = `<span class="pc-live-chip final">Final · ${p.ks} Ks · ${p.ip.toFixed(1)} IP</span>`
+  } else if (!p.still_in) {
+    liveRow.innerHTML = `<span class="pc-live-chip pulled">⚠ PULLED · ${p.ks} Ks in ${p.ip.toFixed(1)} IP</span>`
+  } else {
+    const score   = p.home_score != null ? `${p.away_score}–${p.home_score}` : ''
+    const pitches = p.pitches    ? `${p.pitches}p` : ''
+    const pace    = projKs != null ? `proj <strong>${projKs}</strong>` : ''
+    const blowout = isBlowout ? ` <span class="pc-blowout-warn">⚠ blowout</span>` : ''
+    liveRow.innerHTML = `
+      <span class="pc-live-chip live">
+        ${p.inning} · <strong>${p.ks}</strong> Ks · ${p.ip.toFixed(1)} IP · ${pitches}
+        ${score ? `· ${score}` : ''}${blowout}
+      </span>
+      ${pace ? `<span class="pc-pace-chip">${pace} Ks</span>` : ''}`
+  }
+
+  // ── Update overall header bar ─────────────────────────────────────────────
   const overallFill = card.querySelector('.pc-overall-fill')
   if (overallFill) {
     let winning = 0
@@ -658,7 +676,7 @@ function updatePitcherCardLive(p) {
     overallFill.className = `pc-overall-fill ${pct >= 60 ? 'good' : winning === 0 && total > 0 ? 'bad' : ''}`
   }
 
-  // Update each bet row
+  // ── Update each bet row ───────────────────────────────────────────────────
   for (const bs of p.bet_statuses) {
     const row = card.querySelector(`.pc-bet-row[data-bet-id="${bs.id}"]`)
     if (!row) continue
@@ -667,24 +685,32 @@ function updatePitcherCardLive(p) {
 
     const isNo = row.dataset.side === 'NO'
 
-    // Progress bar
     const prog = row.querySelector('.pc-ks-progress')
-    if (prog && !p.is_final) {
-      const pct   = Math.min(bs.ks / bs.strike * 100, 100)
+    if (prog) {
+      const pct   = isNo
+        ? Math.min(bs.ks / bs.strike * 100, 100)   // fill = danger zone for NO
+        : Math.min(bs.ks / bs.strike * 100, 100)
       const fill  = prog.querySelector('.pc-ks-fill')
       const label = prog.querySelector('.pc-ks-label')
-      prog.hidden = false
-      if (fill)  { fill.style.width = `${pct}%`; fill.className = `pc-ks-fill${bs.needed === 0 && !isNo ? ' hit' : ''}` }
-      if (label) label.textContent = isNo ? `${bs.ks} Ks (need < ${bs.strike})` : `${bs.ks} / ${bs.strike} Ks`
+      const onTrack = !isNo ? bs.needed === 0 : bs.ks < bs.strike
+      if (fill) {
+        fill.style.width = `${pct}%`
+        fill.className   = `pc-ks-fill${!p.is_final && onTrack && !isNo ? ' hit' : isNo && bs.ks >= bs.strike ? ' miss' : ''}`
+      }
+      if (label) label.textContent = isNo
+        ? `${bs.ks} Ks (need < ${bs.strike})`
+        : `${bs.ks} / ${bs.strike} Ks`
     }
 
     if (!isNo) {
-      if (bs.needed === 0) { badge.textContent = '✓ HIT';  badge.className = 'pc-badge pc-badge--win' }
-      else                 { badge.textContent = `Need ${bs.needed} more` }
+      if (bs.needed === 0)      { badge.textContent = '✓ HIT';  badge.className = 'pc-badge pc-badge--win' }
+      else if (!p.still_in)     { badge.textContent = `Pulled — ${bs.ks} Ks`; badge.className = 'pc-badge pc-badge--loss' }
+      else                      { badge.textContent = `Need ${bs.needed} more` }
     } else {
-      if (bs.ks >= bs.strike)  { badge.textContent = '✗ Over'; badge.className = 'pc-badge pc-badge--loss' }
-      else if (p.is_final)     { badge.textContent = '✓ Safe'; badge.className = 'pc-badge pc-badge--win' }
-      else                     { badge.textContent = `At ${bs.ks} of ${bs.strike}` }
+      if (bs.ks >= bs.strike)   { badge.textContent = '✗ Over'; badge.className = 'pc-badge pc-badge--loss' }
+      else if (p.is_final)      { badge.textContent = '✓ Safe'; badge.className = 'pc-badge pc-badge--win' }
+      else if (!p.still_in)     { badge.textContent = `✓ Safe (out)`;  badge.className = 'pc-badge pc-badge--win' }
+      else                      { badge.textContent = `At ${bs.ks} of ${bs.strike}` }
     }
   }
 }
