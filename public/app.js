@@ -182,74 +182,77 @@ function buildPitcherCard(p) {
   card.className = `pitcher-card ${colorCls}`
   if (p.pitcher_id) card.dataset.pitcherId = p.pitcher_id
 
-  const λ = p.lambda != null ? p.lambda.toFixed(2) : '—'
-  const actualStr = p.actual_ks != null ? `${p.actual_ks} Ks` : '—'
-  const pnlCls    = p.pnl >= 0 ? 'good' : 'bad'
-  const pnlStr    = p.pnl != null
+  const pnlCls = p.pnl >= 0 ? 'good' : 'bad'
+  const pnlStr = p.pnl != null
     ? `<span class="${pnlCls}">${p.pnl >= 0 ? '+' : ''}${fmt$(p.pnl)}</span>`
-    : '<span class="muted">pending</span>'
+    : '<span class="muted">—</span>'
 
-  // Build bet rows
-  const betRows = p.bets.map(b => {
-    const sideCls  = b.side === 'YES' ? 'side-yes' : 'side-no'
-    const edgeCents = b.edge != null ? `${(b.edge * 100).toFixed(1)}¢` : '—'
-    const midCents  = b.market_mid != null ? `${b.market_mid}¢` : '—'
-    const modelPct  = b.model_prob != null ? `${(b.model_prob * 100).toFixed(1)}%` : '—'
-    const betAmt    = b.bet_size != null ? fmt$(b.bet_size) : '—'
+  // Actual Ks badge — shown when settled
+  const actualKsBadge = p.actual_ks != null
+    ? `<div class="pc-actual-ks">Threw <strong>${p.actual_ks}</strong> Ks</div>`
+    : ''
 
-    // Wager = what you put in; potential = what you'd win
-    const mid = b.market_mid != null ? Number(b.market_mid) : null
-    const face = b.bet_size != null ? Number(b.bet_size) : null
-    const wager    = mid != null && face != null ? fmt$(face * mid / 100) : '—'
-    const potWin   = mid != null && face != null ? fmt$(face * (100 - mid) / 100) : '—'
+  const betTiles = p.bets.map(b => {
+    const mid  = b.market_mid != null ? Number(b.market_mid) : null
+    const face = b.bet_size   != null ? Number(b.bet_size)   : null
+    const wager  = mid != null && face != null ? fmt$(face * mid / 100) : '—'
+    const potWin = mid != null && face != null ? fmt$(face * (100 - mid) / 100) : '—'
 
-    let resultHtml, pnlHtml
+    // Plain-English description of what we're betting on
+    const direction = b.side === 'YES'
+      ? `Will throw <strong>${b.strike}+</strong> strikeouts`
+      : `Will throw <strong>fewer than ${b.strike}</strong> strikeouts`
+
+    let resultBadge, moneyLine
     if (b.result === 'win') {
-      resultHtml = `<span class="result-win">WIN</span>`
-      pnlHtml    = `<span class="good">+${fmt$(b.pnl)}</span>`
+      resultBadge = `<span class="pc-badge pc-badge--win">✓ WIN</span>`
+      moneyLine   = `<span class="pc-money-win">+${fmt$(b.pnl)}</span>`
     } else if (b.result === 'loss') {
-      resultHtml = `<span class="result-loss">LOSS</span>`
-      pnlHtml    = `<span class="bad">${fmt$(b.pnl)}</span>`
+      resultBadge = `<span class="pc-badge pc-badge--loss">✗ LOSS</span>`
+      moneyLine   = `<span class="pc-money-loss">${fmt$(b.pnl)}</span>`
     } else {
-      resultHtml = `<span class="pending-pill">PENDING</span>`
-      pnlHtml    = `<span class="muted">win ${potWin}</span>`
+      resultBadge = `<span class="pc-badge pc-badge--pending">In Progress</span>`
+      moneyLine   = `<span class="pc-money-potential">Could win ${potWin}</span>`
     }
 
-    const rowCls = b.result === 'win' ? 'win-row' : b.result === 'loss' ? 'loss-row' : ''
-    return `<div class="ks-bet-row ${rowCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}">
-      <div>${b.strike}+ Ks</div>
-      <div class="${sideCls}">${b.side}</div>
-      <div>${midCents}</div>
-      <div>${edgeCents}</div>
-      <div>${modelPct}</div>
-      <div title="Wager">${wager}</div>
-      <div>${resultHtml}</div>
-      <div>${pnlHtml}</div>
+    const tileCls = b.result === 'win' ? 'pc-bet-tile--win'
+      : b.result === 'loss' ? 'pc-bet-tile--loss' : ''
+
+    return `<div class="pc-bet-tile ${tileCls}" data-bet-id="${b.id}">
+      <div class="pc-bet-desc">${direction}</div>
+      <div class="pc-bet-bottom">
+        <span class="pc-bet-wager">Bet ${wager}</span>
+        ${moneyLine}
+        ${resultBadge}
+      </div>
     </div>`
   }).join('')
+
+  // Summary line at bottom
+  let summaryLine = ''
+  if (p.pending > 0 && p.wins === 0 && p.losses === 0) {
+    summaryLine = `<span class="muted">${p.pending} bet${p.pending > 1 ? 's' : ''} in progress</span>`
+  } else {
+    const parts = []
+    if (p.wins   > 0) parts.push(`<span class="good">${p.wins} won</span>`)
+    if (p.losses > 0) parts.push(`<span class="bad">${p.losses} lost</span>`)
+    if (p.pending > 0) parts.push(`<span class="muted">${p.pending} pending</span>`)
+    summaryLine = parts.join(' · ')
+  }
 
   card.innerHTML = `
     <div class="pc-head">
       <div class="pc-head-left">
         <div class="pc-pitcher">${esc(p.pitcher_name)}</div>
-        <div class="pc-meta">${esc(p.game || p.team || '—')} · λ=${λ}</div>
+        <div class="pc-meta">${esc(p.game || p.team || '—')}</div>
       </div>
       <div class="pc-head-right">
-        <div class="pc-ks-badge">
-          <span class="ks-val">${p.actual_ks != null ? p.actual_ks : '—'}</span>
-          actual Ks
-        </div>
+        ${actualKsBadge}
       </div>
     </div>
-    <div class="ks-bet-table">
-      <div class="ks-bet-head">
-        <div>Strike</div><div>Side</div><div>Mid</div><div>Edge</div>
-        <div>Model</div><div>Bet</div><div>Result</div><div>P&amp;L</div>
-      </div>
-      ${betRows}
-    </div>
+    <div class="pc-bet-tiles">${betTiles}</div>
     <div class="pc-footer">
-      <div class="pc-wl">${p.wins}W · ${p.losses}L${p.pending > 0 ? ` · ${p.pending} pending` : ''}</div>
+      <div class="pc-wl">${summaryLine}</div>
       <div class="pc-total">${pnlStr}</div>
     </div>`
 

@@ -438,8 +438,8 @@ a:hover { text-decoration: underline; }
 /* Pitcher card */
 .pitcher-card {
   background: var(--card); border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
-  border-radius: var(--radius); overflow: hidden;
+  border-left: 4px solid var(--border);
+  border-radius: var(--radius-lg); overflow: hidden;
 }
 .pitcher-card.win    { border-left-color: var(--good); }
 .pitcher-card.loss   { border-left-color: var(--bad); }
@@ -447,55 +447,61 @@ a:hover { text-decoration: underline; }
 .pitcher-card.pending { border-left-color: var(--accent); }
 
 .pc-head {
-  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
-  padding: 14px 18px; border-bottom: 1px solid var(--border-2);
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  padding: 16px 20px; border-bottom: 1px solid var(--border-2);
 }
-.pc-head-left .pc-pitcher { font-size: 16px; font-weight: 700; color: var(--text); }
-.pc-head-left .pc-meta    { font-size: 12px; color: var(--text-dim); margin-top: 3px; font-family: var(--mono); }
-.pc-head-right { display: flex; align-items: center; gap: 12px; }
-.pc-ks-badge {
+.pc-head-left .pc-pitcher { font-size: 20px; font-weight: 700; color: var(--text); }
+.pc-head-left .pc-meta    { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
+.pc-head-right { display: flex; align-items: center; }
+.pc-actual-ks {
   background: var(--card-2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 6px 12px; font-family: var(--mono); font-size: 13px;
-  color: var(--text-dim); text-align: center;
+  border-radius: 8px; padding: 6px 14px; font-size: 14px; color: var(--text-dim);
 }
-.pc-ks-badge .ks-val { font-size: 20px; font-weight: 700; color: var(--text); display: block; }
+.pc-actual-ks strong { color: var(--text); font-size: 18px; }
 
-/* Bet table inside pitcher card */
-.ks-bet-table { font-family: var(--mono); font-size: 13px; }
-.ks-bet-head, .ks-bet-row {
-  display: grid;
-  grid-template-columns: 1.2fr 0.7fr 0.7fr 0.8fr 0.7fr 0.8fr 1.1fr 0.9fr;
-  gap: 8px; padding: 9px 18px; align-items: center;
-}
-.ks-bet-head {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-  color: var(--text-dim); border-bottom: 1px solid var(--border-2);
-  background: var(--card-2);
-}
-.ks-bet-row { border-bottom: 1px solid var(--border-2); transition: background 0.1s; }
-.ks-bet-row:hover { background: var(--card-2); }
-.ks-bet-row:last-child { border-bottom: none; }
-.ks-bet-row.win-row  { border-left: 2px solid var(--good); }
-.ks-bet-row.loss-row { border-left: 2px solid var(--bad); }
+/* Bet tiles — one per bet, plain English */
+.pc-bet-tiles { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
 
-.ks-bet-row .side-yes { color: var(--good); font-weight: 700; }
-.ks-bet-row .side-no  { color: var(--accent); font-weight: 700; }
-.ks-bet-row .result-win  { color: var(--good); font-weight: 700; }
-.ks-bet-row .result-loss { color: var(--bad); font-weight: 700; }
-.ks-bet-row .pending-pill {
-  display: inline-block; background: rgba(88,166,255,0.12);
-  color: var(--accent); padding: 2px 8px; border-radius: 4px; font-size: 11px;
+.pc-bet-tile {
+  background: var(--card-2); border: 1px solid var(--border-2);
+  border-radius: 10px; padding: 14px 16px;
 }
+.pc-bet-tile--win  { border-color: rgba(63,185,80,0.35); background: rgba(63,185,80,0.07); }
+.pc-bet-tile--loss { border-color: rgba(248,81,73,0.35); background: rgba(248,81,73,0.07); }
+
+.pc-bet-desc {
+  font-size: 16px; color: var(--text); margin-bottom: 10px; line-height: 1.4;
+}
+.pc-bet-desc strong { font-size: 18px; color: var(--text); }
+
+.pc-bet-bottom {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.pc-bet-wager {
+  font-size: 15px; color: var(--text-dim);
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px;
+}
+.pc-money-potential { font-size: 15px; color: var(--accent); font-weight: 600; }
+.pc-money-win       { font-size: 16px; color: var(--good);   font-weight: 700; }
+.pc-money-loss      { font-size: 16px; color: var(--bad);    font-weight: 700; }
+
+.pc-badge {
+  font-size: 13px; font-weight: 700; padding: 5px 12px;
+  border-radius: 20px; letter-spacing: 0.3px; margin-left: auto;
+}
+.pc-badge--win     { background: rgba(63,185,80,0.2);  color: var(--good); }
+.pc-badge--loss    { background: rgba(248,81,73,0.2);  color: var(--bad);  }
+.pc-badge--pending { background: rgba(88,166,255,0.15); color: var(--accent); }
 
 /* Pitcher card footer */
 .pc-footer {
   display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
-  padding: 10px 18px; background: var(--card-2);
-  border-top: 1px solid var(--border-2);
-  font-family: var(--mono); font-size: 13px;
+  padding: 12px 20px; background: var(--card-2);
+  border-top: 1px solid var(--border-2); font-size: 14px;
 }
-.pc-footer .pc-total { font-weight: 700; font-size: 15px; }
-.pc-footer .pc-wl { color: var(--text-dim); }
+.pc-footer .pc-total { font-weight: 700; font-size: 17px; }
+.pc-footer .pc-wl    { color: var(--text-dim); font-size: 14px; }
 
 /* ── Monthly table ── */
 .ks-monthly-table { font-family: var(--mono); font-size: 13px; }
@@ -710,7 +716,7 @@ a:hover { text-decoration: underline; }
   .games-grid { grid-template-columns: 1fr; }
   .bankroll-value { font-size: 32px; }
   .bt-game-head, .bt-game-row { grid-template-columns: 0.8fr 1.4fr 0.6fr 0.5fr 0.6fr 0.6fr 0.5fr 0.6fr; font-size: 11px; }
-  .ks-bet-head, .ks-bet-row { grid-template-columns: 1fr 0.7fr 0.7fr 0.7fr 0.7fr 0.9fr 1fr 0.9fr; font-size: 12px; }
+  .pc-bet-tiles { padding: 10px 12px; }
   .ks-monthly-head, .ks-monthly-row { grid-template-columns: 1fr 0.7fr 0.9fr 0.8fr 1fr 0.7fr; font-size: 11px; }
   .ks-monthly-head > :nth-child(7), .ks-monthly-row > :nth-child(7),
   .ks-monthly-head > :nth-child(8), .ks-monthly-row > :nth-child(8) { display: none; }
@@ -729,8 +735,8 @@ a:hover { text-decoration: underline; }
   .bankroll-value { font-size: 36px; }
   .bankroll-deltas { width: 100%; justify-content: space-between; gap: 8px; }
   .delta b { font-size: 15px; }
-  .ks-bet-head { display: none; }
-  .ks-bet-row { grid-template-columns: 1fr 1fr; row-gap: 4px; }
+  .pc-bet-desc { font-size: 15px; }
+  .pc-bet-desc strong { font-size: 16px; }
   .log-filter-row input, .log-filter-row select { min-width: calc(50% - 5px); }
   .feat-row { grid-template-columns: 130px 1fr 60px; }
   .ks-stats-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
