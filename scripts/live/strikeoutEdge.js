@@ -913,8 +913,11 @@ async function main() {
         const noMid = mid != null ? 100 - mid : null
         const noCapKills = edge.side === 'NO' && noMid != null && noMid > 80
 
-        const hasEdge       = !isLocked && !noCapKills && edge.bestEdge >= edgeThreshold
-        const hasRawEdge    = !isLocked && !hasEdge && (noCapKills || edge.bestEdge >= MIN_EDGE)  // raw edge but blocked
+        // Skip markets with too little volume — price isn't real
+        const tooThin = mkt.volume != null && mkt.volume < 10
+
+        const hasEdge       = !isLocked && !noCapKills && !tooThin && edge.bestEdge >= edgeThreshold
+        const hasRawEdge    = !isLocked && !hasEdge && (noCapKills || tooThin || edge.bestEdge >= MIN_EDGE)
 
         console.log(
           `    ${mkt.strike}+ Ks: model=${(modelProb*100).toFixed(1)}%` +
@@ -923,14 +926,14 @@ async function main() {
           ` | edge(${edge.side})=${(edge.bestEdge*100).toFixed(1)}¢` +
           ` | thr=${(edgeThreshold*100).toFixed(1)}¢` +
           ` | vol=${mkt.volume != null ? Math.round(mkt.volume) : 'n/a'}` +
-          (isLocked ? ' [locked]' : hasEdge ? ' ← EDGE' : noCapKills ? ' [NO-cap>80¢]' : hasRawEdge ? ' [spread-kills-edge]' : '')
+          (isLocked ? ' [locked]' : hasEdge ? ' ← EDGE' : noCapKills ? ' [NO-cap>80¢]' : tooThin ? ' [thin<10]' : hasRawEdge ? ' [spread-kills-edge]' : '')
         )
 
         if (hasEdge) {
           pitcherEdgesThisGame.push({
             game: label, pitcher: meta.name, pitcher_id: String(id), hand: meta.hand, team,
             strike: mkt.strike, side: edge.side,
-            model_prob: modelProb, market_mid: mid,
+            model_prob: modelProb, raw_model_prob: rawModelProb, market_mid: mid,
             edge: edge.bestEdge, spread: spread,
             volume: mkt.volume, ticker: mkt.ticker,
             lambda, lambda_base: lambdaBase, k9, k9_l5, k9_season, k9_career,
@@ -975,6 +978,7 @@ async function main() {
             kelly_fraction:  k?.kellyFraction ?? null,
             kelly_scale:     k?.scaleFactor ?? null,
             kelly_rationale: k?.rationale ?? null,
+            raw_model_prob:  e.rawModelProb ?? null,
           })
         }
       }

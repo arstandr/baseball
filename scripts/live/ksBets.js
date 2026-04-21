@@ -90,6 +90,7 @@ async function ensureTable() {
   for (const col of [
     'park_factor REAL', 'weather_mult REAL', 'ump_factor REAL', 'ump_name TEXT',
     'velo_adj REAL', 'velo_trend_mph REAL', 'bb_penalty REAL', 'raw_adj_factor REAL', 'spread REAL',
+    'raw_model_prob REAL',  // pre-shrinkage probability (honest calibration)
   ]) {
     try { await db.run(`ALTER TABLE ks_bets ADD COLUMN ${col}`) } catch {}
   }
@@ -157,9 +158,10 @@ async function logEdges() {
       savant_whiff: e.savant_whiff ?? null,
       savant_fbv:    e.savant_fbv    ?? null,
       whiff_flag:    e.whiff_flag    ?? null,
-      ticker:        e.ticker,
-      bet_size:      e.bet_size      ?? BET_SIZE,
-      kelly_fraction: e.kelly_fraction ?? null,
+      ticker:          e.ticker,
+      bet_size:        e.bet_size        ?? BET_SIZE,
+      kelly_fraction:  e.kelly_fraction  ?? null,
+      raw_model_prob:  e.raw_model_prob  ?? null,
       capital_at_risk: e.bet_size != null && e.market_mid != null
         ? Math.round(e.bet_size * e.market_mid) / 100
         : null,
@@ -228,48 +230,47 @@ async function isGameFinal(gamePk) {
   } catch { return false }
 }
 
-async function fetchActualKs(pitcherName, gameDate) {
-  // Search games table for the pitcher on this date, then fetch box score
+async function fetchActualKs(pitcherId, pitcherName, gameDate) {
   try {
     const games = await db.all(
-      `SELECT id, pitcher_home_id, pitcher_away_id, team_home, team_away
-         FROM games WHERE date = ?`,
+      `SELECT id, pitcher_home_id, pitcher_away_id FROM games WHERE date = ?`,
       [gameDate],
     )
 
     for (const g of games) {
-      // Only settle from Final games
       const final = await isGameFinal(g.id)
       if (!final) continue
 
-      for (const [pid, side] of [[g.pitcher_home_id, 'home'], [g.pitcher_away_id, 'away']]) {
-        if (!pid) continue
-        // Fetch pitcher name to match
-        try {
-          const res = await axios.get(`${MLB_BASE}/people/${pid}`, {
-            timeout: 8000, validateStatus: s => s >= 200 && s < 500,
-          })
-          const name = res.data?.people?.[0]?.fullName || ''
-          if (!name.toLowerCase().includes(pitcherName.split(' ').pop()?.toLowerCase() || '')) continue
+      // Determine side using pitcher_id (exact match, no name guessing)
+      const side = g.pitcher_home_id === pitcherId ? 'home'
+                 : g.pitcher_away_id === pitcherId ? 'away' : null
+      if (!side) continue
 
-          // Fetch game box score for Ks
-          const box = await axios.get(`${MLB_BASE}/game/${g.id}/boxscore`, {
-            timeout: 10000, validateStatus: s => s >= 200 && s < 500,
-          })
-          const pitchers = box.data?.teams?.[side]?.pitchers || []
-          const playerStats = box.data?.teams?.[side]?.players || {}
+      try {
+        const box = await axios.get(`${MLB_BASE}/game/${g.id}/boxscore`, {
+          timeout: 10000, validateStatus: s => s >= 200 && s < 500,
+        })
+        const playerStats = box.data?.teams?.[side]?.players || {}
 
-          // Find this pitcher's K total
-          for (const pitcherId of pitchers) {
-            const player = playerStats[`ID${pitcherId}`]
-            if (!player) continue
-            const pName = player.person?.fullName || ''
-            if (!pName.toLowerCase().includes(pitcherName.split(' ').pop()?.toLowerCase() || '')) continue
-            const ks = player.stats?.pitching?.strikeOuts
-            if (ks != null) return { ks: Number(ks), pitcher_id: String(pitcherId) }
+        // Look up by exact player ID first
+        const player = playerStats[`ID${pitcherId}`]
+        if (player) {
+          const ks = player.stats?.pitching?.strikeOuts
+          if (ks != null) return { ks: Number(ks) }
+        }
+
+        // Fallback: name match (handles edge cases where box score ID differs)
+        const pitchers = box.data?.teams?.[side]?.pitchers || []
+        const lastName = pitcherName.split(' ').pop()?.toLowerCase() || ''
+        for (const pid of pitchers) {
+          const p = playerStats[`ID${pid}`]
+          if (!p) continue
+          if ((p.person?.fullName || '').toLowerCase().includes(lastName)) {
+            const ks = p.stats?.pitching?.strikeOuts
+            if (ks != null) return { ks: Number(ks) }
           }
-        } catch { continue }
-      }
+        }
+      } catch { continue }
     }
   } catch {}
   return null
@@ -289,37 +290,57 @@ async function settleBets() {
 
   console.log(`[ks-bets] Settling ${open.length} open bets for ${TODAY}`)
 
-  // Group by pitcher to avoid redundant box score fetches
+  // Check for postponed games — void those bets rather than leaving them open forever
+  const postponed = await db.all(
+    `SELECT pitcher_home_id, pitcher_away_id FROM games WHERE date = ? AND status = 'postponed'`,
+    [TODAY],
+  )
+  const postponedPitcherIds = new Set(postponed.flatMap(g => [g.pitcher_home_id, g.pitcher_away_id].filter(Boolean)))
+
+  // Group by pitcher_id to avoid redundant box score fetches
   const pitcherKs = new Map()
   for (const bet of open) {
-    if (!pitcherKs.has(bet.pitcher_name)) {
-      const result = await fetchActualKs(bet.pitcher_name, bet.bet_date)
-      pitcherKs.set(bet.pitcher_name, result)
-      if (result) {
-        console.log(`  ${bet.pitcher_name}: ${result.ks} Ks`)
+    const key = bet.pitcher_id || bet.pitcher_name
+    if (!pitcherKs.has(key)) {
+      if (postponedPitcherIds.has(bet.pitcher_id)) {
+        pitcherKs.set(key, 'postponed')
+        console.log(`  ${bet.pitcher_name}: POSTPONED — voiding bet`)
       } else {
-        console.log(`  ${bet.pitcher_name}: could not find K total`)
+        const result = await fetchActualKs(bet.pitcher_id, bet.pitcher_name, bet.bet_date)
+        pitcherKs.set(key, result)
+        if (result) console.log(`  ${bet.pitcher_name}: ${result.ks} Ks`)
+        else        console.log(`  ${bet.pitcher_name}: game not final yet`)
       }
     }
   }
 
   const now = new Date().toISOString()
-  let wins = 0, losses = 0, unknown = 0
+  let wins = 0, losses = 0, unknown = 0, voided = 0
 
   for (const bet of open) {
-    const data = pitcherKs.get(bet.pitcher_name)
+    const key  = bet.pitcher_id || bet.pitcher_name
+    const data = pitcherKs.get(key)
+
+    if (data === 'postponed') {
+      await db.run(`UPDATE ks_bets SET result='void', settled_at=?, pnl=0 WHERE id=?`, [now, bet.id])
+      voided++
+      continue
+    }
     if (!data) { unknown++; continue }
 
     const actualKs = data.ks
-    const hit = actualKs >= bet.strike   // did pitcher reach the threshold?
+    const hit = actualKs >= bet.strike
     const won = bet.side === 'YES' ? hit : !hit
 
-    // P&L: if YES at mid price p, win = bet_size * (1 - p/100), lose = -bet_size * p/100
-    // Approximation using market_mid as fill price
-    const p = bet.market_mid != null ? bet.market_mid / 100 : bet.model_prob
+    // Correct P&L: use actual fill price (ask), not mid
+    // YES ask = mid + spread/2;  NO ask = (100 - mid) + spread/2  (both in cents)
+    const spread     = bet.spread ?? 4   // default 4¢ if spread wasn't captured
+    const halfSpread = spread / 2 / 100
+    const mid        = bet.market_mid != null ? bet.market_mid / 100 : (bet.model_prob ?? 0.5)
+    const fillFraction = bet.side === 'YES' ? mid + halfSpread : (1 - mid) + halfSpread
     const pnl = won
-      ? bet.bet_size * (1 - p)
-      : -bet.bet_size * p
+      ? bet.bet_size * (1 - fillFraction)
+      : -bet.bet_size * fillFraction
 
     await db.run(
       `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=?`,
@@ -328,7 +349,7 @@ async function settleBets() {
     if (won) wins++; else losses++
   }
 
-  console.log(`[ks-bets] Settled: ${wins} wins, ${losses} losses, ${unknown} unknown`)
+  console.log(`[ks-bets] Settled: ${wins} wins, ${losses} losses, ${unknown} pending, ${voided} voided (postponed)`)
 
   // Backfill outcomes into Kalshi price cache
   try {
