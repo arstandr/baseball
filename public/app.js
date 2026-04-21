@@ -42,6 +42,19 @@ function wireTabs() {
   document.querySelectorAll('.mode[data-view]').forEach(btn => {
     btn.addEventListener('click', () => applyView(btn.dataset.view))
   })
+
+  // Expandable bet tile detail drawers (event delegation, works for dynamic content)
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('.pc-detail-toggle')
+    if (!btn) return
+    const tile   = btn.closest('.pc-bet-tile')
+    const detail = tile?.querySelector('.pc-bet-detail')
+    if (!detail) return
+    const isOpen = detail.classList.toggle('open')
+    detail.hidden = false        // remove HTML hidden attr so CSS transition works
+    btn.classList.toggle('open', isOpen)
+    btn.title = isOpen ? 'Hide details' : 'Show details'
+  })
 }
 
 function applyView(view, refresh = true) {
@@ -218,12 +231,42 @@ function buildPitcherCard(p) {
     const tileCls = b.result === 'win' ? 'pc-bet-tile--win'
       : b.result === 'loss' ? 'pc-bet-tile--loss' : ''
 
+    // Technical detail drawer (hidden by default, shown on click)
+    const modelPct    = b.model_prob    != null ? `${(b.model_prob * 100).toFixed(1)}%` : '—'
+    const rawPct      = b.raw_model_prob != null ? `${(b.raw_model_prob * 100).toFixed(1)}%` : modelPct
+    const edgeCents   = b.edge          != null ? `+${(b.edge * 100).toFixed(1)}¢` : '—'
+    const midCents    = b.market_mid    != null ? `${b.market_mid}¢` : '—'
+    const spreadCents = b.spread        != null ? `${b.spread}¢` : '—'
+    const kellyPct    = b.kelly_fraction != null ? `${(b.kelly_fraction * 100).toFixed(1)}%` : '—'
+    const lambdaVal   = b.lambda        != null ? b.lambda.toFixed(2) : '—'
+    const parkVal     = b.park_factor   != null && b.park_factor !== 1 ? `×${b.park_factor.toFixed(2)}` : 'neutral'
+    const umpVal      = b.ump_name      != null ? `${b.ump_name} (×${b.ump_factor?.toFixed(2) ?? '—'})` : '—'
+    const veloVal     = b.velo_trend_mph != null ? `${b.velo_trend_mph >= 0 ? '+' : ''}${b.velo_trend_mph.toFixed(1)} mph` : '—'
+    const wxVal       = b.weather_mult  != null && b.weather_mult !== 1 ? `×${b.weather_mult.toFixed(2)}` : 'neutral'
+
     return `<div class="pc-bet-tile ${tileCls}" data-bet-id="${b.id}">
-      <div class="pc-bet-desc">${direction}</div>
-      <div class="pc-bet-bottom">
-        <span class="pc-bet-wager">Bet ${wager}</span>
-        ${moneyLine}
-        ${resultBadge}
+      <div class="pc-bet-main">
+        <div class="pc-bet-desc">${direction}</div>
+        <div class="pc-bet-bottom">
+          <span class="pc-bet-wager">Bet ${wager}</span>
+          ${moneyLine}
+          ${resultBadge}
+          <button class="pc-detail-toggle" title="Show details">▼</button>
+        </div>
+      </div>
+      <div class="pc-bet-detail" hidden>
+        <div class="pc-detail-grid">
+          <div class="pc-detail-item"><span>Model probability</span><b>${modelPct}${b.raw_model_prob != null ? ` <span class="muted" style="font-size:12px">(raw ${rawPct})</span>` : ''}</b></div>
+          <div class="pc-detail-item"><span>Market price</span><b>${midCents}</b></div>
+          <div class="pc-detail-item"><span>Our edge</span><b class="good">${edgeCents}</b></div>
+          <div class="pc-detail-item"><span>Spread</span><b>${spreadCents}</b></div>
+          <div class="pc-detail-item"><span>Kelly fraction</span><b>${kellyPct}</b></div>
+          <div class="pc-detail-item"><span>Lambda (exp Ks)</span><b>${lambdaVal}</b></div>
+          <div class="pc-detail-item"><span>Park factor</span><b>${parkVal}</b></div>
+          <div class="pc-detail-item"><span>Umpire</span><b>${umpVal}</b></div>
+          <div class="pc-detail-item"><span>Velo trend</span><b>${veloVal}</b></div>
+          <div class="pc-detail-item"><span>Weather</span><b>${wxVal}</b></div>
+        </div>
       </div>
     </div>`
   }).join('')
