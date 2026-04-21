@@ -751,7 +751,10 @@ a:hover { text-decoration: underline; }
   transition: border-color 0.15s, background 0.15s;
 }
 .lb-chip:hover { border-color: var(--accent); background: rgba(0,212,170,0.06); }
-.lb-chip--live { border-color: rgba(0,212,170,0.3); }
+.lb-chip--live {
+  border-color: rgba(0,212,170,0.5);
+  box-shadow: 0 0 8px rgba(0,212,170,0.25), inset 0 0 0 1px rgba(0,212,170,0.1);
+}
 .lb-chip--final { opacity: 0.55; }
 .lb-name { font-size: 12px; font-weight: 700; color: var(--text); }
 .lb-status { font-size: 11px; font-family: var(--mono); }
