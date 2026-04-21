@@ -204,14 +204,12 @@ async function loadDay(date) {
     </div>
     <div class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>`
 
-  // Sort by total stake descending so Watch games (highest $) are always first
+  // Sort by game_time ascending (earliest games first) — live polling switches to live-first
   const sorted = [...data.pitchers].sort((a, b) => {
-    const stakeOf = p => p.bets.reduce((s, b) => {
-      const mid = b.market_mid != null ? Number(b.market_mid) / 100 : 0.5
-      const hs  = (b.spread ?? 4) / 200
-      return s + (b.bet_size ?? 0) * (b.side === 'YES' ? mid + hs : (1 - mid) + hs)
-    }, 0)
-    return stakeOf(b) - stakeOf(a)
+    if (a.game_time && b.game_time) return a.game_time.localeCompare(b.game_time)
+    if (a.game_time) return -1
+    if (b.game_time) return 1
+    return 0
   })
 
   for (const p of sorted) {
@@ -366,9 +364,10 @@ function buildPitcherCard(p) {
 
   // Average model probability across pending bets → "coverage chance"
   const pendingBets = p.bets.filter(b => !b.result)
+  const coverProb = b => b.side === 'NO' ? 1 - (b.model_prob ?? 0.5) : (b.model_prob ?? 0.5)
   const avgCoverage = pendingBets.length > 0
-    ? pendingBets.reduce((s, b) => s + (b.model_prob ?? 0.5), 0) / pendingBets.length
-    : p.bets.length > 0 ? p.bets.reduce((s, b) => s + (b.model_prob ?? 0.5), 0) / p.bets.length : null
+    ? pendingBets.reduce((s, b) => s + coverProb(b), 0) / pendingBets.length
+    : p.bets.length > 0 ? p.bets.reduce((s, b) => s + coverProb(b), 0) / p.bets.length : null
   const coverPct = avgCoverage != null ? Math.round(avgCoverage * 100) : null
   const coverCls = coverPct >= 60 ? 'good' : coverPct >= 40 ? 'warn' : 'bad'
 
@@ -466,8 +465,11 @@ function buildPitcherCard(p) {
       : ''
 
     const rowCls = b.result === 'win' ? 'pc-bet-row--win' : b.result === 'loss' ? 'pc-bet-row--loss' : ''
+    const tooltipText = b.side === 'YES'
+      ? `${firstName} needs at least ${b.strike} strikeout${b.strike !== 1 ? 's' : ''} for this bet to win`
+      : `${firstName} must stay under ${b.strike} strikeout${b.strike !== 1 ? 's' : ''} for this NO bet to win`
 
-    const betCoverPct = b.model_prob != null ? Math.round(b.model_prob * 100) : null
+    const betCoverPct = b.model_prob != null ? Math.round((b.side === 'NO' ? 1 - b.model_prob : b.model_prob) * 100) : null
     const betCoverCls = betCoverPct >= 60 ? 'good' : betCoverPct >= 40 ? 'warn' : 'bad'
     const betCoverTag = betCoverPct != null ? `<span class="pc-bet-cover ${betCoverCls}">${betCoverPct}%</span>` : ''
 
@@ -493,7 +495,7 @@ function buildPitcherCard(p) {
       </div>`
     }
 
-    return `<div class="pc-bet-row ${rowCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}">
+    return `<div class="pc-bet-row ${rowCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}" title="${esc(tooltipText)}">
       <div class="pc-bet-row-main">
         <div class="pc-bet-row-left">
           <span class="pc-bet-row-desc">${direction}</span>
@@ -771,6 +773,34 @@ function updatePitcherCardLive(p) {
       else if (!p.still_in)     { badge.textContent = `✓ Safe (out)`;  badge.className = 'pc-badge pc-badge--win' }
       else                      { badge.textContent = `At ${bs.ks} of ${bs.strike}` }
     }
+  }
+
+  // ── Update live coverage chips ────────────────────────────────────────────
+  let coverSum = 0, coverCount = 0
+  for (const bs of p.bet_statuses) {
+    const row = card.querySelector(`.pc-bet-row[data-bet-id="${bs.id}"]`)
+    if (!row) continue
+    const coverChip = row.querySelector('.pc-bet-cover')
+    if (!coverChip) continue
+    const isNo = row.dataset.side === 'NO'
+    let pct
+    const done = p.is_final || !p.still_in
+    if (done) {
+      pct = !isNo ? (bs.ks >= bs.strike ? 100 : 0) : (bs.ks < bs.strike ? 100 : 0)
+    } else {
+      pct = !isNo
+        ? Math.min(99, Math.round(bs.ks / bs.strike * 100))
+        : Math.max(1, Math.round((1 - bs.ks / bs.strike) * 100))
+    }
+    coverChip.textContent = `${pct}%`
+    coverChip.className = `pc-bet-cover ${pct >= 60 ? 'good' : pct >= 40 ? 'warn' : 'bad'}`
+    if (!bs.result) { coverSum += pct; coverCount++ }
+  }
+  const coverageEl = card.querySelector('.pc-coverage')
+  if (coverageEl && coverCount > 0) {
+    const avgPct = Math.round(coverSum / coverCount)
+    coverageEl.textContent = `${avgPct}% cover`
+    coverageEl.className = `pc-coverage ${avgPct >= 60 ? 'good' : avgPct >= 40 ? 'warn' : 'bad'}`
   }
 }
 
