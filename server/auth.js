@@ -13,8 +13,11 @@ import * as db from '../lib/db.js'
 // Session middleware
 // ------------------------------------------------------------------
 export function sessionMiddleware() {
-  const secret = process.env.SESSION_SECRET
-  if (!secret) throw new Error('SESSION_SECRET must be set in env')
+  let secret = process.env.SESSION_SECRET
+  if (!secret) {
+    secret = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+    console.warn('[auth] SESSION_SECRET not set — using ephemeral secret (sessions will not survive restarts)')
+  }
   const isProd = process.env.NODE_ENV === 'production'
   return session({
     secret,
