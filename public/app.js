@@ -336,6 +336,7 @@ function buildPitcherCard(p) {
   card.className = `pitcher-card ${colorCls}`
   if (p.pitcher_id) card.dataset.pitcherId = p.pitcher_id
   if (p.game_time)  card.dataset.gameTime  = p.game_time
+  card.dataset.coverage = coverPct ?? 0
 
   // ── Collapsed header ────────────────────────────────────────────────────
   const pnlCls = p.pnl >= 0 ? 'good' : 'bad'
@@ -598,7 +599,7 @@ async function pollLive(date) {
       const bFinal = !!b.querySelector('.pc-live-chip.final')
       if (aLive  !== bLive)  return aLive  ? -1 : 1
       if (aFinal !== bFinal) return aFinal ?  1 : -1
-      if (aLive  && bLive)   return Number(b.dataset.stake || 0) - Number(a.dataset.stake || 0)
+      if (aLive  && bLive)   return Number(b.dataset.coverage || 0) - Number(a.dataset.coverage || 0)
       const at = a.dataset.gameTime || '', bt = b.dataset.gameTime || ''
       if (at && bt) return at.localeCompare(bt)
       return at ? -1 : bt ? 1 : 0
@@ -870,6 +871,7 @@ function updatePitcherCardLive(p) {
     const avgPct = Math.round(coverSum / coverCount)
     coverageEl.textContent = `${avgPct}% cover`
     coverageEl.className = `pc-coverage ${avgPct >= 60 ? 'good' : avgPct >= 40 ? 'warn' : 'bad'}`
+    card.dataset.coverage = avgPct
   }
 }
 
