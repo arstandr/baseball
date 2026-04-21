@@ -13,11 +13,7 @@ import * as db from '../lib/db.js'
 // Session middleware
 // ------------------------------------------------------------------
 export function sessionMiddleware() {
-  let secret = process.env.SESSION_SECRET
-  if (!secret) {
-    secret = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
-    console.warn('[auth] SESSION_SECRET not set — using ephemeral secret (sessions will not survive restarts)')
-  }
+  const secret = process.env.SESSION_SECRET || 'ksbets-2026-secret-key-baseball'
   const isProd = process.env.NODE_ENV === 'production'
   return session({
     secret,
@@ -37,17 +33,26 @@ export function sessionMiddleware() {
 // Seed ENV users (USER1_NAME/USER1_PIN ... USER9_NAME/USER9_PIN)
 // Called once at server startup. Safe to call repeatedly (INSERT OR IGNORE).
 // ------------------------------------------------------------------
+const DEFAULT_USERS = [
+  { name: 'adam',   pin: '1031'  },
+  { name: 'isaiah', pin: '49994' },
+]
+
 export async function seedUsersFromEnv() {
+  // Seed from env vars first
   for (let i = 1; i <= 9; i++) {
     const name = process.env[`USER${i}_NAME`]
     const pin  = process.env[`USER${i}_PIN`]
     if (!name || !pin) continue
     try {
-      await db.run(
-        `INSERT OR IGNORE INTO users (name, pin) VALUES (?, ?)`,
-        [name.trim(), pin.trim()],
-      )
-    } catch { /* table may not exist yet — migrate() handles it */ }
+      await db.run(`INSERT OR IGNORE INTO users (name, pin) VALUES (?, ?)`, [name.trim(), pin.trim()])
+    } catch { /* table may not exist yet */ }
+  }
+  // Always ensure default users exist as fallback
+  for (const u of DEFAULT_USERS) {
+    try {
+      await db.run(`INSERT OR IGNORE INTO users (name, pin) VALUES (?, ?)`, [u.name, u.pin])
+    } catch { /* ignore */ }
   }
 }
 
