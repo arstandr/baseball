@@ -112,8 +112,8 @@
 </head>
 <body>
   <div class="card">
-    <div class="logo">MLBIE</div>
-    <div class="tagline">Betting Intelligence Engine</div>
+    <div class="logo">Money Tree 2.0</div>
+    <div class="tagline">Strikeout Intelligence</div>
 
     <form id="loginForm">
       <div class="field">
@@ -131,9 +131,15 @@
 
     <div class="err" id="err"></div>
     <div class="footer">Authorized access only</div>
+    <div class="footer" id="deploy-date" style="margin-top:6px;opacity:.45;font-size:11px"></div>
   </div>
 
   <script>
+    fetch('/api/deploy-date').then(r=>r.json()).then(d => {
+      const el = document.getElementById('deploy-date')
+      if (el) el.textContent = 'Deployed ' + d.date
+    }).catch(()=>{})
+
     const form = document.getElementById('loginForm')
     const errEl = document.getElementById('err')
     const btn = document.getElementById('submitBtn')

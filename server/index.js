@@ -55,6 +55,10 @@ export function createApp() {
     res.sendFile(path.join(PUBLIC_DIR, 'login.html'))
   })
 
+  // Public deploy-date endpoint for login page footer
+  const _startedAt = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+  app.get('/api/deploy-date', (req, res) => res.json({ date: _startedAt }))
+
   // Static assets that aren't behind auth (css/js shipped to the browser).
   // The login page's /style.css and friends must be reachable without a session.
   app.use('/style.css', express.static(path.join(PUBLIC_DIR, 'style.css')))
