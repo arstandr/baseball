@@ -160,7 +160,7 @@ async function refreshDates() {
 
 async function loadDay(date) {
   stopLivePolling()
-  const data = await fetchJson(`/api/ks/daily?date=${date}`).catch(() => null)
+  const data = await fetchJson(`/api/ks/daily?date=${date}`).catch(err => { console.error('[loadDay] fetch failed:', err); return null })
   const list  = document.getElementById('pitcher-list')
   const empty = document.getElementById('empty-today')
   const hdr   = document.getElementById('day-header')
@@ -189,10 +189,14 @@ async function loadDay(date) {
     <div class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>`
 
   for (const p of data.pitchers) {
-    list.appendChild(buildPitcherCard(p))
+    try {
+      list.appendChild(buildPitcherCard(p))
+    } catch (err) {
+      console.error('[buildPitcherCard] failed for', p.pitcher_name, err)
+    }
   }
 
-  renderDaySummary(date, data)
+  try { renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
 
   // Start live polling whenever there are pending bets
   if (data.day_pending > 0) startLivePolling(date)
