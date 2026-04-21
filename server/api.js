@@ -1698,32 +1698,51 @@ router.get('/ks/testing', wrap(async (req, res) => {
     }
   })
 
-  // Lambda accuracy
+  // Lambda accuracy + per-pitcher notes
   const lambda_accuracy = lambdaRows.map(r => {
-    const wins   = Number(r.wins   || 0)
-    const losses = Number(r.losses || 0)
-    return {
-      pitcher:    r.pitcher_name,
-      avg_lambda: roundTo(Number(r.avg_lambda || 0), 2),
-      avg_actual: roundTo(Number(r.avg_actual || 0), 2),
-      lambda_err: roundTo(Number(r.avg_lambda || 0) - Number(r.avg_actual || 0), 2),
-      bets:    Number(r.bets),
-      wins, losses,
-      win_rate: wins + losses > 0 ? roundTo(wins / (wins + losses), 4) : 0,
-      pnl:      roundTo(Number(r.pnl || 0), 2),
+    const wins      = Number(r.wins   || 0)
+    const losses    = Number(r.losses || 0)
+    const win_rate  = wins + losses > 0 ? roundTo(wins / (wins + losses), 4) : 0
+    const avg_lambda = roundTo(Number(r.avg_lambda || 0), 2)
+    const avg_actual = roundTo(Number(r.avg_actual || 0), 2)
+    const lambda_err = roundTo(avg_lambda - avg_actual, 2)
+    const bets = Number(r.bets)
+    const pnl  = roundTo(Number(r.pnl || 0), 2)
+
+    // Generate a plain-English note
+    const notes = []
+    if (lambda_err >= 2.5) {
+      notes.push(`Model over-predicts by ${lambda_err}K avg — bets tend to be on inflated lines. Consider skipping or reducing bet size.`)
+    } else if (lambda_err <= -2.5) {
+      notes.push(`Model under-predicts by ${Math.abs(lambda_err)}K avg — actual Ks exceed expectation. Edge may be understated; consider increasing size.`)
+    } else if (Math.abs(lambda_err) < 0.75) {
+      notes.push(`λ is accurate (±${Math.abs(lambda_err)}K avg). Model well-calibrated for this pitcher.`)
     }
+
+    if (win_rate <= 0.25 && bets >= 4) {
+      notes.push(`Only ${Math.round(win_rate*100)}% win rate over ${bets} bets — strong flag to skip until model inputs are reviewed.`)
+    } else if (win_rate === 1 && bets >= 3) {
+      notes.push(`${bets} for ${bets} — perfect record. Could be small sample luck; continue with standard sizing.`)
+    } else if (win_rate >= 0.75 && bets >= 4) {
+      notes.push(`${Math.round(win_rate*100)}% win rate over ${bets} bets — one of the better-performing starters in the model.`)
+    }
+
+    if (pnl < -30 && bets >= 4) {
+      notes.push(`Net -$${Math.abs(pnl).toFixed(0)} across ${bets} bets. Check if a specific strike range is dragging results.`)
+    }
+
+    return { pitcher: r.pitcher_name, avg_lambda, avg_actual, lambda_err, bets, wins, losses, win_rate, pnl, notes }
   })
 
   // Threshold simulation: for each edge threshold (4¢–20¢ in 1¢ steps)
-  // show W/L/ROI if you only took bets with edge >= threshold
   const thresholds = []
   for (let t = 4; t <= 20; t++) {
-    const thresh = t / 100
-    const subset = allSettled.filter(b => Number(b.edge) >= thresh)
+    const thresh  = t / 100
+    const subset  = allSettled.filter(b => Number(b.edge) >= thresh)
     if (!subset.length) break
-    const wins   = subset.filter(b => b.result === 'win').length
-    const losses = subset.filter(b => b.result === 'loss').length
-    const pnl    = subset.reduce((s, b) => s + Number(b.pnl || 0), 0)
+    const wins    = subset.filter(b => b.result === 'win').length
+    const losses  = subset.filter(b => b.result === 'loss').length
+    const pnl     = subset.reduce((s, b) => s + Number(b.pnl || 0), 0)
     const wagered = subset.reduce((s, b) => s + Number(b.bet_size || 0), 0)
     thresholds.push({
       threshold_cents: t,
@@ -1735,7 +1754,50 @@ router.get('/ks/testing', wrap(async (req, res) => {
     })
   }
 
-  res.json({ calibration, lambda_accuracy, thresholds })
+  // Overall model notes derived from calibration + thresholds
+  const model_notes = []
+
+  // Best ROI threshold
+  const bestThresh = [...thresholds].sort((a, b) => b.roi - a.roi)[0]
+  const currentThresh = thresholds.find(t => t.threshold_cents === 5)
+  if (bestThresh && currentThresh && bestThresh.threshold_cents !== 5) {
+    const dir = bestThresh.threshold_cents > 5 ? 'Raising' : 'Lowering'
+    model_notes.push({
+      level: bestThresh.roi > currentThresh.roi + 0.02 ? 'warn' : 'info',
+      text: `${dir} the edge threshold to ${bestThresh.threshold_cents}¢ would improve ROI from ${(currentThresh.roi*100).toFixed(1)}% → ${(bestThresh.roi*100).toFixed(1)}% (${bestThresh.bets} bets).`,
+    })
+  }
+
+  // Check if low-edge bets (5¢) are dragging results
+  const lowEdge = calibration.find(c => c.bucket_cents === 5)
+  const highEdge = calibration.filter(c => c.bucket_cents >= 15)
+  const highEdgeWR = highEdge.length
+    ? highEdge.reduce((s,c) => s + c.wins, 0) / highEdge.reduce((s,c) => s + c.wins + c.losses, 0)
+    : null
+  if (lowEdge && lowEdge.win_rate < 0.45 && lowEdge.bets >= 5) {
+    model_notes.push({
+      level: 'warn',
+      text: `5¢ edge bets are only winning ${Math.round(lowEdge.win_rate*100)}% — close to break-even. These may not be real edge; consider a 7–8¢ floor.`,
+    })
+  }
+  if (highEdgeWR != null && highEdgeWR >= 0.75) {
+    const totalHigh = highEdge.reduce((s,c) => s + c.bets, 0)
+    model_notes.push({
+      level: 'good',
+      text: `Bets with 15¢+ edge are winning at ${Math.round(highEdgeWR*100)}% (${totalHigh} bets). The model finds real edge at higher confidence levels.`,
+    })
+  }
+
+  // Flag pitchers with bad λ + bad win rate
+  const skipList = lambda_accuracy.filter(p => p.lambda_err >= 2 && p.win_rate <= 0.35 && p.bets >= 3)
+  if (skipList.length) {
+    model_notes.push({
+      level: 'warn',
+      text: `Pitchers to consider skipping (over-predicted λ + losing record): ${skipList.map(p => p.pitcher).join(', ')}.`,
+    })
+  }
+
+  res.json({ calibration, lambda_accuracy, thresholds, model_notes })
 }))
 
 export default router

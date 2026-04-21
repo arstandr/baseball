@@ -920,17 +920,24 @@ async function loadTestingStats() {
   const data = await fetchJson('/api/ks/testing').catch(() => null)
   if (!data) return
 
+  // Model notes panel
+  const notesPanel = document.getElementById('model-notes-panel')
+  const notesList  = document.getElementById('model-notes-list')
+  if (notesPanel && notesList && data.model_notes?.length) {
+    notesPanel.style.display = ''
+    notesList.innerHTML = data.model_notes.map(n =>
+      `<div class="model-note model-note--${n.level}">${n.text}</div>`
+    ).join('')
+  }
+
   // Calibration table
   const calibTbody = document.querySelector('#calib-table tbody')
   if (calibTbody && data.calibration?.length) {
     calibTbody.innerHTML = data.calibration.map(r => {
-      const wrCls = r.win_rate >= 0.55 ? 'good' : r.win_rate < 0.45 ? 'bad' : ''
+      const wrCls  = r.win_rate >= 0.55 ? 'good' : r.win_rate < 0.45 ? 'bad' : ''
       const pnlCls = r.pnl >= 0 ? 'good' : 'bad'
       return `<tr>
-        <td>${r.bucket_cents}¢</td>
-        <td>${r.bets}</td>
-        <td>${r.wins}</td>
-        <td>${r.losses}</td>
+        <td>${r.bucket_cents}¢</td><td>${r.bets}</td><td>${r.wins}</td><td>${r.losses}</td>
         <td class="${wrCls}">${(r.win_rate*100).toFixed(0)}%</td>
         <td class="${pnlCls}">${r.pnl>=0?'+':''}$${r.pnl.toFixed(2)}</td>
       </tr>`
@@ -944,10 +951,7 @@ async function loadTestingStats() {
       const roiCls = r.roi >= 0 ? 'good' : 'bad'
       const pnlCls = r.pnl >= 0 ? 'good' : 'bad'
       return `<tr>
-        <td>${r.threshold_cents}¢+</td>
-        <td>${r.bets}</td>
-        <td>${r.wins}</td>
-        <td>${r.losses}</td>
+        <td>${r.threshold_cents}¢+</td><td>${r.bets}</td><td>${r.wins}</td><td>${r.losses}</td>
         <td>${(r.win_rate*100).toFixed(0)}%</td>
         <td class="${pnlCls}">${r.pnl>=0?'+':''}$${r.pnl.toFixed(2)}</td>
         <td class="${roiCls}">${(r.roi*100).toFixed(1)}%</td>
@@ -955,21 +959,22 @@ async function loadTestingStats() {
     }).join('')
   }
 
-  // Lambda accuracy table
+  // Lambda accuracy table with per-pitcher notes
   const lambdaTbody = document.querySelector('#lambda-table tbody')
   if (lambdaTbody && data.lambda_accuracy?.length) {
     lambdaTbody.innerHTML = data.lambda_accuracy.map(r => {
       const errCls = Math.abs(r.lambda_err) >= 2 ? (r.lambda_err > 0 ? 'bad' : 'good') : ''
       const pnlCls = r.pnl >= 0 ? 'good' : 'bad'
+      const notesHtml = r.notes?.length
+        ? `<tr class="pitcher-notes-row"><td colspan="7">${r.notes.map(n => `<span class="pitcher-note">${n}</span>`).join('')}</td></tr>`
+        : ''
       return `<tr>
-        <td>${r.pitcher}</td>
-        <td>${r.avg_lambda}</td>
-        <td>${r.avg_actual}</td>
+        <td>${r.pitcher}</td><td>${r.avg_lambda}</td><td>${r.avg_actual}</td>
         <td class="${errCls}">${r.lambda_err > 0 ? '+' : ''}${r.lambda_err}</td>
         <td>${r.bets}</td>
         <td>${(r.win_rate*100).toFixed(0)}%</td>
         <td class="${pnlCls}">${r.pnl>=0?'+':''}$${r.pnl.toFixed(2)}</td>
-      </tr>`
+      </tr>${notesHtml}`
     }).join('')
   }
 }
