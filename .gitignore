@@ -1,0 +1,14 @@
+node_modules/
+.env
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+models/artifacts/
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+venv/
+npm-debug.log*
+.kalshi_key.pem

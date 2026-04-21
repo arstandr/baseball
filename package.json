@@ -1,0 +1,52 @@
+{
+  "name": "mlbie",
+  "version": "0.1.0",
+  "description": "MLB Betting Intelligence Engine — multi-agent F5 totals prediction system",
+  "type": "module",
+  "main": "cli.js",
+  "bin": {
+    "mlbie": "./cli.js"
+  },
+  "scripts": {
+    "start": "node cli.js",
+    "fetch": "node cli.js fetch --date today",
+    "scan": "node cli.js scan --threshold 0.06",
+    "trade:paper": "node cli.js trade --dry-run",
+    "trade:live": "node cli.js trade --execute",
+    "report": "node cli.js report --yesterday",
+    "migrate": "node cli.js migrate",
+    "serve": "node cli.js serve",
+    "train": "python3 models/train.py",
+    "evaluate": "python3 models/evaluate.py",
+    "backtest": "node cli.js backtest --season 2024"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.0",
+    "@libsql/client": "^0.14.0",
+    "axios": "^1.7.7",
+    "cheerio": "^1.0.0",
+    "commander": "^12.1.0",
+    "cookie-parser": "^1.4.7",
+    "csv-parse": "^6.2.1",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "google-auth-library": "^10.6.2",
+    "node-cron": "^3.0.3",
+    "node-telegram-bot-api": "^0.66.0",
+    "p-limit": "^6.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "mlb",
+    "betting",
+    "xgboost",
+    "prediction",
+    "claude"
+  ],
+  "author": "adam@gprmidwest.com",
+  "license": "UNLICENSED",
+  "private": true
+}

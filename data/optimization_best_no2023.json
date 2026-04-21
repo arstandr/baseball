@@ -1,0 +1,612 @@
+[
+  {
+    "config_id": 34,
+    "feature_group": "all",
+    "n_features": 101,
+    "calibration": "sigmoid",
+    "edge_threshold": 0.08,
+    "xgb_params": {
+      "max_depth": 7,
+      "learning_rate": 0.1,
+      "n_estimators": 1000,
+      "min_samples_leaf": 10,
+      "l2_regularization": 0.1,
+      "max_features": 0.6
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 676,
+        "wins": 340,
+        "losses": 336,
+        "win_rate": 0.5029585798816568,
+        "roi_net": -0.06299968381589055,
+        "pnl": -4258.778625954201,
+        "brier": 0.25134215748924577,
+        "auc": 0.49153603539989643
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 821,
+        "wins": 461,
+        "losses": 360,
+        "win_rate": 0.561510353227771,
+        "roi_net": 0.04608092904761457,
+        "pnl": 3783.244274809156,
+        "brier": 0.24983772420977304,
+        "auc": 0.5262362372435074
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 116,
+        "wins": 66,
+        "losses": 50,
+        "win_rate": 0.5689655172413793,
+        "roi_net": 0.059969728876019944,
+        "pnl": 695.6488549618314,
+        "brier": 0.24955761723586944,
+        "auc": 0.5048506739167207
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 2,
+    "total_bets": 1613,
+    "total_wins": 867,
+    "overall_win_rate": 0.5375077495350279,
+    "overall_roi_net": 0.001364628045981319,
+    "avg_brier": 0.2502458329782961,
+    "score": 0.002729256091962638
+  },
+  {
+    "config_id": 39,
+    "feature_group": "pitcher_only",
+    "n_features": 40,
+    "calibration": "isotonic",
+    "edge_threshold": 0.08,
+    "xgb_params": {
+      "max_depth": null,
+      "learning_rate": 0.01,
+      "n_estimators": 200,
+      "min_samples_leaf": 30,
+      "l2_regularization": 1.0,
+      "max_features": 1.0
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 596,
+        "wins": 308,
+        "losses": 288,
+        "win_rate": 0.5167785234899329,
+        "roi_net": -0.037253445360930414,
+        "pnl": -2220.3053435114525,
+        "brier": 0.2512679004930716,
+        "auc": 0.5005405702270551
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 597,
+        "wins": 322,
+        "losses": 275,
+        "win_rate": 0.5393634840871022,
+        "roi_net": 0.004821819018757856,
+        "pnl": 287.862595419844,
+        "brier": 0.2502623880391521,
+        "auc": 0.5072073658524313
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 78,
+        "wins": 43,
+        "losses": 35,
+        "win_rate": 0.5512820512820513,
+        "roi_net": 0.027025836758661135,
+        "pnl": 210.80152671755684,
+        "brier": 0.2509675327595428,
+        "auc": 0.49243743184165395
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 2,
+    "total_bets": 1271,
+    "total_wins": 673,
+    "overall_win_rate": 0.5295043273013376,
+    "overall_roi_net": -0.013545564290905207,
+    "avg_brier": 0.2508326070972555,
+    "score": -0.027091128581810415
+  },
+  {
+    "config_id": 57,
+    "feature_group": "pitcher_park_weather_ump",
+    "n_features": 57,
+    "calibration": "sigmoid",
+    "edge_threshold": 0.1,
+    "xgb_params": {
+      "max_depth": 6,
+      "learning_rate": 0.03,
+      "n_estimators": 700,
+      "min_samples_leaf": 20,
+      "l2_regularization": 1.0,
+      "max_features": 0.7
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": null,
+        "roi_net": null,
+        "pnl": 0.0,
+        "brier": 0.2509146991745624,
+        "auc": 0.48806587267962775
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": null,
+        "roi_net": null,
+        "pnl": 0.0,
+        "brier": 0.2500672600686569,
+        "auc": 0.5104993864584818
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 2,
+        "wins": 2,
+        "losses": 0,
+        "win_rate": 1.0,
+        "roi_net": 0.862977099236641,
+        "pnl": 172.5954198473282,
+        "brier": 0.24941752064702208,
+        "auc": 0.4951452004835203
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 2,
+    "total_wins": 2,
+    "overall_win_rate": 1.0,
+    "overall_roi_net": 0.862977099236641,
+    "avg_brier": 0.2501331599634138,
+    "score": 0.862977099236641
+  },
+  {
+    "config_id": 37,
+    "feature_group": "pitcher_lineup_park",
+    "n_features": 68,
+    "calibration": "isotonic",
+    "edge_threshold": 0.1,
+    "xgb_params": {
+      "max_depth": 3,
+      "learning_rate": 0.05,
+      "n_estimators": 1000,
+      "min_samples_leaf": 50,
+      "l2_regularization": 1.0,
+      "max_features": 0.8
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 30,
+        "wins": 14,
+        "losses": 16,
+        "win_rate": 0.4666666666666667,
+        "roi_net": -0.1306106870229008,
+        "pnl": -391.8320610687024,
+        "brier": 0.25128616810925103,
+        "auc": 0.5067967487329159
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 17,
+        "wins": 8,
+        "losses": 9,
+        "win_rate": 0.47058823529411764,
+        "roi_net": -0.12330489447687479,
+        "pnl": -209.61832061068714,
+        "brier": 0.25006177868260443,
+        "auc": 0.526088092822263
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 172,
+        "wins": 98,
+        "losses": 74,
+        "win_rate": 0.5697674418604651,
+        "roi_net": 0.061463696076690874,
+        "pnl": 1057.175572519083,
+        "brier": 0.2514631614071652,
+        "auc": 0.49983153800983815
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 219,
+    "total_wins": 120,
+    "overall_win_rate": 0.547945205479452,
+    "overall_roi_net": 0.020809369444734868,
+    "avg_brier": 0.2509370360663402,
+    "score": 0.020809369444734868
+  },
+  {
+    "config_id": 1,
+    "feature_group": "pitcher_park_weather",
+    "n_features": 53,
+    "calibration": "isotonic",
+    "edge_threshold": 0.1,
+    "xgb_params": {
+      "max_depth": 8,
+      "learning_rate": 0.01,
+      "n_estimators": 200,
+      "min_samples_leaf": 20,
+      "l2_regularization": 0.05,
+      "max_features": 0.7
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 211,
+        "wins": 111,
+        "losses": 100,
+        "win_rate": 0.5260663507109005,
+        "roi_net": -0.0199504359466011,
+        "pnl": -420.9541984732832,
+        "brier": 0.2519984725057932,
+        "auc": 0.49796874264463586
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 189,
+        "wins": 108,
+        "losses": 81,
+        "win_rate": 0.5714285714285714,
+        "roi_net": 0.06455834242093778,
+        "pnl": 1220.152671755724,
+        "brier": 0.25108314720324426,
+        "auc": 0.5087024365564529
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 346,
+        "wins": 182,
+        "losses": 164,
+        "win_rate": 0.5260115606936416,
+        "roi_net": -0.02005250849402114,
+        "pnl": -693.8167938931315,
+        "brier": 0.25158880797209077,
+        "auc": 0.5009251657459703
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 746,
+    "total_wins": 401,
+    "overall_win_rate": 0.5375335120643432,
+    "overall_roi_net": 0.0014126230481140655,
+    "avg_brier": 0.25155680922704277,
+    "score": 0.0014126230481140655
+  },
+  {
+    "config_id": 23,
+    "feature_group": "no_market",
+    "n_features": 95,
+    "calibration": "sigmoid",
+    "edge_threshold": 0.04,
+    "xgb_params": {
+      "max_depth": null,
+      "learning_rate": 0.1,
+      "n_estimators": 300,
+      "min_samples_leaf": 20,
+      "l2_regularization": 0.5,
+      "max_features": 0.8
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 1776,
+        "wins": 923,
+        "losses": 853,
+        "win_rate": 0.5197072072072072,
+        "roi_net": -0.03179737466474111,
+        "pnl": -5647.213740458022,
+        "brier": 0.2512348662549456,
+        "auc": 0.5173947496430197
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 1958,
+        "wins": 1013,
+        "losses": 945,
+        "win_rate": 0.517364657814096,
+        "roi_net": -0.036161490537938094,
+        "pnl": -7080.4198473282795,
+        "brier": 0.2513344857712618,
+        "auc": 0.5008357581500396
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 1043,
+        "wins": 581,
+        "losses": 462,
+        "win_rate": 0.5570469798657718,
+        "roi_net": 0.0377657666888672,
+        "pnl": 3938.969465648849,
+        "brier": 0.24882571936155393,
+        "auc": 0.5214242395488243
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 4777,
+    "total_wins": 2517,
+    "overall_win_rate": 0.5268997278626754,
+    "overall_roi_net": -0.01839787339781757,
+    "avg_brier": 0.25046502379592045,
+    "score": -0.01839787339781757
+  },
+  {
+    "config_id": 9,
+    "feature_group": "pitcher_park_weather_ump",
+    "n_features": 57,
+    "calibration": "sigmoid",
+    "edge_threshold": 0.1,
+    "xgb_params": {
+      "max_depth": 8,
+      "learning_rate": 0.15,
+      "n_estimators": 500,
+      "min_samples_leaf": 15,
+      "l2_regularization": 0.1,
+      "max_features": 0.8
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 213,
+        "wins": 109,
+        "losses": 104,
+        "win_rate": 0.5117370892018779,
+        "roi_net": -0.046645521986883175,
+        "pnl": -993.5496183206117,
+        "brier": 0.25123134521931934,
+        "auc": 0.5005417470853144
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 222,
+        "wins": 120,
+        "losses": 102,
+        "win_rate": 0.5405405405405406,
+        "roi_net": 0.007014648236022218,
+        "pnl": 155.72519083969325,
+        "brier": 0.25031696878119764,
+        "auc": 0.5093453274410986
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": null,
+        "roi_net": null,
+        "pnl": 0.0,
+        "brier": 0.24961016999203514,
+        "auc": 0.49711139256869463
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 435,
+    "total_wins": 229,
+    "overall_win_rate": 0.5264367816091954,
+    "overall_roi_net": -0.01926033166622801,
+    "avg_brier": 0.25038616133085073,
+    "score": -0.01926033166622801
+  },
+  {
+    "config_id": 33,
+    "feature_group": "pitcher_lineup_park",
+    "n_features": 68,
+    "calibration": "isotonic",
+    "edge_threshold": 0.04,
+    "xgb_params": {
+      "max_depth": 8,
+      "learning_rate": 0.1,
+      "n_estimators": 1000,
+      "min_samples_leaf": 30,
+      "l2_regularization": 0.05,
+      "max_features": 0.7
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 2259,
+        "wins": 1164,
+        "losses": 1095,
+        "win_rate": 0.5152722443559097,
+        "roi_net": -0.04005960889267425,
+        "pnl": -9049.465648855114,
+        "brier": 0.25100420544069546,
+        "auc": 0.5001529915736949
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 2395,
+        "wins": 1252,
+        "losses": 1143,
+        "win_rate": 0.5227557411273487,
+        "roi_net": -0.026118025785271577,
+        "pnl": -6255.267175572542,
+        "brier": 0.2500468552427595,
+        "auc": 0.5030460449632295
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 1884,
+        "wins": 1024,
+        "losses": 860,
+        "win_rate": 0.5435244161358811,
+        "roi_net": 0.012573540137112805,
+        "pnl": 2368.8549618320526,
+        "brier": 0.2510921644070635,
+        "auc": 0.5219781013164789
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 6538,
+    "total_wins": 3440,
+    "overall_win_rate": 0.5261547873967575,
+    "overall_roi_net": -0.019785680426117475,
+    "avg_brier": 0.25071440836350617,
+    "score": -0.019785680426117475
+  },
+  {
+    "config_id": 3,
+    "feature_group": "core",
+    "n_features": 85,
+    "calibration": "sigmoid",
+    "edge_threshold": 0.05,
+    "xgb_params": {
+      "max_depth": 4,
+      "learning_rate": 0.08,
+      "n_estimators": 1000,
+      "min_samples_leaf": 10,
+      "l2_regularization": 1.0,
+      "max_features": 0.7
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 1911,
+        "wins": 977,
+        "losses": 934,
+        "win_rate": 0.511250654107797,
+        "roi_net": -0.04755173942742158,
+        "pnl": -9087.137404580264,
+        "brier": 0.25134618078542037,
+        "auc": 0.4925104740385068
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 2111,
+        "wins": 1106,
+        "losses": 1005,
+        "win_rate": 0.5239223117006159,
+        "roi_net": -0.023944731522631404,
+        "pnl": -5054.7328244274895,
+        "brier": 0.25044016035432665,
+        "auc": 0.5025090214362182
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 509,
+        "wins": 300,
+        "losses": 209,
+        "win_rate": 0.5893909626719057,
+        "roi_net": 0.09802186595479831,
+        "pnl": 4989.312977099234,
+        "brier": 0.24889107126920232,
+        "auc": 0.514423784357651
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 4531,
+    "total_wins": 2383,
+    "overall_win_rate": 0.5259324652394615,
+    "overall_roi_net": -0.020199861513812666,
+    "avg_brier": 0.2502258041363164,
+    "score": -0.020199861513812666
+  },
+  {
+    "config_id": 22,
+    "feature_group": "pitcher_bullpen_park_ump",
+    "n_features": 60,
+    "calibration": "isotonic",
+    "edge_threshold": 0.08,
+    "xgb_params": {
+      "max_depth": 6,
+      "learning_rate": 0.08,
+      "n_estimators": 300,
+      "min_samples_leaf": 20,
+      "l2_regularization": 1.0,
+      "max_features": 1.0
+    },
+    "folds": [
+      {
+        "val_season": 2023,
+        "n_val": 2259,
+        "n_bets": 554,
+        "wins": 290,
+        "losses": 264,
+        "win_rate": 0.5234657039711191,
+        "roi_net": -0.02479538126601817,
+        "pnl": -1373.6641221374066,
+        "brier": 0.2517096885339749,
+        "auc": 0.507116854179416
+      },
+      {
+        "val_season": 2024,
+        "n_val": 2395,
+        "n_bets": 517,
+        "wins": 271,
+        "losses": 246,
+        "win_rate": 0.5241779497098646,
+        "roi_net": -0.023468483765706476,
+        "pnl": -1213.3206106870248,
+        "brier": 0.2511047061895136,
+        "auc": 0.49583658272747855
+      },
+      {
+        "val_season": 2025,
+        "n_val": 2419,
+        "n_bets": 30,
+        "wins": 18,
+        "losses": 12,
+        "win_rate": 0.6,
+        "roi_net": 0.11778625954198466,
+        "pnl": 353.35877862595396,
+        "brier": 0.24940384322294867,
+        "auc": 0.5011335085338031
+      }
+    ],
+    "n_folds": 3,
+    "folds_positive_roi": 1,
+    "total_bets": 1101,
+    "total_wins": 579,
+    "overall_win_rate": 0.5258855585831063,
+    "overall_roi_net": -0.020287247540403973,
+    "avg_brier": 0.25073941264881233,
+    "score": -0.020287247540403973
+  }
+]

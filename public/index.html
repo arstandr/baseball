@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>KS Bets · Strikeout P&L</title>
+  <link rel="stylesheet" href="/style.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+  <script type="module" src="/app.js" defer></script>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">KSBETS</span>
+      <span class="brand-sub">Strikeout Intelligence</span>
+    </div>
+    <nav class="modes" role="tablist">
+      <button class="mode active" data-view="today"    role="tab">TODAY</button>
+      <button class="mode"        data-view="trends"   role="tab">TRENDS</button>
+      <button class="mode"        data-view="log"      role="tab">BET LOG</button>
+      <button class="mode"        data-view="settings" role="tab">SETTINGS</button>
+    </nav>
+    <div class="user" id="user-chip">
+      <div class="user-meta">
+        <span id="user-name">—</span>
+        <a href="/auth/logout" class="logout">Sign out</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Bankroll hero ── -->
+  <div class="bankroll-card" id="bankroll-hero">
+    <div class="bankroll-main">
+      <div class="bankroll-label">Bankroll</div>
+      <div class="bankroll-value skel" id="hero-bankroll">$—</div>
+      <div class="bankroll-meta">
+        Start: <b id="hero-start">$—</b>
+        <span class="dot">·</span>
+        Total ROI: <b id="hero-roi">—</b>
+      </div>
+    </div>
+    <div class="bankroll-deltas">
+      <div class="delta"><span>Today</span><b id="hero-today" class="skel">$—</b></div>
+      <div class="delta"><span>Week</span><b id="hero-week" class="skel">$—</b></div>
+      <div class="delta"><span>Month</span><b id="hero-month" class="skel">$—</b></div>
+      <div class="delta"><span>YTD</span><b id="hero-ytd" class="skel">$—</b></div>
+    </div>
+    <div class="bankroll-deltas">
+      <div class="delta"><span>Win Rate</span><b id="hero-wr" class="skel">—</b></div>
+      <div class="delta"><span>Bets</span><b id="hero-bets" class="skel">—</b></div>
+      <div class="delta"><span>Pending</span><b id="hero-pending" class="skel">—</b></div>
+      <div class="delta"><span>Avg Edge</span><b id="hero-edge" class="skel">—</b></div>
+    </div>
+  </div>
+
+  <main class="page">
+
+    <!-- ══════════════ TODAY VIEW ══════════════ -->
+    <section class="view" id="view-today">
+      <div class="date-row">
+        <div class="date-pills" id="date-pills"></div>
+      </div>
+      <div class="day-header" id="day-header" hidden></div>
+      <div class="live-banner" id="live-banner" hidden></div>
+      <div class="pitcher-list" id="pitcher-list">
+        <div class="empty" id="empty-today" hidden>
+          <div class="empty-title">No bets logged for this date</div>
+          <div class="empty-sub">Run the 9 AM edge script to generate picks.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ TRENDS VIEW ══════════════ -->
+    <section class="view" id="view-trends" hidden>
+      <div class="grid-1">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Bankroll Curve</h2>
+            <span class="panel-sub" id="br-range">—</span>
+          </div>
+          <div style="position:relative;height:220px">
+            <canvas id="chart-bankroll"></canvas>
+          </div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Daily P&amp;L</h2><span class="panel-sub">Last 30 game-days</span></div>
+          <div style="position:relative;height:200px">
+            <canvas id="chart-daily"></canvas>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Weekly P&amp;L</h2><span class="panel-sub">Green = winning week</span></div>
+          <div style="position:relative;height:200px">
+            <canvas id="chart-weekly"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Performance Statistics ── -->
+      <div class="panel">
+        <div class="panel-head"><h2>Performance Statistics</h2><span class="panel-sub">All settled pre-game bets</span></div>
+        <div class="ks-stats-grid" id="stats-grid">
+          <div class="skel-row"></div><div class="skel-row"></div>
+          <div class="skel-row"></div><div class="skel-row"></div>
+        </div>
+      </div>
+
+      <!-- ── Recent Form ── -->
+      <div class="panel">
+        <div class="panel-head"><h2>Recent Form</h2><span class="panel-sub">Last 7 game-days vs season</span></div>
+        <div id="form-grid"><div class="skel-row"></div></div>
+      </div>
+
+      <!-- ── Edge Breakdown + Strike Threshold ── -->
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Edge Breakdown</h2><span class="panel-sub">Win rate &amp; P&amp;L by segment</span></div>
+          <div class="bd-section-head">By Edge Size</div>
+          <div class="bd-rows" id="bd-bucket">
+            <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+          </div>
+          <div class="bd-section-head" style="margin-top:18px">By Side</div>
+          <div class="bd-rows" id="bd-side">
+            <div class="skel-row"></div><div class="skel-row"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Strike Threshold</h2><span class="panel-sub">Performance by strike line</span></div>
+          <div class="bd-rows" id="bd-strike">
+            <div class="skel-row"></div><div class="skel-row"></div>
+            <div class="skel-row"></div><div class="skel-row"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Pitcher Leaderboard ── -->
+      <div class="grid-2">
+        <div class="panel" style="padding:0;overflow:hidden">
+          <div class="panel-head" style="padding:16px 18px 14px">
+            <h2>Top Pitchers</h2><span class="panel-sub">Most profitable</span>
+          </div>
+          <div class="ks-lb-table">
+            <div class="ks-lb-head">
+              <div>Pitcher</div><div>Bets</div><div>W/L</div><div>Win%</div><div>P&amp;L</div>
+            </div>
+            <div id="lb-top"><div class="skel-row" style="margin:10px 12px"></div></div>
+          </div>
+        </div>
+        <div class="panel" style="padding:0;overflow:hidden">
+          <div class="panel-head" style="padding:16px 18px 14px">
+            <h2>Bottom Pitchers</h2><span class="panel-sub">Least profitable</span>
+          </div>
+          <div class="ks-lb-table">
+            <div class="ks-lb-head">
+              <div>Pitcher</div><div>Bets</div><div>W/L</div><div>Win%</div><div>P&amp;L</div>
+            </div>
+            <div id="lb-bottom"><div class="skel-row" style="margin:10px 12px"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Monthly Breakdown ── -->
+      <div class="panel">
+        <div class="panel-head"><h2>Monthly Breakdown</h2></div>
+        <div class="ks-monthly-table">
+          <div class="ks-monthly-head">
+            <div>Month</div><div>Bets</div><div>W/L</div><div>Win %</div><div>P&amp;L</div><div>ROI</div><div>Avg Edge</div><div>Bankroll</div>
+          </div>
+          <div class="ks-monthly-body" id="monthly-body">
+            <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ BET LOG VIEW ══════════════ -->
+    <section class="view" id="view-log" hidden>
+      <div class="log-filters panel">
+        <div class="log-filter-row">
+          <input type="text"  id="lf-pitcher" placeholder="Pitcher name…" />
+          <select id="lf-side">
+            <option value="">All sides</option>
+            <option value="YES">YES</option>
+            <option value="NO">NO</option>
+          </select>
+          <select id="lf-result">
+            <option value="">All results</option>
+            <option value="win">WIN</option>
+            <option value="loss">LOSS</option>
+          </select>
+          <input type="date" id="lf-from" />
+          <input type="date" id="lf-to" />
+          <button class="filter-btn" id="lf-apply">Search</button>
+          <button class="filter-btn secondary" id="lf-clear">Clear</button>
+        </div>
+      </div>
+      <div class="panel" style="padding:0">
+        <div class="ks-log-table">
+          <div class="ks-log-head">
+            <div>Date</div><div>Pitcher</div><div>Game</div><div>Strike</div>
+            <div>Side</div><div>Mid</div><div>Edge</div><div>Model</div>
+            <div>Bet</div><div>Actual Ks</div><div>Result</div><div>P&amp;L</div>
+          </div>
+          <div class="ks-log-body" id="log-body">
+            <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+          </div>
+        </div>
+        <div class="log-pagination" id="log-pagination"></div>
+      </div>
+    </section>
+
+    <!-- ══════════════ SETTINGS VIEW ══════════════ -->
+    <section class="view" id="view-settings" hidden>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Users</h2><span class="panel-sub">Website &amp; CLI access</span></div>
+          <div class="user-list" id="user-list">
+            <div class="skel-row"></div><div class="skel-row"></div>
+          </div>
+          <div class="add-user-form" id="add-user-form">
+            <h3>Add User</h3>
+            <div class="form-row">
+              <input type="text"     id="new-name" placeholder="Username" autocomplete="off"/>
+              <input type="password" id="new-pin"  placeholder="PIN (4+ digits)" maxlength="10" inputmode="numeric"/>
+              <button class="filter-btn" id="add-user-btn">Add</button>
+            </div>
+            <div class="form-msg" id="add-user-msg"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>System</h2></div>
+          <div class="sys-info" id="sys-info">
+            <div class="sys-row"><span>Starting bankroll</span><b id="sys-bankroll">$5,000</b></div>
+            <div class="sys-row"><span>Edge threshold</span><b>5¢</b></div>
+            <div class="sys-row"><span>Kelly multiplier</span><b>25%</b></div>
+            <div class="sys-row"><span>Max bet</span><b>5% of bankroll</b></div>
+            <div class="sys-row"><span>NO cap</span><b>80¢</b></div>
+          </div>
+          <div class="panel-head" style="margin-top:20px"><h2>CLI Commands</h2></div>
+          <div class="cli-ref">
+            <code>node scripts/addUser.js --list</code>
+            <code>node scripts/addUser.js --add --name Isaiah --pin 1234</code>
+            <code>node scripts/addUser.js --remove --name Isaiah</code>
+            <code>node scripts/live/strikeoutEdge.js</code>
+            <code>node scripts/live/ksBets.js settle</code>
+            <code>node scripts/live/backtestKalshi.js --report</code>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="footbar">
+    <span id="last-updated">Loading…</span>
+    <span class="dot">·</span>
+    <span class="muted">KSBETS v1.0</span>
+  </footer>
+
+</body>
+</html>
