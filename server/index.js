@@ -35,6 +35,17 @@ export function createApp() {
   app.use(cookieParser())
   app.use(sessionMiddleware())
 
+  // Public health check — shows DB status and user count (no auth required)
+  app.get('/health', async (req, res) => {
+    try {
+      const users = await db.all('SELECT name FROM users')
+      const bets  = await db.one('SELECT COUNT(*) as n FROM ks_bets')
+      res.json({ ok: true, users: users.map(u => u.name), bets: bets?.n, db: 'turso' })
+    } catch (err) {
+      res.json({ ok: false, error: err.message })
+    }
+  })
+
   // Auth routes (public).
   registerAuthRoutes(app)
 
