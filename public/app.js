@@ -244,6 +244,52 @@ function buildPitcherCard(p) {
     const veloVal     = b.velo_trend_mph != null ? `${b.velo_trend_mph >= 0 ? '+' : ''}${b.velo_trend_mph.toFixed(1)} mph` : '—'
     const wxVal       = b.weather_mult  != null && b.weather_mult !== 1 ? `×${b.weather_mult.toFixed(2)}` : 'neutral'
 
+    // Plain-English explainer — what this Kalshi contract actually is
+    const firstName = p.pitcher_name.split(' ')[0]
+    const betExplainer = (() => {
+      const winAmt  = mid != null && face != null ? fmt$(face * (1 - mid / 100)) : null
+      const riskAmt = mid != null && face != null ? fmt$(face * mid / 100) : null
+      if (b.side === 'YES') {
+        return `This is a Kalshi contract that pays out if ${firstName} records ${b.strike} or more strikeouts today. ` +
+          (winAmt && riskAmt ? `If he hits that mark, we win ${winAmt}. If he falls short, we lose ${riskAmt}.` : '')
+      } else {
+        return `This is a Kalshi contract that pays out if ${firstName} finishes with fewer than ${b.strike} strikeouts today. ` +
+          (winAmt && riskAmt ? `If he stays under, we win ${winAmt}. If he reaches ${b.strike}+, we lose ${riskAmt}.` : '')
+      }
+    })()
+
+    // Why we picked it — template-driven synopsis from model data
+    const whyPicked = (() => {
+      const parts = []
+      if (b.lambda != null) {
+        const lambdaNum = Number(b.lambda)
+        if (b.side === 'YES') {
+          parts.push(`Our model expects ${firstName} to average around ${lambdaNum.toFixed(1)} strikeouts today, which makes ${b.strike}+ look achievable.`)
+        } else {
+          parts.push(`Our model expects ${firstName} to average around ${lambdaNum.toFixed(1)} strikeouts today, which makes staying under ${b.strike} look likely.`)
+        }
+      }
+      if (b.model_prob != null && b.market_mid != null) {
+        const mktPct = b.market_mid
+        const ourPct = Math.round(b.model_prob * 100)
+        const diff   = ourPct - mktPct
+        if (Math.abs(diff) >= 3) {
+          parts.push(`Kalshi is pricing this at ${mktPct}¢ but we think the true odds are closer to ${ourPct}¢ — a ${Math.abs(diff)}¢ gap in our favor.`)
+        }
+      }
+      const flags = []
+      if (b.park_factor != null && b.park_factor < 0.97) flags.push(`pitcher-friendly ballpark`)
+      if (b.park_factor != null && b.park_factor > 1.03) flags.push(`hitter-friendly ballpark`)
+      if (b.ump_factor  != null && b.ump_factor  > 1.03) flags.push(`an ump who calls a big strike zone`)
+      if (b.ump_factor  != null && b.ump_factor  < 0.97) flags.push(`an ump with a tight strike zone`)
+      if (b.velo_trend_mph != null && b.velo_trend_mph <= -0.5) flags.push(`velocity trending down lately`)
+      if (b.velo_trend_mph != null && b.velo_trend_mph >= 0.5)  flags.push(`velocity trending up lately`)
+      if (b.weather_mult != null && b.weather_mult < 0.97) flags.push(`weather conditions that suppress offense`)
+      if (b.weather_mult != null && b.weather_mult > 1.03) flags.push(`weather that tends to boost scoring`)
+      if (flags.length) parts.push(`Other factors: ${flags.join(', ')}.`)
+      return parts.join(' ') || 'Picked based on model edge vs. market price.'
+    })()
+
     return `<div class="pc-bet-tile ${tileCls}" data-bet-id="${b.id}">
       <div class="pc-bet-main">
         <div class="pc-bet-desc">${direction}</div>
@@ -255,6 +301,8 @@ function buildPitcherCard(p) {
         </div>
       </div>
       <div class="pc-bet-detail" hidden>
+        <p class="pc-detail-explainer">${betExplainer}</p>
+        <p class="pc-detail-why"><strong>Why we picked it:</strong> ${whyPicked}</p>
         <div class="pc-detail-grid">
           <div class="pc-detail-item"><span>Model probability</span><b>${modelPct}${b.raw_model_prob != null ? ` <span class="muted" style="font-size:12px">(raw ${rawPct})</span>` : ''}</b></div>
           <div class="pc-detail-item"><span>Market price</span><b>${midCents}</b></div>

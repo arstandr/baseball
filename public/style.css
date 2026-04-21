@@ -514,6 +514,14 @@ a:hover { text-decoration: underline; }
   padding: 12px 4px 4px;
 }
 
+.pc-detail-explainer {
+  margin: 0 0 8px; font-size: 14px; color: var(--text); line-height: 1.55;
+}
+.pc-detail-why {
+  margin: 0 0 12px; font-size: 14px; color: var(--text-dim); line-height: 1.55;
+}
+.pc-detail-why strong { color: var(--text); }
+
 .pc-detail-grid {
   display: grid; grid-template-columns: 1fr 1fr;
   gap: 8px 16px;
