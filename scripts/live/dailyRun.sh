@@ -23,14 +23,37 @@ set -e
 
 LINEUPS_MODE=false
 DATE=""
+SETTLE_MODE=false
 for arg in "$@"; do
   if [ "$arg" = "--lineups" ]; then LINEUPS_MODE=true
+  elif [ "$arg" = "--settle" ]; then SETTLE_MODE=true
   elif [[ "$arg" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then DATE="$arg"
   fi
 done
 DATE=${DATE:-$(date +%Y-%m-%d)}
 
 cd "$(dirname "$0")/../.."
+
+# --settle: settle bets + run EOD report (run this after games are done ~midnight ET)
+if [ "$SETTLE_MODE" = true ]; then
+  echo "════════════════════════════════════════"
+  echo " MLBIE End of Day — $DATE"
+  echo "════════════════════════════════════════"
+
+  echo ""
+  echo "── Settle bets ──"
+  node scripts/live/ksBets.js settle --date "$DATE"
+
+  echo ""
+  echo "── EOD report (Claude analysis → Discord) ──"
+  node scripts/live/eodReport.js --date "$DATE"
+
+  echo ""
+  echo "════════════════════════════════════════"
+  echo " EOD done."
+  echo "════════════════════════════════════════"
+  exit 0
+fi
 
 if [ "$LINEUPS_MODE" = true ]; then
   echo "════════════════════════════════════════"
@@ -87,9 +110,13 @@ node scripts/live/ksBets.js log --date "$DATE"
 echo ""
 echo "════════════════════════════════════════"
 echo " Morning run done."
-echo " Re-run with --lineups after ~3-4 PM ET:"
+echo ""
+echo " After lineups post (~3-4 PM ET):"
 echo "   bash scripts/live/dailyRun.sh --lineups $DATE"
-echo " Run 'node scripts/live/ksBets.js report' for P&L."
+echo ""
+echo " After games finish (~midnight ET):"
+echo "   bash scripts/live/dailyRun.sh --settle $DATE"
+echo "   → Settles all bets + sends Claude EOD report to Discord"
 echo ""
 echo " Live monitor (paper trade by default):"
 echo "   node scripts/live/liveMonitor.js --date $DATE"
