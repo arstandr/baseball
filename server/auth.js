@@ -48,10 +48,14 @@ export async function seedUsersFromEnv() {
       await db.run(`INSERT OR IGNORE INTO users (name, pin) VALUES (?, ?)`, [name.trim(), pin.trim()])
     } catch { /* table may not exist yet */ }
   }
-  // Always ensure default users exist as fallback
+  // Always ensure default users exist (upsert so PIN stays correct)
   for (const u of DEFAULT_USERS) {
     try {
-      await db.run(`INSERT OR IGNORE INTO users (name, pin) VALUES (?, ?)`, [u.name, u.pin])
+      await db.run(
+        `INSERT INTO users (name, pin) VALUES (?, ?)
+         ON CONFLICT(name) DO UPDATE SET pin = excluded.pin`,
+        [u.name, u.pin],
+      )
     } catch { /* ignore */ }
   }
 }
