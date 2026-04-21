@@ -29,7 +29,7 @@
           <button class="hard-refresh-btn" title="Hard refresh" onclick="location.reload(true)">↺</button>
         </div>
         <span id="deploy-time" class="deploy-time"></span>
-        <a href="/auth/logout" class="logout">Sign out</a>
+        <a href="/auth/logout" class="logout" onclick="return confirm('Sign out?')">Sign out</a>
       </div>
     </div>
   </header>

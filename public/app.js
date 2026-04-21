@@ -8,7 +8,8 @@ const state = {
   log:          { page: 1, pitcher: '', side: '', result: '', from: '', to: '', sort: 'bet_date', dir: 'desc' },
   lastRefresh:  null,
   currentUser:  null,
-  liveTimer:    null,
+  liveTimer:      null,
+  countdownTimer: null,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -49,7 +50,8 @@ async function loadUser() {
     if (!r.ok) { window.location.href = '/login'; return }
     const { user } = await r.json()
     state.currentUser = user?.name
-    document.getElementById('user-name').textContent = (user?.name || '—').split(' ')[0]
+    const n = (user?.name || '—').split(' ')[0]
+    document.getElementById('user-name').textContent = n.charAt(0).toUpperCase() + n.slice(1)
   } catch { window.location.href = '/login' }
 }
 
@@ -223,6 +225,7 @@ async function loadDay(date) {
   try { renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
 
   buildLiveBanner(data.pitchers)
+  startCountdowns()
 
   // Start live polling whenever there are pending bets
   if (data.day_pending > 0) startLivePolling(date)
@@ -516,7 +519,7 @@ function buildPitcherCard(p) {
     <div class="pc-header">
       <div class="pc-header-left">
         <div class="pc-pitcher">${esc(p.pitcher_name)}</div>
-        <div class="pc-meta">${esc(p.game || p.team || '—')}${p.game_time ? ` · <span class="pc-gametime">${fmtGameTime(p.game_time)}</span>` : ''}</div>
+        <div class="pc-meta">${esc(p.game || p.team || '—')}${p.game_time ? ` · <span class="pc-gametime">${fmtGameTime(p.game_time)}</span><span class="pc-countdown" data-game-time="${esc(p.game_time)}"></span>` : ''}</div>
       </div>
       <div class="pc-header-right">
         <div class="pc-actual-ks">${p.actual_ks != null ? `<strong>${p.actual_ks}</strong> Ks` : ''}</div>
@@ -552,6 +555,25 @@ function startLivePolling(date) {
 
 function stopLivePolling() {
   if (state.liveTimer) { clearInterval(state.liveTimer); state.liveTimer = null }
+  if (state.countdownTimer) { clearInterval(state.countdownTimer); state.countdownTimer = null }
+}
+
+function startCountdowns() {
+  updateCountdowns()
+  if (state.countdownTimer) clearInterval(state.countdownTimer)
+  state.countdownTimer = setInterval(updateCountdowns, 30_000)
+}
+
+function updateCountdowns() {
+  document.querySelectorAll('.pc-countdown[data-game-time]').forEach(el => {
+    const diff = new Date(el.dataset.gameTime) - Date.now()
+    if (diff <= 0) { el.textContent = ''; el.hidden = true; return }
+    el.hidden = false
+    const totalMin = Math.floor(diff / 60000)
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    el.textContent = h > 0 ? `· ${h}h ${m}m` : `· ${m}m`
+  })
 }
 
 async function pollLive(date) {
@@ -700,13 +722,15 @@ function updatePitcherCardLive(p) {
   const card = document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(String(p.pitcher_id))}"]`)
   if (!card) return
 
-  const isWarmup  = !p.is_final && p.pitches === 0 && p.ip === 0
-  const hasLiveData = p.ip > 0 && p.pitches > 0
-  const remLambda   = hasLiveData ? remainingLambda(p.ks, p.ip, p.pitches) : null
+  const isWarmup       = !p.is_final && p.pitches === 0 && p.ip === 0
+  const hasLiveData    = p.ip > 0 && p.pitches > 0
+  // Require either Ks recorded OR 2+ IP before trusting Poisson — avoids 0% when pitcher just started with 0 Ks
+  const hasEnoughData  = hasLiveData && (p.ks > 0 || p.ip >= 2)
+  const remLambda      = hasEnoughData ? remainingLambda(p.ks, p.ip, p.pitches) : null
 
   // ── K pace projection ─────────────────────────────────────────────────────
   let projKs = null
-  if (!p.is_final && hasLiveData && remLambda != null) {
+  if (!p.is_final && hasEnoughData && remLambda != null) {
     projKs = Math.round((p.ks + remLambda) * 10) / 10
   }
 
@@ -816,14 +840,14 @@ function updatePitcherCardLive(p) {
     if (p.is_final || !p.still_in) {
       // Game over — definitive
       prob = !isNo ? (bs.ks >= bs.strike ? 1 : 0) : (bs.ks < bs.strike ? 1 : 0)
-    } else if (hasLiveData && remLambda != null) {
-      // Game active — Poisson probability based on current K rate + remaining pitches
+    } else if (hasEnoughData && remLambda != null) {
+      // Game active with enough data — Poisson probability based on current K rate + remaining pitches
       const needed = !isNo ? bs.strike - bs.ks : null
       prob = !isNo
         ? probAtLeast(needed, remLambda)
         : poissonCDF(bs.strike - bs.ks - 1, remLambda)
     } else {
-      // Warmup — keep showing model_prob (pre-game estimate)
+      // Warmup or early innings with 0 Ks — keep pre-game model_prob estimate
       continue
     }
 
