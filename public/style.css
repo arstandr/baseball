@@ -76,14 +76,15 @@ a:hover { text-decoration: underline; }
 .user { display: flex; align-items: center; gap: 10px; }
 .user img { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--card); }
 .user-meta { display: flex; flex-direction: column; line-height: 1.2; }
-.user-meta #user-name { font-size: 13px; font-weight: 500; }
+.user-name-row { display: flex; align-items: center; gap: 5px; }
+.user-name-row #user-name { font-size: 13px; font-weight: 500; }
 .deploy-time { font-size: 10px; color: var(--text-dim); opacity: 0.7; margin-top: 1px; }
 .hard-refresh-btn {
-  background: none; border: none; color: var(--text-dim); font-size: 16px; cursor: pointer;
-  padding: 0 2px; line-height: 1; transition: color 0.15s, transform 0.2s; align-self: flex-start;
+  background: none; border: none; color: var(--text-dim); font-size: 15px; cursor: pointer;
+  padding: 0 2px; line-height: 1; transition: color 0.15s, transform 0.2s;
 }
 .hard-refresh-btn:hover { color: var(--accent); transform: rotate(180deg); }
-.logout { font-size: 11px; color: var(--text-dim); }
+.logout { font-size: 11px; color: var(--text-dim); margin-top: 5px; }
 .logout:hover { color: var(--bad); text-decoration: none; }
 
 /* ------------------------ page / main ------------------------ */

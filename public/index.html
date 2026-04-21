@@ -24,9 +24,11 @@
     </nav>
     <div class="user" id="user-chip">
       <div class="user-meta">
-        <span id="user-name">—</span>
+        <div class="user-name-row">
+          <span id="user-name">—</span>
+          <button class="hard-refresh-btn" title="Hard refresh" onclick="location.reload(true)">↺</button>
+        </div>
         <span id="deploy-time" class="deploy-time"></span>
-        <button class="hard-refresh-btn" title="Hard refresh" onclick="location.reload(true)">↺</button>
         <a href="/auth/logout" class="logout">Sign out</a>
       </div>
     </div>
