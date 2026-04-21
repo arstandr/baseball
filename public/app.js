@@ -326,15 +326,23 @@ function updatePitcherCardLive(p) {
   const card = document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(String(p.pitcher_id))}"]`)
   if (!card) return
 
-  // Update K badge with live count
-  const ksBadge = card.querySelector('.ks-val')
-  if (ksBadge) {
-    ksBadge.textContent = p.ks
-    if (!p.is_final) ksBadge.style.color = 'var(--accent)'
-    else             ksBadge.style.color = ''
+  // Update/create actual Ks badge
+  let ksBadge = card.querySelector('.pc-actual-ks')
+  if (!ksBadge) {
+    ksBadge = document.createElement('div')
+    ksBadge.className = 'pc-actual-ks'
+    const headRight = card.querySelector('.pc-head-right')
+    if (headRight) headRight.appendChild(ksBadge)
+  }
+  const ksStrong = ksBadge.querySelector('strong')
+  if (ksStrong) {
+    ksStrong.textContent = p.ks
+    ksStrong.style.color = p.is_final ? '' : 'var(--accent)'
+  } else {
+    ksBadge.innerHTML = `Threw <strong style="color:var(--accent)">${p.ks}</strong> Ks`
   }
 
-  // Update/create the game status badge inside the card header
+  // Inning badge in header
   let statusBadge = card.querySelector('.pc-live-badge')
   if (!statusBadge) {
     statusBadge = document.createElement('span')
@@ -345,48 +353,36 @@ function updatePitcherCardLive(p) {
   statusBadge.textContent = p.inning
   statusBadge.className = `pc-live-badge${p.is_final ? ' final' : ' pulsing'}`
 
-  // Update pending bet rows with live status
+  // Update each pending bet tile
   for (const bs of p.bet_statuses) {
-    const row = card.querySelector(`.ks-bet-row[data-bet-id="${bs.id}"]`)
-    if (!row) continue
+    const tile = card.querySelector(`.pc-bet-tile[data-bet-id="${bs.id}"]`)
+    if (!tile) continue
+    const badge = tile.querySelector('.pc-badge')
+    if (!badge || !badge.classList.contains('pc-badge--pending')) continue
 
-    // Replace or update the result cell (7th column, 0-indexed = index 6)
-    let liveCell = row.querySelector('.live-status-cell')
-    if (!liveCell) {
-      // Find the pending-pill cell and replace it
-      const pendingPill = row.querySelector('.pending-pill')
-      if (pendingPill) {
-        liveCell = document.createElement('div')
-        liveCell.className = 'live-status-cell'
-        pendingPill.replaceWith(liveCell)
-      }
-    }
-    if (!liveCell) continue
-
-    const side = row.dataset.side
-    if (side === 'YES') {
+    const isNo = tile.querySelector('.pc-bet-desc')?.textContent?.includes('fewer') ?? false
+    if (!isNo) {
       if (bs.needed === 0) {
-        liveCell.innerHTML = `<span class="hit-badge">HIT ✓</span>`
+        badge.textContent = '✓ HIT'; badge.className = 'pc-badge pc-badge--win'
       } else {
-        liveCell.innerHTML = `<span class="needs-badge">needs ${bs.needed}</span>`
+        badge.textContent = `Needs ${bs.needed} more`
       }
     } else {
-      // NO bet: winning while pitcher hasn't hit the threshold, losing if they have
       if (bs.ks >= bs.strike) {
-        liveCell.innerHTML = `<span class="no-badge">OVER ✗</span>`
+        badge.textContent = '✗ Over'; badge.className = 'pc-badge pc-badge--loss'
       } else if (p.is_final) {
-        liveCell.innerHTML = `<span class="hit-badge">SAFE ✓</span>`
+        badge.textContent = '✓ Safe'; badge.className = 'pc-badge pc-badge--win'
       } else {
-        liveCell.innerHTML = `<span class="needs-badge">at ${bs.ks}/${bs.strike}</span>`
+        badge.textContent = `At ${bs.ks} of ${bs.strike}`
       }
     }
   }
 
-  // TTO3 warning on the pitcher meta line
+  // TTO3 warning
   if (p.tto3) {
     const meta = card.querySelector('.pc-meta')
     if (meta && !meta.querySelector('.tto-warn')) {
-      meta.insertAdjacentHTML('beforeend', ' <span class="tto-warn">TTO3 −15%</span>')
+      meta.insertAdjacentHTML('beforeend', ' <span class="tto-warn">⚠ Pitch limit warning</span>')
     }
   }
 }
@@ -578,17 +574,17 @@ function renderStats(s) {
     { label: 'Total P&L',       val: (s.total_pnl >= 0 ? '+' : '') + fmt$(s.total_pnl), cls: s.total_pnl >= 0 ? 'good' : 'bad' },
     { label: 'ROI',             val: fmtPct(s.roi, 1), cls: s.roi >= 0 ? 'good' : 'bad' },
     { label: 'Win Rate',        val: fmtPct(s.win_rate), cls: s.win_rate >= 0.55 ? 'good' : s.win_rate >= 0.5 ? '' : 'bad' },
-    { label: 'EV / Bet',        val: (s.ev_per_bet >= 0 ? '+' : '') + fmt$(s.ev_per_bet), cls: s.ev_per_bet >= 0 ? 'good' : 'bad', sub: `${(s.wins||0) + (s.losses||0)} settled` },
+    { label: 'Avg Profit Per Bet', val: (s.ev_per_bet >= 0 ? '+' : '') + fmt$(s.ev_per_bet), cls: s.ev_per_bet >= 0 ? 'good' : 'bad', sub: `${(s.wins||0) + (s.losses||0)} settled` },
     // Row 2 — Risk
-    { label: 'Max Drawdown',    val: fmt$(s.max_drawdown), cls: 'bad', sub: ddPct + ' from peak' },
-    { label: 'Current DD',      val: s.current_drawdown < -0.01 ? fmt$(s.current_drawdown) : '$0', cls: s.current_drawdown < -0.01 ? 'bad' : 'good', sub: s.current_drawdown < -0.01 ? curDdPct + ' from peak' : 'At all-time high' },
+    { label: 'Biggest Losing Stretch', val: fmt$(s.max_drawdown), cls: 'bad', sub: ddPct + ' from peak' },
+    { label: 'Current Dip',     val: s.current_drawdown < -0.01 ? fmt$(s.current_drawdown) : '$0', cls: s.current_drawdown < -0.01 ? 'bad' : 'good', sub: s.current_drawdown < -0.01 ? curDdPct + ' from peak' : 'No current dip' },
     { label: 'Winning Days',    val: fmtPct(s.winning_days_pct), cls: s.winning_days_pct >= 0.6 ? 'good' : s.winning_days_pct >= 0.5 ? '' : 'bad', sub: `${s.winning_days} of ${s.total_days} days` },
     { label: 'Total Wagered',   val: fmt$(s.total_wagered, true), cls: 'accent' },
     // Row 3 — Streaks / Quality
     { label: 'Best Win Streak', val: String(s.longest_win_streak), cls: 'good', sub: 'consecutive wins' },
     { label: 'Worst Lose Run',  val: String(s.longest_loss_streak), cls: s.longest_loss_streak >= 5 ? 'bad' : 'warn', sub: 'consecutive losses' },
     { label: 'Current Streak',  html: streakHtml, cls: '' },
-    { label: 'Exp vs Actual W', val: expAct, cls: (s.actual_wins || 0) >= (s.expected_wins || 0) ? 'good' : 'bad' },
+    { label: 'Model vs Actual Wins', val: expAct, cls: (s.actual_wins || 0) >= (s.expected_wins || 0) ? 'good' : 'bad' },
   ]
 
   grid.innerHTML = cards.map(c => `
@@ -786,11 +782,18 @@ async function loadBets() {
     const rowCls = b.result === 'win' ? 'win-row' : b.result === 'loss' ? 'loss-row' : ''
     const row = document.createElement('div')
     row.className = `ks-log-row ${rowCls}`
-    const sideCls   = b.side === 'YES' ? 'side-yes' : 'side-no'
+    const mid  = b.market_mid != null ? Number(b.market_mid) : null
+    const face = b.bet_size   != null ? Number(b.bet_size)   : null
+    const wager = mid != null && face != null ? fmt$(face * mid / 100) : (face ? fmt$(face) : '—')
+
+    const betDesc = b.side === 'YES'
+      ? `${b.strike}+ strikeouts YES`
+      : `Under ${b.strike} strikeouts NO`
+
     const resultHtml = b.result === 'win'
-      ? `<span class="result-win">WIN</span>`
+      ? `<span class="pc-badge pc-badge--win">✓ WIN</span>`
       : b.result === 'loss'
-      ? `<span class="result-loss">LOSS</span>`
+      ? `<span class="pc-badge pc-badge--loss">✗ LOSS</span>`
       : `<span class="muted">—</span>`
     const pnlHtml = b.pnl != null
       ? `<span class="${b.pnl >= 0 ? 'good' : 'bad'}">${b.pnl >= 0 ? '+' : ''}${fmt$(b.pnl)}</span>`
@@ -798,15 +801,10 @@ async function loadBets() {
 
     row.innerHTML = `
       <div class="muted">${b.bet_date || '—'}</div>
-      <div>${esc(b.pitcher_name || '—')}</div>
-      <div class="muted" style="font-size:11px">${esc(b.game || '—')}</div>
-      <div>${b.strike}+</div>
-      <div class="${sideCls}">${b.side}</div>
-      <div>${b.market_mid != null ? b.market_mid+'¢' : '—'}</div>
-      <div>${b.edge != null ? (b.edge*100).toFixed(1)+'¢' : '—'}</div>
-      <div>${b.model_prob != null ? (b.model_prob*100).toFixed(1)+'%' : '—'}</div>
-      <div>${b.bet_size != null ? fmt$(b.bet_size) : '—'}</div>
-      <div>${b.actual_ks != null ? b.actual_ks : '—'}</div>
+      <div class="log-pitcher">${esc(b.pitcher_name || '—')}</div>
+      <div class="muted">${betDesc}</div>
+      <div>${wager}</div>
+      <div>${b.actual_ks != null ? b.actual_ks + 'K' : '—'}</div>
       <div>${resultHtml}</div>
       <div>${pnlHtml}</div>`
     body.appendChild(row)
@@ -892,9 +890,9 @@ async function loadGameReview() {
         ? (() => {
             const err = g.lambda_err
             if (Math.abs(err) < 0.5) return ''
-            const dir = err > 0 ? 'over' : 'under'
+            const dir = err > 0 ? 'over-predicted' : 'under-predicted'
             const cls = Math.abs(err) >= 2 ? 'warn' : 'muted'
-            return `<span class="lambda-note ${cls}">λ ${dir} by ${Math.abs(err).toFixed(1)} Ks</span>`
+            return `<span class="lambda-note ${cls}">Model ${dir} by ${Math.abs(err).toFixed(1)} Ks</span>`
           })()
         : ''
 
@@ -906,7 +904,7 @@ async function loadGameReview() {
           <div class="review-pnl ${pnlCls}">${g.pnl >= 0 ? '+' : ''}$${g.pnl.toFixed(2)}</div>
         </div>
         <div class="review-game-meta">
-          <span>λ=${(g.lambda||0).toFixed(1)}</span>
+          <span>Model predicted ${(g.lambda||0).toFixed(1)} Ks</span>
           ${g.actual_ks != null ? `<span>Actual: <b>${g.actual_ks}K</b></span>` : ''}
           ${lambdaNote}
           <span>${g.bets.length} bet${g.bets.length !== 1 ? 's' : ''} · ${winRateStr} WR</span>
@@ -917,7 +915,8 @@ async function loadGameReview() {
           ${g.bets.map(b => {
             const cls = !b.result ? 'pending' : b.result === 'win' ? 'win' : 'loss'
             const pnl = b.pnl != null ? ` <span class="${b.pnl>=0?'good':'bad'}">${b.pnl>=0?'+':''}$${Number(b.pnl).toFixed(2)}</span>` : ''
-            return `<span class="bet-chip ${cls}">${b.side} ${b.strike} <em>${(b.edge*100).toFixed(0)}¢</em>${pnl}</span>`
+            const chipLabel = b.side === 'YES' ? `${b.strike}+ YES` : `Under ${b.strike} NO`
+            return `<span class="bet-chip ${cls}">${chipLabel}${pnl}</span>`
           }).join('')}
         </div>`
       host.appendChild(card)

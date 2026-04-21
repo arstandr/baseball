@@ -118,18 +118,18 @@
       <!-- ── Edge Breakdown + Strike Threshold ── -->
       <div class="grid-2">
         <div class="panel">
-          <div class="panel-head"><h2>Edge Breakdown</h2><span class="panel-sub">Win rate &amp; P&amp;L by segment</span></div>
-          <div class="bd-section-head">By Edge Size</div>
+          <div class="panel-head"><h2>What's Working?</h2><span class="panel-sub">Win rate by bet type</span></div>
+          <div class="bd-section-head">By Confidence Level</div>
           <div class="bd-rows" id="bd-bucket">
             <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
           </div>
-          <div class="bd-section-head" style="margin-top:18px">By Side</div>
+          <div class="bd-section-head" style="margin-top:18px">YES Bets vs. NO Bets</div>
           <div class="bd-rows" id="bd-side">
             <div class="skel-row"></div><div class="skel-row"></div>
           </div>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>Strike Threshold</h2><span class="panel-sub">Performance by strike line</span></div>
+          <div class="panel-head"><h2>Which Bet Type Wins Most</h2><span class="panel-sub">By strikeout target</span></div>
           <div class="bd-rows" id="bd-strike">
             <div class="skel-row"></div><div class="skel-row"></div>
             <div class="skel-row"></div><div class="skel-row"></div>
@@ -201,9 +201,8 @@
       <div class="panel" style="padding:0">
         <div class="ks-log-table">
           <div class="ks-log-head">
-            <div>Date</div><div>Pitcher</div><div>Game</div><div>Strike</div>
-            <div>Side</div><div>Mid</div><div>Edge</div><div>Model</div>
-            <div>Bet</div><div>Actual Ks</div><div>Result</div><div>P&amp;L</div>
+            <div>Date</div><div>Pitcher</div><div>Bet</div>
+            <div>Wager</div><div>Threw</div><div>Result</div><div>Profit / Loss</div>
           </div>
           <div class="ks-log-body" id="log-body">
             <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
@@ -246,7 +245,7 @@
 
       <!-- Edge Calibration -->
       <div class="panel" style="margin-bottom:16px">
-        <div class="panel-head"><h2>Edge Calibration</h2><span class="panel-sub">Predicted edge bucket vs actual win rate</span></div>
+        <div class="panel-head"><h2>Are Our Picks Accurate?</h2><span class="panel-sub">When we think we have an edge, do we actually win?</span></div>
         <div class="test-table-wrap">
           <table class="test-table" id="calib-table">
             <thead><tr><th>Edge Bucket</th><th>Bets</th><th>W</th><th>L</th><th>Win Rate</th><th>P&amp;L</th></tr></thead>
@@ -257,7 +256,7 @@
 
       <!-- Threshold Simulator -->
       <div class="panel" style="margin-bottom:16px">
-        <div class="panel-head"><h2>Edge Threshold Simulator</h2><span class="panel-sub">ROI if you only took bets at ≥X¢ edge</span></div>
+        <div class="panel-head"><h2>What If We Set a Higher Bar?</h2><span class="panel-sub">What our results would look like if we only took higher-confidence bets</span></div>
         <div class="test-table-wrap">
           <table class="test-table" id="thresh-table">
             <thead><tr><th>Min Edge</th><th>Bets</th><th>W</th><th>L</th><th>Win Rate</th><th>P&amp;L</th><th>ROI</th></tr></thead>
@@ -268,10 +267,10 @@
 
       <!-- Lambda Accuracy -->
       <div class="panel">
-        <div class="panel-head"><h2>Model λ Accuracy</h2><span class="panel-sub">Predicted Ks vs actual Ks per pitcher (≥3 settled bets)</span></div>
+        <div class="panel-head"><h2>Pitcher Accuracy</h2><span class="panel-sub">How well our model predicted each pitcher's strikeout total</span></div>
         <div class="test-table-wrap">
           <table class="test-table" id="lambda-table">
-            <thead><tr><th>Pitcher</th><th>Avg λ</th><th>Avg Actual</th><th>Error</th><th>Bets</th><th>Win Rate</th><th>P&amp;L</th></tr></thead>
+            <thead><tr><th>Pitcher</th><th>We Predicted</th><th>Actual Ks</th><th>Off By</th><th>Bets</th><th>Win Rate</th><th>Profit</th></tr></thead>
             <tbody><tr><td colspan="7" class="skel-row"></td></tr></tbody>
           </table>
         </div>
@@ -301,19 +300,16 @@
           <div class="panel-head"><h2>System</h2></div>
           <div class="sys-info" id="sys-info">
             <div class="sys-row"><span>Starting bankroll</span><b id="sys-bankroll">$5,000</b></div>
-            <div class="sys-row"><span>Edge threshold</span><b>5¢</b></div>
-            <div class="sys-row"><span>Kelly multiplier</span><b>25%</b></div>
-            <div class="sys-row"><span>Max bet</span><b>5% of bankroll</b></div>
-            <div class="sys-row"><span>NO cap</span><b>80¢</b></div>
+            <div class="sys-row"><span>Minimum edge to place a bet</span><b>5¢</b></div>
+            <div class="sys-row"><span>Bet sizing aggressiveness</span><b>Quarter Kelly (25%)</b></div>
+            <div class="sys-row"><span>Max bet per game</span><b>5% of bankroll</b></div>
+            <div class="sys-row"><span>Max price on NO bets</span><b>80¢</b></div>
           </div>
-          <div class="panel-head" style="margin-top:20px"><h2>CLI Commands</h2></div>
-          <div class="cli-ref">
-            <code>node scripts/addUser.js --list</code>
-            <code>node scripts/addUser.js --add --name Isaiah --pin 1234</code>
-            <code>node scripts/addUser.js --remove --name Isaiah</code>
-            <code>node scripts/live/strikeoutEdge.js</code>
-            <code>node scripts/live/ksBets.js settle</code>
-            <code>node scripts/live/backtestKalshi.js --report</code>
+          <div class="panel-head" style="margin-top:20px"><h2>Daily Schedule</h2></div>
+          <div class="sys-info">
+            <div class="sys-row"><span>Morning (9am ET)</span><b>Run picks + log bets</b></div>
+            <div class="sys-row"><span>Afternoon (3-4pm)</span><b>Refresh with lineups</b></div>
+            <div class="sys-row"><span>After games (midnight)</span><b>Settle + EOD report</b></div>
           </div>
         </div>
       </div>
