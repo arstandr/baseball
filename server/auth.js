@@ -1,45 +1,66 @@
 // server/auth.js — Username + PIN authentication backed by the users DB table.
 //
-// Users are stored in the `users` table (see db/schema.sql).
-// On server startup, any USERn_NAME / USERn_PIN env vars are seeded into the
-// table so existing .env configs keep working without manual migration.
-//
-// To add a user via CLI: node scripts/addUser.js --name Isaiah --pin 1234
+// Uses signed cookies (HMAC-SHA256) instead of express-session so auth
+// survives Railway redeploys without any server-side session storage.
 
-import session from 'express-session'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import * as db from '../lib/db.js'
 
-// ------------------------------------------------------------------
-// Session middleware
-// ------------------------------------------------------------------
-export function sessionMiddleware() {
-  const secret = process.env.SESSION_SECRET || 'ksbets-2026-secret-key-baseball'
-  const isProd = process.env.NODE_ENV === 'production'
-  return session({
-    secret,
-    resave: false,
-    saveUninitialized: false,
-    name: 'mlbie.sid',
-    cookie: {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: isProd,
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    },
-  })
+const COOKIE_NAME = 'mlbie.auth'
+const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000  // 7 days ms
+
+function getSecret() {
+  return process.env.SESSION_SECRET || 'ksbets-2026-secret-key-baseball'
 }
 
-// ------------------------------------------------------------------
-// Seed ENV users (USER1_NAME/USER1_PIN ... USER9_NAME/USER9_PIN)
-// Called once at server startup. Safe to call repeatedly (INSERT OR IGNORE).
-// ------------------------------------------------------------------
+// ── Token helpers ────────────────────────────────────────────────────────────
+
+function signToken(payload) {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  const sig  = createHmac('sha256', getSecret()).update(data).digest('base64url')
+  return `${data}.${sig}`
+}
+
+function verifyToken(token) {
+  if (!token || typeof token !== 'string') return null
+  const dot = token.lastIndexOf('.')
+  if (dot < 0) return null
+  const data = token.slice(0, dot)
+  const sig  = token.slice(dot + 1)
+  const expected = createHmac('sha256', getSecret()).update(data).digest('base64url')
+  try {
+    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
+  } catch { return null }
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString())
+    if (payload.exp && Date.now() > payload.exp) return null
+    return payload
+  } catch { return null }
+}
+
+// ── Session-compatible shim so existing req.session.user references keep working ──
+
+function attachUserToReq(req, res, next) {
+  const token = req.cookies?.[COOKIE_NAME]
+  const payload = verifyToken(token)
+  if (payload?.name) {
+    req.session = req.session || {}
+    req.session.user = { name: payload.name }
+  } else {
+    req.session = req.session || {}
+    req.session.user = null
+  }
+  next()
+}
+
+// ── Seed default users ───────────────────────────────────────────────────────
+
 const DEFAULT_USERS = [
-  { name: 'adam',   pin: '1031'  },
-  { name: 'isaiah', pin: '4994' },
+  { name: 'Adam',   pin: '1031'  },
+  { name: 'Isaiah', pin: '4994' },
 ]
 
 export async function seedUsersFromEnv() {
-  // Seed from env vars first
   for (let i = 1; i <= 9; i++) {
     const name = process.env[`USER${i}_NAME`]
     const pin  = process.env[`USER${i}_PIN`]
@@ -48,7 +69,6 @@ export async function seedUsersFromEnv() {
       await db.run(`INSERT OR IGNORE INTO users (name, pin) VALUES (?, ?)`, [name.trim(), pin.trim()])
     } catch { /* table may not exist yet */ }
   }
-  // Always ensure default users exist (upsert so PIN stays correct)
   for (const u of DEFAULT_USERS) {
     try {
       await db.run(
@@ -60,9 +80,12 @@ export async function seedUsersFromEnv() {
   }
 }
 
-// ------------------------------------------------------------------
-// requireAuth middleware
-// ------------------------------------------------------------------
+// ── Middleware ───────────────────────────────────────────────────────────────
+
+export function sessionMiddleware() {
+  return attachUserToReq
+}
+
 export function requireAuth(req, res, next) {
   if (req.session?.user) return next()
   if ((req.originalUrl || '').startsWith('/api/') || req.xhr) {
@@ -71,9 +94,8 @@ export function requireAuth(req, res, next) {
   return res.redirect('/login')
 }
 
-// ------------------------------------------------------------------
-// Auth routes
-// ------------------------------------------------------------------
+// ── Auth routes ──────────────────────────────────────────────────────────────
+
 export function registerAuthRoutes(app) {
   // POST /auth/login
   app.post('/auth/login', async (req, res) => {
@@ -87,11 +109,20 @@ export function registerAuthRoutes(app) {
         [String(username).trim(), String(pin).trim()],
       )
       if (!user) return res.status(401).json({ error: 'Invalid username or PIN' })
-      req.session.user = { name: user.name }
-      req.session.save(err => {
-        if (err) return res.status(500).json({ error: 'Session error' })
-        res.json({ ok: true, name: user.name })
+
+      const token = signToken({
+        name: user.name,
+        exp:  Date.now() + COOKIE_MAX_AGE,
       })
+      const isProd = process.env.NODE_ENV === 'production'
+      res.cookie(COOKIE_NAME, token, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure:   isProd,
+        maxAge:   COOKIE_MAX_AGE,
+        path:     '/',
+      })
+      res.json({ ok: true, name: user.name })
     } catch (err) {
       console.error('[auth] login error:', err.message)
       res.status(500).json({ error: 'Server error' })
@@ -100,10 +131,8 @@ export function registerAuthRoutes(app) {
 
   // GET /auth/logout
   app.get('/auth/logout', (req, res) => {
-    req.session?.destroy(() => {
-      res.clearCookie('mlbie.sid')
-      res.redirect('/login')
-    })
+    res.clearCookie(COOKIE_NAME, { path: '/' })
+    res.redirect('/login')
   })
 
   // GET /auth/me

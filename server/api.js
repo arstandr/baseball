@@ -1340,7 +1340,7 @@ router.get('/ks/monthly', wrap(async (req, res) => {
             SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END)      AS wins,
             SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END)      AS losses,
             SUM(COALESCE(pnl,0))                                AS pnl,
-            SUM(bet_size)                                       AS wagered,
+            SUM(COALESCE(capital_at_risk, bet_size))            AS wagered,
             AVG(CASE WHEN result IS NOT NULL THEN edge END)     AS avg_edge
      FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL
      GROUP BY ym ORDER BY ym ASC`,
@@ -1389,7 +1389,7 @@ router.get('/ks/weekly', wrap(async (req, res) => {
     const label = `${m[monday.getUTCMonth()]} ${monday.getUTCDate()}–${m[sunday.getUTCMonth()]} ${sunday.getUTCDate()}`
     const w = (weeks[key] ||= { week: label, start: key, bets:0, wins:0, losses:0, pnl:0, wagered:0 })
     w.bets    += 1
-    w.wagered += Number(r.bet_size || 0)
+    w.wagered += Number(r.capital_at_risk || r.bet_size || 0)
     if (r.result === 'win')  w.wins++
     else if (r.result === 'loss') w.losses++
     w.pnl += Number(r.pnl || 0)
@@ -1429,7 +1429,7 @@ router.get('/ks/bets', wrap(async (req, res) => {
   const [rows, countRow] = await Promise.all([
     db.all(
       `SELECT id, bet_date, pitcher_name, team, game, strike, side,
-              model_prob, market_mid, edge, lambda, actual_ks, result, pnl, bet_size, ticker
+              model_prob, market_mid, spread, edge, lambda, actual_ks, result, pnl, bet_size, capital_at_risk, ticker
        FROM ks_bets WHERE ${where}
        ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
       [...params, limit, offset],
@@ -1608,7 +1608,7 @@ router.get('/ks/edge-breakdown', wrap(async (req, res) => {
   for (const r of rows) {
     const edgeCents = Number(r.edge || 0) * 100
     const pnl       = Number(r.pnl || 0)
-    const wagered   = Number(r.bet_size || 0)
+    const wagered   = Number(r.capital_at_risk || r.bet_size || 0)
     const win       = r.result === 'win'
     const bump      = b => { if (win) b.wins++; else b.losses++; b.pnl += pnl; b.wagered += wagered }
 
@@ -1844,7 +1844,7 @@ router.get('/ks/testing', wrap(async (req, res) => {
     const wins    = subset.filter(b => b.result === 'win').length
     const losses  = subset.filter(b => b.result === 'loss').length
     const pnl     = subset.reduce((s, b) => s + Number(b.pnl || 0), 0)
-    const wagered = subset.reduce((s, b) => s + Number(b.bet_size || 0), 0)
+    const wagered = subset.reduce((s, b) => s + Number(b.capital_at_risk || b.bet_size || 0), 0)
     thresholds.push({
       threshold_cents: t,
       bets:    subset.length,

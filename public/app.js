@@ -224,6 +224,8 @@ async function loadDay(date) {
 
   try { renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
 
+  buildLiveBanner(data.pitchers)
+
   // Start live polling whenever there are pending bets
   if (data.day_pending > 0) startLivePolling(date)
 }
@@ -512,7 +514,7 @@ function buildPitcherCard(p) {
     <div class="pc-header">
       <div class="pc-header-left">
         <div class="pc-pitcher">${esc(p.pitcher_name)}</div>
-        <div class="pc-meta">${esc(p.game || p.team || '—')}</div>
+        <div class="pc-meta">${esc(p.game || p.team || '—')}${p.game_time ? ` · <span class="pc-gametime">${fmtGameTime(p.game_time)}</span>` : ''}</div>
       </div>
       <div class="pc-header-right">
         <div class="pc-actual-ks">${p.actual_ks != null ? `<strong>${p.actual_ks}</strong> Ks` : ''}</div>
@@ -581,35 +583,88 @@ async function pollLive(date) {
   }
 }
 
-function renderLiveBanner(data) {
+function fmtGameTime(utc) {
+  if (!utc) return ''
+  try {
+    return new Date(utc).toLocaleTimeString('en-US', {
+      hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', hour12: true,
+    }) + ' ET'
+  } catch { return '' }
+}
+
+function buildLiveBanner(pitchers) {
   const banner = document.getElementById('live-banner')
   if (!banner) return
-
-  const livePitchers  = data.pitchers.filter(p => !p.is_final)
-  const finalPitchers = data.pitchers.filter(p => p.is_final)
-
-  if (!data.pitchers.length) { banner.hidden = true; return }
+  if (!pitchers?.length) { banner.hidden = true; return }
   banner.hidden = false
 
-  const liveChips = livePitchers.map(p => {
-    const tto = p.tto3 ? ' <span class="tto-warn">TTO3</span>' : ''
-    return `<span class="live-chip">
-      <span class="live-chip-name">${esc(p.pitcher_name)}</span>
-      <b>${p.ks} Ks</b> / ${p.ip.toFixed(1)} IP
-      <span class="live-inning">${esc(p.inning)}</span>${tto}
-    </span>`
-  }).join('')
-
-  const finalChips = finalPitchers.map(p =>
-    `<span class="live-chip final-chip">
-      <span class="live-chip-name">${esc(p.pitcher_name)}</span>
-      <b>${p.ks} Ks</b> Final
-    </span>`
-  ).join('')
+  const sorted = [...pitchers].sort((a, b) => a.pitcher_name.localeCompare(b.pitcher_name))
 
   banner.innerHTML = `
-    ${livePitchers.length ? `<span class="live-dot"></span><span class="live-label">${livePitchers.length} live</span>` : ''}
-    ${liveChips}${finalChips}`
+    <div class="lb-header">
+      <span class="live-dot"></span>
+      <span class="lb-count">${pitchers.length} TODAY</span>
+    </div>
+    <div class="lb-grid">
+      ${sorted.map(p => {
+        const lastName = p.pitcher_name.split(' ').slice(-1)[0]
+        const timeStr  = fmtGameTime(p.game_time)
+        return `<div class="lb-chip" data-pitcher-id="${p.pitcher_id || ''}" data-name="${esc(p.pitcher_name)}">
+          <span class="lb-name">${esc(lastName)}</span>
+          <span class="lb-status lb-pregame">${timeStr || 'Pre-Game'}</span>
+        </div>`
+      }).join('')}
+    </div>`
+
+  banner.querySelectorAll('.lb-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const pid  = chip.dataset.pitcherId
+      const name = chip.dataset.name
+      let card = pid ? document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(pid)}"]`) : null
+      if (!card) {
+        document.querySelectorAll('.pitcher-card').forEach(c => {
+          if (c.querySelector('.pc-pitcher')?.textContent === name) card = c
+        })
+      }
+      if (card) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        card.classList.add('lb-highlight')
+        setTimeout(() => card.classList.remove('lb-highlight'), 1500)
+      }
+    })
+  })
+}
+
+function renderLiveBanner(data) {
+  const banner = document.getElementById('live-banner')
+  if (!banner || banner.hidden) return
+
+  // Update live count
+  const liveNow = data.pitchers.filter(p => !p.is_final).length
+  const countEl = banner.querySelector('.lb-count')
+  if (countEl) countEl.textContent = `${liveNow} LIVE · ${data.pitchers.length} TODAY`
+
+  // Update each chip's status
+  for (const p of data.pitchers) {
+    const chip = p.pitcher_id
+      ? banner.querySelector(`.lb-chip[data-pitcher-id="${p.pitcher_id}"]`)
+      : null
+    if (!chip) continue
+    const statusEl = chip.querySelector('.lb-status')
+    if (!statusEl) continue
+
+    if (p.is_final) {
+      statusEl.textContent  = `${p.ks}K · Final`
+      statusEl.className    = 'lb-status lb-final'
+      chip.classList.remove('lb-chip--live')
+      chip.classList.add('lb-chip--final')
+    } else {
+      const warn = !p.still_in ? ' ⚠' : p.tto3 ? ' ~TTO3' : ''
+      statusEl.textContent = `${p.ks}K · ${p.ip.toFixed(1)}IP · ${p.inning}${warn}`
+      statusEl.className   = 'lb-status lb-live'
+      chip.classList.add('lb-chip--live')
+    }
+  }
 }
 
 function updatePitcherCardLive(p) {
@@ -641,21 +696,25 @@ function updatePitcherCardLive(p) {
     card.querySelector('.pc-header-left')?.appendChild(liveRow)
   }
 
+  const isWarmup = !p.is_final && p.pitches === 0 && p.ip === 0
   if (p.is_final) {
     liveRow.innerHTML = `<span class="pc-live-chip final">Final · ${p.ks} Ks · ${p.ip.toFixed(1)} IP</span>`
   } else if (!p.still_in) {
     liveRow.innerHTML = `<span class="pc-live-chip pulled">⚠ PULLED · ${p.ks} Ks in ${p.ip.toFixed(1)} IP</span>`
+  } else if (isWarmup) {
+    liveRow.innerHTML = `<span class="pc-live-chip warmup">⚡ Warmup</span>`
   } else {
     const score   = p.home_score != null ? `${p.away_score}–${p.home_score}` : ''
-    const pitches = p.pitches    ? `${p.pitches}p` : ''
-    const pace    = projKs != null ? `proj <strong>${projKs}</strong>` : ''
+    const parts   = [
+      `${p.inning}`,
+      `<strong>${p.ks}</strong> Ks`,
+      `${p.ip.toFixed(1)} IP`,
+      p.pitches ? `${p.pitches}p` : null,
+      score || null,
+    ].filter(Boolean).join(' · ')
     const blowout = isBlowout ? ` <span class="pc-blowout-warn">⚠ blowout</span>` : ''
-    liveRow.innerHTML = `
-      <span class="pc-live-chip live">
-        ${p.inning} · <strong>${p.ks}</strong> Ks · ${p.ip.toFixed(1)} IP · ${pitches}
-        ${score ? `· ${score}` : ''}${blowout}
-      </span>
-      ${pace ? `<span class="pc-pace-chip">${pace} Ks</span>` : ''}`
+    const pace    = projKs != null ? `<span class="pc-pace-chip">proj <strong>${projKs}</strong> Ks</span>` : ''
+    liveRow.innerHTML = `<span class="pc-live-chip live">${parts}${blowout}</span>${pace}`
   }
 
   // ── Update overall header bar ─────────────────────────────────────────────
@@ -1171,7 +1230,8 @@ async function loadBets() {
     row.className = `ks-log-row ${rowCls}`
     const mid  = b.market_mid != null ? Number(b.market_mid) : null
     const face = b.bet_size   != null ? Number(b.bet_size)   : null
-    const wager = mid != null && face != null ? fmt$(face * mid / 100) : (face ? fmt$(face) : '—')
+    const lhs  = (b.spread ?? 4) / 2
+    const wager = mid != null && face != null ? fmt$(face * (mid + lhs) / 100) : (face ? fmt$(face) : '—')
 
     const betDesc = b.side === 'YES'
       ? `${b.strike}+ strikeouts YES`
