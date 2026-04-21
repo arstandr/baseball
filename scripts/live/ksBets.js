@@ -158,7 +158,11 @@ async function logEdges() {
       savant_fbv:    e.savant_fbv    ?? null,
       whiff_flag:    e.whiff_flag    ?? null,
       ticker:        e.ticker,
-      bet_size:      BET_SIZE,
+      bet_size:      e.bet_size      ?? BET_SIZE,
+      kelly_fraction: e.kelly_fraction ?? null,
+      capital_at_risk: e.bet_size != null && e.market_mid != null
+        ? Math.round(e.bet_size * e.market_mid) / 100
+        : null,
       park_factor:   e.park_factor   ?? null,
       weather_mult:  e.weather_note  ? (e.weather_mult ?? null) : null,
       ump_factor:    e.ump_factor    ?? null,
@@ -206,7 +210,7 @@ async function logEdges() {
 
   // Discord: post morning picks
   if (logged > 0) {
-    const discordEdges = edgesJson.map(e => ({ ...e, bet_size: BET_SIZE }))
+    const discordEdges = edgesJson.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
     await notifyEdges(discordEdges, TODAY)
   }
 }
