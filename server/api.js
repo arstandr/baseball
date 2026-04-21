@@ -1095,6 +1095,22 @@ router.get('/ks/summary', wrap(async (req, res) => {
   const losses = Number(totals?.losses || 0)
   const total  = Number(bankrollRow?.total || 0)
 
+  // Current streak + last 5
+  const recentBets = await db.all(
+    `SELECT result FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 ORDER BY settled_at DESC, id DESC LIMIT 10`
+  )
+  let streak = 0
+  for (const r of recentBets) {
+    if (r.result === 'win') {
+      if (streak >= 0) streak++; else break
+    } else if (r.result === 'loss') {
+      if (streak <= 0) streak--; else break
+    } else break
+  }
+  const last5 = recentBets.slice(0, 5)
+  const last5W = last5.filter(r => r.result === 'win').length
+  const last5L = last5.filter(r => r.result === 'loss').length
+
   res.json({
     today_pnl:  roundTo(Number(totals?.today_pnl  || 0), 2),
     week_pnl:   roundTo(Number(totals?.week_pnl   || 0), 2),
@@ -1110,6 +1126,8 @@ router.get('/ks/summary', wrap(async (req, res) => {
     avg_edge:   totals?.avg_edge != null ? roundTo(totals.avg_edge, 4) : 0,
     bankroll:   roundTo(STARTING_BANKROLL + total, 2),
     start_bankroll: STARTING_BANKROLL,
+    current_streak: streak,
+    last5: last5.length ? `${last5W}-${last5L}` : null,
   })
 }))
 
@@ -1136,7 +1154,8 @@ router.get('/ks/daily', wrap(async (req, res) => {
             strike, side, model_prob, market_mid, edge, lambda, actual_ks,
             result, pnl, bet_size, kelly_fraction, ticker, live_bet,
             park_factor, ump_factor, ump_name, velo_adj, bb_penalty,
-            spread, k9_career, k9_season
+            spread, k9_career, k9_season,
+            weather_mult, velo_trend_mph, raw_model_prob
      FROM ks_bets
      WHERE bet_date = ? AND live_bet = 0
      ORDER BY pitcher_name, strike ASC`,
@@ -1173,7 +1192,31 @@ router.get('/ks/daily', wrap(async (req, res) => {
       pnl:          b.pnl != null ? roundTo(b.pnl, 2) : null,
       ticker:       b.ticker,
       spread:       b.spread,
+      lambda:         b.lambda,
+      park_factor:    b.park_factor,
+      ump_factor:     b.ump_factor,
+      ump_name:       b.ump_name,
+      weather_mult:   b.weather_mult,
+      velo_trend_mph: b.velo_trend_mph,
+      raw_model_prob: b.raw_model_prob != null ? roundTo(b.raw_model_prob, 4) : null,
     })
+  }
+
+  // Fetch last 5 starts per pitcher for heat map
+  const pitcherIdList = [...new Set([...pitcherMap.values()].map(g => g.pitcher_id).filter(Boolean))]
+  let recentStartsMap = {}
+  if (pitcherIdList.length) {
+    const ph = pitcherIdList.map(() => '?').join(',')
+    const startRows = await db.all(
+      `SELECT pitcher_id, game_date, ks FROM pitcher_recent_starts
+       WHERE pitcher_id IN (${ph})
+       ORDER BY pitcher_id, game_date DESC`,
+      pitcherIdList
+    )
+    for (const r of startRows) {
+      if (!recentStartsMap[r.pitcher_id]) recentStartsMap[r.pitcher_id] = []
+      if (recentStartsMap[r.pitcher_id].length < 5) recentStartsMap[r.pitcher_id].push(r.ks)
+    }
   }
 
   const pitchers = []
@@ -1192,10 +1235,11 @@ router.get('/ks/daily', wrap(async (req, res) => {
     day_pending += p_pending
     pitchers.push({
       ...grp,
-      pnl:     roundTo(p_pnl, 2),
-      wins:    p_wins,
-      losses:  p_losses,
-      pending: p_pending,
+      pnl:       roundTo(p_pnl, 2),
+      wins:      p_wins,
+      losses:    p_losses,
+      pending:   p_pending,
+      recent_ks: recentStartsMap[grp.pitcher_id] || [],
     })
   }
 
@@ -1208,6 +1252,20 @@ router.get('/ks/daily', wrap(async (req, res) => {
     day_bets:    bets.length,
     pitchers,
   })
+}))
+
+// ------------------------------------------------------------------
+// GET /api/ks/recent-starts/:pitcher_id
+// Last 5 starts for a given pitcher (heat map data).
+// ------------------------------------------------------------------
+router.get('/ks/recent-starts/:pitcher_id', wrap(async (req, res) => {
+  const rows = await db.all(
+    `SELECT game_date, ks, ip, bf FROM pitcher_recent_starts
+     WHERE pitcher_id = ?
+     ORDER BY game_date DESC LIMIT 5`,
+    [req.params.pitcher_id]
+  )
+  res.json(rows)
 }))
 
 // ------------------------------------------------------------------

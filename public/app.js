@@ -101,6 +101,17 @@ async function refreshHero() {
 
   const wr = s.win_rate
   setHtml('hero-wr', `<span class="${wr >= 0.55 ? 'good' : wr >= 0.5 ? '' : 'bad'}">${fmtPct(wr)}</span>`)
+
+  if (s.last5 != null) {
+    const streakEl = document.getElementById('hero-streak')
+    if (streakEl) {
+      streakEl.classList.remove('skel')
+      const sc = s.current_streak
+      if (sc >= 3)       streakEl.innerHTML = `<span class="good">🔥 ${sc} in a row</span>`
+      else if (sc <= -3) streakEl.innerHTML = `<span class="bad">❄️ ${Math.abs(sc)} straight losses</span>`
+      else               streakEl.innerHTML = `<span>Last 5: ${s.last5}</span>`
+    }
+  }
   const betsEl = document.getElementById('hero-bets')
   betsEl.classList.remove('skel')
   betsEl.textContent = `${s.settled}/${s.total_bets}`
@@ -180,8 +191,84 @@ async function loadDay(date) {
     list.appendChild(buildPitcherCard(p))
   }
 
+  renderDaySummary(date, data)
+
   // Start live polling whenever there are pending bets
   if (data.day_pending > 0) startLivePolling(date)
+}
+
+function renderDaySummary(date, data) {
+  const el = document.getElementById('day-summary')
+  if (!el) return
+  if (!data || !data.pitchers?.length) { el.hidden = true; return }
+  el.hidden = false
+
+  const today = new Date().toISOString().slice(0, 10)
+  const isToday = date === today
+
+  // Compute avg edge + best pick
+  let allEdges = [], totalRisk = 0, totalPotential = 0
+  for (const p of data.pitchers) {
+    for (const b of p.bets) {
+      if (b.edge != null) allEdges.push(Number(b.edge) * 100)
+      const mid  = b.market_mid != null ? Number(b.market_mid) : null
+      const face = b.bet_size   != null ? Number(b.bet_size)   : null
+      if (mid != null && face != null) {
+        totalRisk      += face * mid / 100
+        totalPotential += face * (100 - mid) / 100
+      }
+    }
+  }
+  const avgEdge = allEdges.length ? allEdges.reduce((s,e) => s+e, 0) / allEdges.length : 0
+  const maxEdge = allEdges.length ? Math.max(...allEdges) : 0
+
+  // Best pick = highest-edge bet
+  let bestPick = null, bestEdgeVal = -Infinity
+  for (const p of data.pitchers) {
+    for (const b of p.bets) {
+      const e = b.edge != null ? Number(b.edge) * 100 : 0
+      if (e > bestEdgeVal) {
+        bestEdgeVal = e
+        bestPick = { name: p.pitcher_name, strike: b.strike, side: b.side, edge: e }
+      }
+    }
+  }
+
+  // Verdict
+  let verdict, verdictCls
+  if (avgEdge >= 8) {
+    verdict = 'Strong day — high confidence across the board.'
+    verdictCls = 'verdict-strong'
+  } else if (avgEdge >= 6) {
+    verdict = 'Solid day — good average edge, worth betting.'
+    verdictCls = 'verdict-ok'
+  } else if (avgEdge >= 4) {
+    verdict = 'Moderate day — edge is real but slim. Standard sizing.'
+    verdictCls = 'verdict-moderate'
+  } else {
+    verdict = 'Weak day — edge is thin. Consider skipping or reducing size.'
+    verdictCls = 'verdict-weak'
+  }
+
+  const bestLine = bestPick
+    ? ` Our best pick is <strong>${bestPick.name}</strong> (${bestPick.side === 'YES' ? `${bestPick.strike}+ Ks` : `under ${bestPick.strike} Ks`}, ${bestEdgeVal.toFixed(1)}¢ edge).`
+    : ''
+
+  const pending = data.day_pending
+  const settled = data.day_wins + data.day_losses
+  const statusLine = isToday && pending > 0
+    ? `${pending} bet${pending !== 1 ? 's' : ''} in progress.`
+    : settled > 0
+      ? `${data.day_wins}W · ${data.day_losses}L today.`
+      : ''
+
+  el.innerHTML = `
+    <div class="day-summary-verdict ${verdictCls}">${verdict}</div>
+    <div class="day-summary-body">
+      ${data.day_bets} bet${data.day_bets !== 1 ? 's' : ''} across ${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''}.${bestLine}
+      Total at risk: <strong>${fmt$(totalRisk)}</strong> · Best case: <strong>+${fmt$(totalPotential)}</strong>.
+      ${statusLine ? `<span class="muted">${statusLine}</span>` : ''}
+    </div>`
 }
 
 function buildPitcherCard(p) {
@@ -204,6 +291,34 @@ function buildPitcherCard(p) {
   const actualKsBadge = p.actual_ks != null
     ? `<div class="pc-actual-ks">Threw <strong>${p.actual_ks}</strong> Ks</div>`
     : ''
+
+  // Recent starts heat map
+  const heatMap = (() => {
+    if (!p.recent_ks || !p.recent_ks.length) return ''
+    const thresholds = [...new Set(p.bets.map(b => b.strike))].sort((a,b) => a - b)
+    if (!thresholds.length) return ''
+    const cols = p.recent_ks.map((ks, i) => {
+      const cells = thresholds.map(t => {
+        const hit = ks >= t
+        return `<div class="hm-cell ${hit ? 'hm-hit' : 'hm-miss'}" title="${ks} Ks (${hit ? 'over' : 'under'} ${t}+)">${ks}</div>`
+      })
+      return `<div class="hm-col">
+        <div class="hm-start-label">S-${p.recent_ks.length - i}</div>
+        ${cells.join('')}
+      </div>`
+    })
+    const rowLabels = thresholds.map(t => `<div class="hm-row-label">${t}+</div>`).join('')
+    return `<div class="pc-heatmap">
+      <div class="hm-header">Last ${p.recent_ks.length} starts</div>
+      <div class="hm-body">
+        <div class="hm-labels">
+          <div class="hm-corner"></div>
+          ${rowLabels}
+        </div>
+        <div class="hm-cols">${cols.join('')}</div>
+      </div>
+    </div>`
+  })()
 
   const betTiles = p.bets.map(b => {
     const mid  = b.market_mid != null ? Number(b.market_mid) : null
@@ -290,6 +405,10 @@ function buildPitcherCard(p) {
       return parts.join(' ') || 'Picked based on model edge vs. market price.'
     })()
 
+    const kalshiBtn = b.ticker
+      ? `<a class="pc-kalshi-btn" href="https://kalshi.com/markets/kxmlbks/${b.ticker}" target="_blank" rel="noopener">Place Bet →</a>`
+      : ''
+
     return `<div class="pc-bet-tile ${tileCls}" data-bet-id="${b.id}">
       <div class="pc-bet-main">
         <div class="pc-bet-desc">${direction}</div>
@@ -297,6 +416,7 @@ function buildPitcherCard(p) {
           <span class="pc-bet-wager">Bet ${wager}</span>
           ${moneyLine}
           ${resultBadge}
+          ${kalshiBtn}
           <button class="pc-detail-toggle" title="Show details">▼</button>
         </div>
       </div>
@@ -341,6 +461,7 @@ function buildPitcherCard(p) {
         ${actualKsBadge}
       </div>
     </div>
+    ${heatMap}
     <div class="pc-bet-tiles">${betTiles}</div>
     <div class="pc-footer">
       <div class="pc-wl">${summaryLine}</div>
