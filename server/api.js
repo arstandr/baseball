@@ -1202,20 +1202,31 @@ router.get('/ks/daily', wrap(async (req, res) => {
     })
   }
 
-  // Fetch last 5 starts per pitcher for heat map
   const pitcherIdList = [...new Set([...pitcherMap.values()].map(g => g.pitcher_id).filter(Boolean))]
-  let recentStartsMap = {}
+
+  // Fetch last 5 starts per pitcher for heat map + game times for sorting
+  let recentStartsMap = {}, gameTimeMap = {}
   if (pitcherIdList.length) {
     const ph = pitcherIdList.map(() => '?').join(',')
-    const startRows = await db.all(
-      `SELECT pitcher_id, game_date, ks FROM pitcher_recent_starts
-       WHERE pitcher_id IN (${ph})
-       ORDER BY pitcher_id, game_date DESC`,
-      pitcherIdList
-    )
+    const [startRows, gameRows] = await Promise.all([
+      db.all(
+        `SELECT pitcher_id, game_date, ks FROM pitcher_recent_starts
+         WHERE pitcher_id IN (${ph}) ORDER BY pitcher_id, game_date DESC`,
+        pitcherIdList,
+      ),
+      db.all(
+        `SELECT pitcher_home_id AS pid, game_time, status FROM games WHERE date = ? AND pitcher_home_id IN (${ph})
+         UNION
+         SELECT pitcher_away_id AS pid, game_time, status FROM games WHERE date = ? AND pitcher_away_id IN (${ph})`,
+        [date, ...pitcherIdList, date, ...pitcherIdList],
+      ),
+    ])
     for (const r of startRows) {
       if (!recentStartsMap[r.pitcher_id]) recentStartsMap[r.pitcher_id] = []
       if (recentStartsMap[r.pitcher_id].length < 5) recentStartsMap[r.pitcher_id].push(r.ks)
+    }
+    for (const r of gameRows) {
+      if (r.pid) gameTimeMap[r.pid] = { game_time: r.game_time, status: r.status }
     }
   }
 
@@ -1233,15 +1244,29 @@ router.get('/ks/daily', wrap(async (req, res) => {
     day_wins    += p_wins
     day_losses  += p_losses
     day_pending += p_pending
+    const gt = gameTimeMap[grp.pitcher_id] || {}
     pitchers.push({
       ...grp,
-      pnl:       roundTo(p_pnl, 2),
-      wins:      p_wins,
-      losses:    p_losses,
-      pending:   p_pending,
-      recent_ks: recentStartsMap[grp.pitcher_id] || [],
+      game_time:   gt.game_time || null,
+      game_status: gt.status    || null,
+      pnl:         roundTo(p_pnl, 2),
+      wins:        p_wins,
+      losses:      p_losses,
+      pending:     p_pending,
+      recent_ks:   recentStartsMap[grp.pitcher_id] || [],
     })
   }
+
+  // Sort: in_progress first, then by game_time ASC, then final (already done)
+  pitchers.sort((a, b) => {
+    const rank = s => s === 'in_progress' ? 0 : s === 'final' ? 2 : 1
+    const dr = rank(a.game_status) - rank(b.game_status)
+    if (dr !== 0) return dr
+    if (a.game_time && b.game_time) return a.game_time.localeCompare(b.game_time)
+    if (a.game_time) return -1
+    if (b.game_time) return 1
+    return a.pitcher_name.localeCompare(b.pitcher_name)
+  })
 
   res.json({
     date,
