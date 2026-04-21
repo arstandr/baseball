@@ -213,9 +213,12 @@ function renderDaySummary(date, data) {
       if (b.edge != null) allEdges.push(Number(b.edge) * 100)
       const mid  = b.market_mid != null ? Number(b.market_mid) : null
       const face = b.bet_size   != null ? Number(b.bet_size)   : null
+      const hs   = (b.spread ?? 4) / 2
       if (mid != null && face != null) {
-        totalRisk      += face * mid / 100
-        totalPotential += face * (100 - mid) / 100
+        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+        totalRisk      += face * fill / 100
+        totalPotential += face * win  / 100
       }
     }
   }
@@ -321,10 +324,14 @@ function buildPitcherCard(p) {
   })()
 
   const betTiles = p.bets.map(b => {
-    const mid  = b.market_mid != null ? Number(b.market_mid) : null
-    const face = b.bet_size   != null ? Number(b.bet_size)   : null
-    const wager  = mid != null && face != null ? fmt$(face * mid / 100) : '—'
-    const potWin = mid != null && face != null ? fmt$(face * (100 - mid) / 100) : '—'
+    const mid        = b.market_mid != null ? Number(b.market_mid) : null
+    const face       = b.bet_size   != null ? Number(b.bet_size)   : null
+    const halfSpread = (b.spread ?? 4) / 2
+    // Fill at ask price (mid + halfSpread for YES, (100-mid) + halfSpread for NO)
+    const fillCents  = mid != null ? (b.side === 'YES' ? mid + halfSpread : (100 - mid) + halfSpread) : null
+    const winCents   = mid != null ? (b.side === 'YES' ? (100 - mid) - halfSpread : mid - halfSpread) : null
+    const wager  = fillCents != null && face != null ? fmt$(face * fillCents / 100) : '—'
+    const potWin = winCents  != null && face != null ? fmt$(face * winCents  / 100) : '—'
 
     // Plain-English description of what we're betting on
     const direction = b.side === 'YES'
@@ -362,8 +369,8 @@ function buildPitcherCard(p) {
     // Plain-English explainer — what this Kalshi contract actually is
     const firstName = p.pitcher_name.split(' ')[0]
     const betExplainer = (() => {
-      const winAmt  = mid != null && face != null ? fmt$(face * (1 - mid / 100)) : null
-      const riskAmt = mid != null && face != null ? fmt$(face * mid / 100) : null
+      const winAmt  = winCents  != null && face != null ? fmt$(face * winCents  / 100) : null
+      const riskAmt = fillCents != null && face != null ? fmt$(face * fillCents / 100) : null
       if (b.side === 'YES') {
         return `This is a Kalshi contract that pays out if ${firstName} records ${b.strike} or more strikeouts today. ` +
           (winAmt && riskAmt ? `If he hits that mark, we win ${winAmt}. If he falls short, we lose ${riskAmt}.` : '')
