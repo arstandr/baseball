@@ -1560,4 +1560,182 @@ router.get('/ks/pitcher-leaderboard', wrap(async (req, res) => {
   res.json({ top: all.slice(0, 10), bottom: [...all].slice(-10).reverse() })
 }))
 
+// ------------------------------------------------------------------
+// GET /api/ks/game-review?from=&to=&result=
+// All bets grouped by date → game (pitcher), for the game review panel.
+// ------------------------------------------------------------------
+router.get('/ks/game-review', wrap(async (req, res) => {
+  const { from, to, result } = req.query
+  const conds = ['live_bet = 0']
+  const vals  = []
+  if (from)   { conds.push('bet_date >= ?'); vals.push(from) }
+  if (to)     { conds.push('bet_date <= ?'); vals.push(to) }
+  if (result === 'pending') { conds.push('result IS NULL') }
+  else if (result)          { conds.push('result = ?'); vals.push(result) }
+
+  const rows = await db.all(
+    `SELECT bet_date, pitcher_name, pitcher_id, game, team,
+            strike, side, edge, lambda, actual_ks, result, pnl, bet_size,
+            savant_k_pct, savant_whiff, savant_fbv, opp_k_pct,
+            park_factor, weather_mult, ump_factor, ump_name
+     FROM ks_bets
+     WHERE ${conds.join(' AND ')}
+     ORDER BY bet_date DESC, pitcher_name ASC, strike ASC`,
+    vals,
+  )
+
+  // Group by date → pitcher/game
+  const byDate = {}
+  for (const r of rows) {
+    const d = r.bet_date
+    if (!byDate[d]) byDate[d] = {}
+    const key = `${r.pitcher_name}||${r.game}`
+    if (!byDate[d][key]) {
+      byDate[d][key] = {
+        pitcher_name: r.pitcher_name,
+        pitcher_id:   r.pitcher_id,
+        game:         r.game,
+        team:         r.team,
+        lambda:       r.lambda,
+        actual_ks:    r.actual_ks,
+        savant_k_pct: r.savant_k_pct,
+        savant_whiff: r.savant_whiff,
+        savant_fbv:   r.savant_fbv,
+        opp_k_pct:    r.opp_k_pct,
+        park_factor:  r.park_factor,
+        weather_mult: r.weather_mult,
+        ump_factor:   r.ump_factor,
+        ump_name:     r.ump_name,
+        bets: [],
+      }
+    }
+    byDate[d][key].bets.push({
+      strike: r.strike,
+      side:   r.side,
+      edge:   r.edge,
+      bet_size: r.bet_size,
+      result: r.result,
+      pnl:    r.pnl,
+    })
+  }
+
+  // Flatten to array of { date, games: [...] }
+  const dates = Object.keys(byDate).sort().reverse()
+  const output = dates.map(date => {
+    const games = Object.values(byDate[date]).map(g => {
+      const settled  = g.bets.filter(b => b.result)
+      const wins     = settled.filter(b => b.result === 'win').length
+      const losses   = settled.filter(b => b.result === 'loss').length
+      const pending  = g.bets.filter(b => !b.result).length
+      const pnl      = settled.reduce((s, b) => s + Number(b.pnl || 0), 0)
+      const lambda_err = g.actual_ks != null
+        ? roundTo(Number(g.lambda || 0) - Number(g.actual_ks), 1)
+        : null
+      return { ...g, wins, losses, pending, pnl: roundTo(pnl, 2), lambda_err }
+    })
+    return { date, games }
+  })
+
+  res.json(output)
+}))
+
+// ------------------------------------------------------------------
+// GET /api/ks/testing
+// Edge calibration, lambda accuracy, and threshold simulation.
+// ------------------------------------------------------------------
+router.get('/ks/testing', wrap(async (req, res) => {
+  const [calibRows, lambdaRows, allSettled] = await Promise.all([
+    // Edge calibration: win rate by edge bucket (5¢ increments)
+    db.all(`
+      SELECT
+        CAST(ROUND(edge / 0.05) * 0.05 * 100 AS INTEGER) AS bucket_cents,
+        COUNT(*)                                           AS bets,
+        SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END)    AS wins,
+        SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END)    AS losses,
+        SUM(COALESCE(pnl,0))                              AS pnl,
+        AVG(edge)                                         AS avg_edge
+      FROM ks_bets
+      WHERE result IS NOT NULL AND live_bet = 0 AND edge IS NOT NULL
+      GROUP BY bucket_cents
+      ORDER BY bucket_cents ASC
+    `),
+    // Lambda accuracy: predicted vs actual Ks per pitcher
+    db.all(`
+      SELECT
+        pitcher_name,
+        AVG(lambda)     AS avg_lambda,
+        AVG(actual_ks)  AS avg_actual,
+        COUNT(*)        AS bets,
+        SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+        SUM(COALESCE(pnl,0)) AS pnl
+      FROM ks_bets
+      WHERE result IS NOT NULL AND live_bet = 0 AND lambda IS NOT NULL AND actual_ks IS NOT NULL
+      GROUP BY pitcher_name
+      HAVING bets >= 3
+      ORDER BY bets DESC
+    `),
+    // All settled bets for threshold simulation
+    db.all(`
+      SELECT edge, result, pnl, bet_size
+      FROM ks_bets
+      WHERE result IS NOT NULL AND live_bet = 0 AND edge IS NOT NULL
+      ORDER BY edge ASC
+    `),
+  ])
+
+  // Calibration: add win_rate, roi
+  const calibration = calibRows.map(r => {
+    const wins   = Number(r.wins   || 0)
+    const losses = Number(r.losses || 0)
+    const pnl    = Number(r.pnl   || 0)
+    return {
+      bucket_cents: Number(r.bucket_cents),
+      bets:    Number(r.bets),
+      wins, losses,
+      win_rate: wins + losses > 0 ? roundTo(wins / (wins + losses), 4) : 0,
+      pnl:      roundTo(pnl, 2),
+    }
+  })
+
+  // Lambda accuracy
+  const lambda_accuracy = lambdaRows.map(r => {
+    const wins   = Number(r.wins   || 0)
+    const losses = Number(r.losses || 0)
+    return {
+      pitcher:    r.pitcher_name,
+      avg_lambda: roundTo(Number(r.avg_lambda || 0), 2),
+      avg_actual: roundTo(Number(r.avg_actual || 0), 2),
+      lambda_err: roundTo(Number(r.avg_lambda || 0) - Number(r.avg_actual || 0), 2),
+      bets:    Number(r.bets),
+      wins, losses,
+      win_rate: wins + losses > 0 ? roundTo(wins / (wins + losses), 4) : 0,
+      pnl:      roundTo(Number(r.pnl || 0), 2),
+    }
+  })
+
+  // Threshold simulation: for each edge threshold (4¢–20¢ in 1¢ steps)
+  // show W/L/ROI if you only took bets with edge >= threshold
+  const thresholds = []
+  for (let t = 4; t <= 20; t++) {
+    const thresh = t / 100
+    const subset = allSettled.filter(b => Number(b.edge) >= thresh)
+    if (!subset.length) break
+    const wins   = subset.filter(b => b.result === 'win').length
+    const losses = subset.filter(b => b.result === 'loss').length
+    const pnl    = subset.reduce((s, b) => s + Number(b.pnl || 0), 0)
+    const wagered = subset.reduce((s, b) => s + Number(b.bet_size || 0), 0)
+    thresholds.push({
+      threshold_cents: t,
+      bets:    subset.length,
+      wins, losses,
+      win_rate: wins + losses > 0 ? roundTo(wins / (wins + losses), 4) : 0,
+      pnl:      roundTo(pnl, 2),
+      roi:      wagered > 0 ? roundTo(pnl / wagered, 4) : 0,
+    })
+  }
+
+  res.json({ calibration, lambda_accuracy, thresholds })
+}))
+
 export default router

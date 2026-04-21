@@ -737,3 +737,38 @@ a:hover { text-decoration: underline; }
   .ks-sc-val { font-size: 18px; }
   .ks-lb-head > :nth-child(4), .ks-lb-row > :nth-child(4) { display: none; }
 }
+
+/* ── Testing view ── */
+.review-date-hdr { font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted); padding: 12px 0 6px; border-top: 1px solid var(--border); margin-top: 8px; }
+.review-date-hdr:first-child { border-top: none; margin-top: 0; }
+.review-game-card { background: var(--surface2); border-radius: 8px; padding: 12px 14px;
+  margin-bottom: 8px; border: 1px solid var(--border); }
+.review-game-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.review-pitcher { font-weight: 700; font-size: 14px; }
+.review-game-id { font-size: 11px; color: var(--muted); }
+.review-pnl { font-weight: 700; font-size: 14px; margin-left: auto; }
+.review-game-meta { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px;
+  color: var(--muted); margin-bottom: 8px; }
+.review-game-meta span b { color: var(--text); }
+.lambda-note { font-weight: 600; }
+.lambda-note.warn { color: var(--orange, #f59e0b); }
+.review-bets { display: flex; flex-wrap: wrap; gap: 6px; }
+.bet-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px;
+  border-radius: 5px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); }
+.bet-chip em { font-style: normal; opacity: .7; }
+.bet-chip.win  { background: rgba(34,197,94,.12); border-color: rgba(34,197,94,.3); color: #22c55e; }
+.bet-chip.loss { background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.3); color: #ef4444; }
+.bet-chip.pending { background: rgba(148,163,184,.1); color: var(--muted); }
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.badge.win     { background: rgba(34,197,94,.15); color: #22c55e; }
+.badge.loss    { background: rgba(239,68,68,.15); color: #ef4444; }
+.badge.pending { background: rgba(148,163,184,.1); color: var(--muted); }
+.badge.mixed   { background: rgba(251,191,36,.12); color: #fbbf24; }
+.test-table-wrap { overflow-x: auto; }
+.test-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.test-table th { text-align: left; padding: 8px 10px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); border-bottom: 1px solid var(--border); }
+.test-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.test-table tr:last-child td { border-bottom: none; }
+.test-table tr:hover td { background: var(--surface2); }

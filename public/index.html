@@ -18,6 +18,7 @@
     <nav class="modes" role="tablist">
       <button class="mode active" data-view="today"    role="tab">TODAY</button>
       <button class="mode"        data-view="trends"   role="tab">TRENDS</button>
+      <button class="mode"        data-view="testing"  role="tab">TESTING</button>
       <button class="mode"        data-view="log"      role="tab">BET LOG</button>
       <button class="mode"        data-view="settings" role="tab">SETTINGS</button>
     </nav>
@@ -210,6 +211,66 @@
         </div>
         <div class="log-pagination" id="log-pagination"></div>
       </div>
+    </section>
+
+    <!-- ══════════════ TESTING VIEW ══════════════ -->
+    <section class="view" id="view-testing" hidden>
+
+      <!-- Game Review -->
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-head">
+          <h2>Game Review</h2>
+          <span class="panel-sub">Results &amp; model notes per game</span>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <select class="filter-btn" id="test-result-filter" style="width:110px">
+              <option value="">All Results</option>
+              <option value="win">Wins</option>
+              <option value="loss">Losses</option>
+              <option value="pending">Pending</option>
+            </select>
+            <input type="date" id="test-date-from" class="filter-btn" style="width:130px"/>
+            <input type="date" id="test-date-to"   class="filter-btn" style="width:130px"/>
+            <button class="filter-btn active" id="test-filter-btn">Filter</button>
+          </div>
+        </div>
+        <div id="game-review-list">
+          <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+        </div>
+      </div>
+
+      <!-- Edge Calibration -->
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-head"><h2>Edge Calibration</h2><span class="panel-sub">Predicted edge bucket vs actual win rate</span></div>
+        <div class="test-table-wrap">
+          <table class="test-table" id="calib-table">
+            <thead><tr><th>Edge Bucket</th><th>Bets</th><th>W</th><th>L</th><th>Win Rate</th><th>P&amp;L</th></tr></thead>
+            <tbody><tr><td colspan="6" class="skel-row"></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Threshold Simulator -->
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-head"><h2>Edge Threshold Simulator</h2><span class="panel-sub">ROI if you only took bets at ≥X¢ edge</span></div>
+        <div class="test-table-wrap">
+          <table class="test-table" id="thresh-table">
+            <thead><tr><th>Min Edge</th><th>Bets</th><th>W</th><th>L</th><th>Win Rate</th><th>P&amp;L</th><th>ROI</th></tr></thead>
+            <tbody><tr><td colspan="7" class="skel-row"></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Lambda Accuracy -->
+      <div class="panel">
+        <div class="panel-head"><h2>Model λ Accuracy</h2><span class="panel-sub">Predicted Ks vs actual Ks per pitcher (≥3 settled bets)</span></div>
+        <div class="test-table-wrap">
+          <table class="test-table" id="lambda-table">
+            <thead><tr><th>Pitcher</th><th>Avg λ</th><th>Avg Actual</th><th>Error</th><th>Bets</th><th>Win Rate</th><th>P&amp;L</th></tr></thead>
+            <tbody><tr><td colspan="7" class="skel-row"></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
     </section>
 
     <!-- ══════════════ SETTINGS VIEW ══════════════ -->
