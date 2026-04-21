@@ -5,7 +5,7 @@ const state = {
   view:         localStorage.getItem('ks.view') || 'today',
   selectedDate: null,
   charts:       { bankroll: null, daily: null, weekly: null },
-  log:          { page: 1, pitcher: '', side: '', result: '', from: '', to: '' },
+  log:          { page: 1, pitcher: '', side: '', result: '', from: '', to: '', sort: 'bet_date', dir: 'desc' },
   lastRefresh:  null,
   currentUser:  null,
   liveTimer:    null,
@@ -18,11 +18,29 @@ document.addEventListener('DOMContentLoaded', init)
 
 async function init() {
   await loadUser()
+  loadDeployTime()
   wireTabs()
   applyView(state.view, false)
   await refreshAll()
   setInterval(refreshHero, 3 * 60 * 1000)
   setInterval(updateLastSeen, 15 * 1000)
+}
+
+async function loadDeployTime() {
+  const el = document.getElementById('deploy-time')
+  if (!el) return
+  const meta = await fetchJson('/api/meta').catch(() => null)
+  if (!meta?.deploy_time) return
+  const d = new Date(meta.deploy_time)
+  const now = new Date()
+  const diffMin = Math.round((now - d) / 60000)
+  const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const ago = diffMin < 60
+    ? `${diffMin}m ago`
+    : diffMin < 1440
+    ? `${Math.round(diffMin / 60)}h ago`
+    : `${Math.round(diffMin / 1440)}d ago`
+  el.textContent = `Deployed ${timeStr} (${ago})`
 }
 
 async function loadUser() {
@@ -320,7 +338,7 @@ function buildPitcherCard(p) {
     if (p.pending > 0) statusChips += `<span class="pc-chip pending">${p.pending} live</span>`
   }
 
-  // Total $ at risk for this pitcher
+  // Total $ at risk + overall win pct for progress bar
   let totalRisk = 0
   for (const b of p.bets) {
     const mid = b.market_mid != null ? Number(b.market_mid) / 100 : 0.5
@@ -328,6 +346,9 @@ function buildPitcherCard(p) {
     const fill = b.side === 'YES' ? mid + hs : (1 - mid) + hs
     totalRisk += (b.bet_size ?? 0) * fill
   }
+  const totalBets  = p.wins + p.losses + p.pending
+  const overallPct = totalBets > 0 ? Math.round(p.wins / totalBets * 100) : 0
+  const overallClr = overallPct >= 60 ? 'good' : overallPct >= 30 ? '' : (p.losses > 0 ? 'bad' : '')
 
   // ── Expanded body ────────────────────────────────────────────────────────
 
@@ -424,15 +445,31 @@ function buildPitcherCard(p) {
 
     const rowCls = b.result === 'win' ? 'pc-bet-row--win' : b.result === 'loss' ? 'pc-bet-row--loss' : ''
 
+    let progressBar
+    if (b.result === 'win') {
+      progressBar = `<div class="pc-ks-progress">
+        <div class="pc-ks-bar"><div class="pc-ks-fill hit" style="width:100%"></div></div>
+        <span class="pc-ks-label">✓ ${b.actual_ks ?? b.strike}+ Ks hit</span>
+      </div>`
+    } else if (b.result === 'loss') {
+      progressBar = `<div class="pc-ks-progress">
+        <div class="pc-ks-bar"><div class="pc-ks-fill miss" style="width:100%"></div></div>
+        <span class="pc-ks-label">✗ ${b.actual_ks ?? '?'} Ks</span>
+      </div>`
+    } else {
+      const lbl = b.side === 'YES' ? `0 / ${b.strike} Ks` : `0 Ks (need < ${b.strike})`
+      progressBar = `<div class="pc-ks-progress">
+        <div class="pc-ks-bar"><div class="pc-ks-fill" style="width:0%"></div></div>
+        <span class="pc-ks-label">${lbl}</span>
+      </div>`
+    }
+
     return `<div class="pc-bet-row ${rowCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}">
       <div class="pc-bet-row-left">
         <span class="pc-bet-row-desc">${direction}</span>
         <span class="pc-bet-row-meta">${[edgeStr, midStr].filter(Boolean).join(' · ')}</span>
       </div>
-      <div class="pc-ks-progress" hidden>
-        <div class="pc-ks-bar"><div class="pc-ks-fill"></div></div>
-        <span class="pc-ks-label"></span>
-      </div>
+      ${progressBar}
       <div class="pc-bet-row-right">
         <span class="pc-bet-wager">${wager}</span>
         ${moneyStr}
@@ -456,6 +493,7 @@ function buildPitcherCard(p) {
         <div class="pc-expand-arrow">›</div>
       </div>
     </div>
+    <div class="pc-overall-bar"><div class="pc-overall-fill ${overallClr}" style="width:${overallPct}%"></div></div>
     <div class="pc-body" hidden>
       <div class="pc-signals-section">
         <div class="pc-signals">${signalItems}</div>
@@ -557,6 +595,24 @@ function updatePitcherCardLive(p) {
     const meta = card.querySelector('.pc-meta')
     if (meta && !meta.querySelector('.tto-warn'))
       meta.insertAdjacentHTML('beforeend', ' <span class="tto-warn">⚠ Pitch limit</span>')
+  }
+
+  // Update overall header bar
+  const overallFill = card.querySelector('.pc-overall-fill')
+  if (overallFill) {
+    let winning = 0
+    for (const bs of p.bet_statuses) {
+      const isNo = bs.side === 'NO'
+      if (bs.result === 'win') winning++
+      else if (!bs.result) {
+        if (!isNo && bs.ks >= bs.strike) winning++
+        else if (isNo && bs.ks < bs.strike) winning++
+      }
+    }
+    const total = p.bet_statuses.length
+    const pct = total > 0 ? Math.round(winning / total * 100) : 0
+    overallFill.style.width = `${pct}%`
+    overallFill.className = `pc-overall-fill ${pct >= 60 ? 'good' : winning === 0 && total > 0 ? 'bad' : ''}`
   }
 
   // Update each bet row
@@ -937,6 +993,7 @@ function renderLbRows(id, rows) {
 // ──────────────────────────────────────────────────────────────────────────
 async function refreshLogView() {
   wireLogFilters()
+  updateSortIcons()
   await loadBets()
 }
 
@@ -950,10 +1007,66 @@ function wireLogFilters() {
     document.getElementById('lf-result').value  = ''
     document.getElementById('lf-from').value    = ''
     document.getElementById('lf-to').value      = ''
-    state.log = { page: 1, pitcher: '', side: '', result: '', from: '', to: '' }
+    state.log = { page: 1, pitcher: '', side: '', result: '', from: '', to: '', sort: 'bet_date', dir: 'desc' }
+    document.querySelectorAll('.log-preset-btn').forEach(b => b.classList.remove('active'))
     loadBets()
   })
   document.getElementById('lf-pitcher').addEventListener('keydown', e => { if (e.key === 'Enter') { state.log.page = 1; loadBets() } })
+
+  // Quick-date preset buttons
+  document.querySelectorAll('.log-preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const today = new Date()
+      const fmt = d => d.toISOString().split('T')[0]
+      let from, to = fmt(today)
+      if (btn.dataset.preset === 'today') {
+        from = fmt(today)
+      } else if (btn.dataset.preset === 'yesterday') {
+        const y = new Date(today); y.setDate(today.getDate() - 1)
+        from = to = fmt(y)
+      } else if (btn.dataset.preset === 'week') {
+        const s = new Date(today); s.setDate(today.getDate() - today.getDay())
+        from = fmt(s)
+      } else if (btn.dataset.preset === 'month') {
+        from = fmt(new Date(today.getFullYear(), today.getMonth(), 1))
+      }
+      document.getElementById('lf-from').value = from
+      document.getElementById('lf-to').value   = to
+      document.querySelectorAll('.log-preset-btn').forEach(b => b.classList.remove('active'))
+      btn.classList.add('active')
+      state.log.page = 1; loadBets()
+    })
+  })
+
+  // Sortable column headers
+  document.querySelectorAll('.ks-log-head .sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort
+      if (state.log.sort === col) {
+        state.log.dir = state.log.dir === 'desc' ? 'asc' : 'desc'
+      } else {
+        state.log.sort = col
+        state.log.dir = 'desc'
+      }
+      state.log.page = 1
+      updateSortIcons()
+      loadBets()
+    })
+  })
+}
+
+function updateSortIcons() {
+  document.querySelectorAll('.ks-log-head .sortable').forEach(th => {
+    const icon = th.querySelector('.sort-icon')
+    if (!icon) return
+    if (th.dataset.sort === state.log.sort) {
+      icon.textContent = state.log.dir === 'asc' ? '↑' : '↓'
+      th.classList.add('sort-active')
+    } else {
+      icon.textContent = '↕'
+      th.classList.remove('sort-active')
+    }
+  })
 }
 
 async function loadBets() {
@@ -970,6 +1083,8 @@ async function loadBets() {
   if (f.result)  params.set('result', f.result)
   if (f.from)    params.set('from', f.from)
   if (f.to)      params.set('to', f.to)
+  params.set('sort', f.sort || 'bet_date')
+  params.set('dir',  f.dir  || 'desc')
 
   const data = await fetchJson(`/api/ks/bets?${params}`).catch(() => null)
   const body = document.getElementById('log-body')

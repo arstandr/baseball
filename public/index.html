@@ -25,6 +25,8 @@
     <div class="user" id="user-chip">
       <div class="user-meta">
         <span id="user-name">—</span>
+        <span id="deploy-time" class="deploy-time"></span>
+        <button class="hard-refresh-btn" title="Hard refresh" onclick="location.reload(true)">↺</button>
         <a href="/auth/logout" class="logout">Sign out</a>
       </div>
     </div>
@@ -182,6 +184,12 @@
     <!-- ══════════════ BET LOG VIEW ══════════════ -->
     <section class="view" id="view-log" hidden>
       <div class="log-filters panel">
+        <div class="log-preset-row">
+          <button class="log-preset-btn" data-preset="today">Today</button>
+          <button class="log-preset-btn" data-preset="yesterday">Yesterday</button>
+          <button class="log-preset-btn" data-preset="week">This Week</button>
+          <button class="log-preset-btn" data-preset="month">This Month</button>
+        </div>
         <div class="log-filter-row">
           <input type="text"  id="lf-pitcher" placeholder="Pitcher name…" />
           <select id="lf-side">
@@ -203,8 +211,13 @@
       <div class="panel" style="padding:0">
         <div class="ks-log-table">
           <div class="ks-log-head">
-            <div>Date</div><div>Pitcher</div><div>Bet</div>
-            <div>Wager</div><div>Threw</div><div>Result</div><div>Profit / Loss</div>
+            <div class="sortable" data-sort="bet_date">Date <span class="sort-icon">↕</span></div>
+            <div class="sortable" data-sort="pitcher_name">Pitcher <span class="sort-icon">↕</span></div>
+            <div class="sortable" data-sort="strike">Bet <span class="sort-icon">↕</span></div>
+            <div class="sortable" data-sort="bet_size">Wager <span class="sort-icon">↕</span></div>
+            <div class="sortable" data-sort="actual_ks">Threw <span class="sort-icon">↕</span></div>
+            <div class="sortable" data-sort="result">Result <span class="sort-icon">↕</span></div>
+            <div class="sortable" data-sort="pnl">Profit / Loss <span class="sort-icon">↕</span></div>
           </div>
           <div class="ks-log-body" id="log-body">
             <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>

@@ -12,6 +12,7 @@ import express from 'express'
 import * as db from '../lib/db.js'
 
 const router = express.Router()
+const SERVER_START = new Date().toISOString()
 
 // ------------------------------------------------------------------
 // Small utilities
@@ -1418,12 +1419,17 @@ router.get('/ks/bets', wrap(async (req, res) => {
   if (req.query.from)    { where += ` AND bet_date >= ?`; params.push(req.query.from) }
   if (req.query.to)      { where += ` AND bet_date <= ?`; params.push(req.query.to) }
 
+  const ALLOWED_SORT = new Set(['bet_date','pitcher_name','strike','side','actual_ks','result','pnl','bet_size','edge'])
+  const sortCol = ALLOWED_SORT.has(req.query.sort) ? req.query.sort : 'bet_date'
+  const sortDir = req.query.dir === 'asc' ? 'ASC' : 'DESC'
+  const orderBy = sortCol === 'bet_date' ? `bet_date ${sortDir}, id ${sortDir}` : `${sortCol} ${sortDir}, bet_date DESC`
+
   const [rows, countRow] = await Promise.all([
     db.all(
       `SELECT id, bet_date, pitcher_name, team, game, strike, side,
               model_prob, market_mid, edge, lambda, actual_ks, result, pnl, bet_size, ticker
        FROM ks_bets WHERE ${where}
-       ORDER BY bet_date DESC, id DESC LIMIT ? OFFSET ?`,
+       ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
       [...params, limit, offset],
     ),
     db.one(`SELECT COUNT(*) AS n FROM ks_bets WHERE ${where}`, params),
@@ -1446,6 +1452,11 @@ router.get('/ks/bets', wrap(async (req, res) => {
 // ===========================================================================
 // Users management
 // ===========================================================================
+
+// GET /api/meta — server start time (proxy for deploy time)
+router.get('/meta', wrap(async (req, res) => {
+  res.json({ deploy_time: SERVER_START })
+}))
 
 // GET /api/users — list all users
 router.get('/users', wrap(async (req, res) => {
