@@ -49,7 +49,7 @@ async function loadUser() {
     if (!r.ok) { window.location.href = '/login'; return }
     const { user } = await r.json()
     state.currentUser = user?.name
-    document.getElementById('user-name').textContent = user?.name || '—'
+    document.getElementById('user-name').textContent = (user?.name || '—').split(' ')[0]
   } catch { window.location.href = '/login' }
 }
 
@@ -204,7 +204,17 @@ async function loadDay(date) {
     </div>
     <div class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>`
 
-  for (const p of data.pitchers) {
+  // Sort by total stake descending so Watch games (highest $) are always first
+  const sorted = [...data.pitchers].sort((a, b) => {
+    const stakeOf = p => p.bets.reduce((s, b) => {
+      const mid = b.market_mid != null ? Number(b.market_mid) / 100 : 0.5
+      const hs  = (b.spread ?? 4) / 200
+      return s + (b.bet_size ?? 0) * (b.side === 'YES' ? mid + hs : (1 - mid) + hs)
+    }, 0)
+    return stakeOf(b) - stakeOf(a)
+  })
+
+  for (const p of sorted) {
     try {
       list.appendChild(buildPitcherCard(p))
     } catch (err) {
@@ -346,9 +356,19 @@ function buildPitcherCard(p) {
     const fill = b.side === 'YES' ? mid + hs : (1 - mid) + hs
     totalRisk += (b.bet_size ?? 0) * fill
   }
+  card.dataset.stake = totalRisk  // set after computed
+
   const totalBets  = p.wins + p.losses + p.pending
   const overallPct = totalBets > 0 ? Math.round(p.wins / totalBets * 100) : 0
   const overallClr = overallPct >= 60 ? 'good' : overallPct >= 30 ? '' : (p.losses > 0 ? 'bad' : '')
+
+  // Average model probability across pending bets → "coverage chance"
+  const pendingBets = p.bets.filter(b => !b.result)
+  const avgCoverage = pendingBets.length > 0
+    ? pendingBets.reduce((s, b) => s + (b.model_prob ?? 0.5), 0) / pendingBets.length
+    : p.bets.length > 0 ? p.bets.reduce((s, b) => s + (b.model_prob ?? 0.5), 0) / p.bets.length : null
+  const coverPct = avgCoverage != null ? Math.round(avgCoverage * 100) : null
+  const coverCls = coverPct >= 60 ? 'good' : coverPct >= 40 ? 'warn' : 'bad'
 
   // ── Expanded body ────────────────────────────────────────────────────────
 
@@ -445,37 +465,46 @@ function buildPitcherCard(p) {
 
     const rowCls = b.result === 'win' ? 'pc-bet-row--win' : b.result === 'loss' ? 'pc-bet-row--loss' : ''
 
+    const betCoverPct = b.model_prob != null ? Math.round(b.model_prob * 100) : null
+    const betCoverCls = betCoverPct >= 60 ? 'good' : betCoverPct >= 40 ? 'warn' : 'bad'
+    const betCoverTag = betCoverPct != null ? `<span class="pc-bet-cover ${betCoverCls}">${betCoverPct}%</span>` : ''
+
     let progressBar
     if (b.result === 'win') {
       progressBar = `<div class="pc-ks-progress">
         <div class="pc-ks-bar"><div class="pc-ks-fill hit" style="width:100%"></div></div>
         <span class="pc-ks-label">✓ ${b.actual_ks ?? b.strike}+ Ks hit</span>
+        ${betCoverTag}
       </div>`
     } else if (b.result === 'loss') {
       progressBar = `<div class="pc-ks-progress">
         <div class="pc-ks-bar"><div class="pc-ks-fill miss" style="width:100%"></div></div>
         <span class="pc-ks-label">✗ ${b.actual_ks ?? '?'} Ks</span>
+        ${betCoverTag}
       </div>`
     } else {
       const lbl = b.side === 'YES' ? `0 / ${b.strike} Ks` : `0 Ks (need < ${b.strike})`
       progressBar = `<div class="pc-ks-progress">
         <div class="pc-ks-bar"><div class="pc-ks-fill" style="width:0%"></div></div>
         <span class="pc-ks-label">${lbl}</span>
+        ${betCoverTag}
       </div>`
     }
 
     return `<div class="pc-bet-row ${rowCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}">
-      <div class="pc-bet-row-left">
-        <span class="pc-bet-row-desc">${direction}</span>
-        <span class="pc-bet-row-meta">${[edgeStr, midStr].filter(Boolean).join(' · ')}</span>
+      <div class="pc-bet-row-main">
+        <div class="pc-bet-row-left">
+          <span class="pc-bet-row-desc">${direction}</span>
+          <span class="pc-bet-row-meta">${[edgeStr, midStr].filter(Boolean).join(' · ')}</span>
+        </div>
+        <div class="pc-bet-row-right">
+          <span class="pc-bet-wager">${wager}</span>
+          ${moneyStr}
+          ${badge}
+          ${kalshiBtn}
+        </div>
       </div>
       ${progressBar}
-      <div class="pc-bet-row-right">
-        <span class="pc-bet-wager">${wager}</span>
-        ${moneyStr}
-        ${badge}
-        ${kalshiBtn}
-      </div>
     </div>`
   }).join('')
 
@@ -487,6 +516,7 @@ function buildPitcherCard(p) {
       </div>
       <div class="pc-header-right">
         <div class="pc-actual-ks">${p.actual_ks != null ? `<strong>${p.actual_ks}</strong> Ks` : ''}</div>
+        ${coverPct != null ? `<div class="pc-coverage ${coverCls}">${coverPct}% cover</div>` : ''}
         <div class="pc-header-chips">${statusChips}</div>
         <div class="pc-header-risk">${fmt$(totalRisk)} at risk</div>
         ${pnlStr ? `<div class="pc-header-pnl">${pnlStr}</div>` : ''}
@@ -528,6 +558,19 @@ async function pollLive(date) {
 
   for (const p of data.pitchers) {
     updatePitcherCardLive(p)
+  }
+
+  // Re-sort: in-progress games first, then by stake
+  const list = document.getElementById('pitcher-list')
+  if (list) {
+    const cards = [...list.querySelectorAll('.pitcher-card')]
+    cards.sort((a, b) => {
+      const aLive  = !!a.querySelector('.pc-live-badge.pulsing')
+      const bLive  = !!b.querySelector('.pc-live-badge.pulsing')
+      if (aLive !== bLive) return aLive ? -1 : 1
+      return Number(b.dataset.stake || 0) - Number(a.dataset.stake || 0)
+    })
+    cards.forEach(c => list.appendChild(c))
   }
 
   // If everything is final and all bets have settled results, stop polling
