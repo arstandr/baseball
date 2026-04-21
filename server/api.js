@@ -993,11 +993,13 @@ router.get('/ks/live', wrap(async (req, res) => {
 
   for (const g of games) {
     const status = g.status?.abstractGameState   // Preview | Live | Final
-    if (status === 'Preview') continue
-
-    const awayProb = String(g.teams?.away?.probablePitcher?.id || '')
-    const homeProb = String(g.teams?.home?.probablePitcher?.id || '')
-    if (!pitcherIds.has(awayProb) && !pitcherIds.has(homeProb)) continue
+    if (status === 'Preview') {
+      // For pre-game: filter by probable pitcher to avoid unnecessary boxscore fetches
+      const awayProb = String(g.teams?.away?.probablePitcher?.id || '')
+      const homeProb = String(g.teams?.home?.probablePitcher?.id || '')
+      if (!pitcherIds.has(awayProb) && !pitcherIds.has(homeProb)) continue
+    }
+    // For Live/Final: always check boxscore — MLB API often drops probablePitcher mid-game
 
     const gamePk = g.gamePk
     const bs     = await mlbFetch(`https://statsapi.mlb.com/api/v1/game/${gamePk}/boxscore`)
