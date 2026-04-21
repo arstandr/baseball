@@ -174,7 +174,8 @@ async function logEdges() {
       bb_penalty:    e.bb_penalty    ?? null,
       raw_adj_factor: e.raw_adj_factor ?? null,
       spread:        e.spread        ?? null,
-    }, ['bet_date', 'pitcher_name', 'strike', 'side'])
+      live_bet:      0,
+    }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
     logged++
   }
 
