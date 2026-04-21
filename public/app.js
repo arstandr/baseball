@@ -43,17 +43,17 @@ function wireTabs() {
     btn.addEventListener('click', () => applyView(btn.dataset.view))
   })
 
-  // Expandable bet tile detail drawers (event delegation, works for dynamic content)
+  // Click anywhere on a bet tile to expand — exclude Kalshi link & other buttons
   document.addEventListener('click', e => {
-    const btn = e.target.closest('.pc-detail-toggle')
-    if (!btn) return
-    const tile   = btn.closest('.pc-bet-tile')
-    const detail = tile?.querySelector('.pc-bet-detail')
+    if (e.target.closest('a')) return
+    const tile = e.target.closest('.pc-bet-tile')
+    if (!tile) return
+    const detail = tile.querySelector('.pc-bet-detail')
     if (!detail) return
+    const btn    = tile.querySelector('.pc-detail-toggle')
     const isOpen = detail.classList.toggle('open')
-    detail.hidden = false        // remove HTML hidden attr so CSS transition works
-    btn.classList.toggle('open', isOpen)
-    btn.title = isOpen ? 'Hide details' : 'Show details'
+    detail.hidden = false
+    if (btn) { btn.classList.toggle('open', isOpen); btn.title = isOpen ? 'Hide details' : 'Show details' }
   })
 }
 
@@ -212,8 +212,11 @@ function renderDaySummary(date, data) {
   const isToday = date === today
 
   // Compute avg edge + best pick
+  const KALSHI_FEE = 0.07
   let allEdges = [], totalRisk = 0, totalPotential = 0
+  const pitcherStake = {}  // pitcher_name → total $ at risk
   for (const p of data.pitchers) {
+    let pStake = 0
     for (const b of p.bets) {
       if (b.edge != null) allEdges.push(Number(b.edge) * 100)
       const mid  = b.market_mid != null ? Number(b.market_mid) : null
@@ -222,13 +225,15 @@ function renderDaySummary(date, data) {
       if (mid != null && face != null) {
         const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
         const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
-        totalRisk      += face * fill / 100
-        totalPotential += face * win  / 100
+        const risk = face * fill / 100
+        totalRisk      += risk
+        totalPotential += face * win / 100 * (1 - KALSHI_FEE)
+        pStake         += risk
       }
     }
+    pitcherStake[p.pitcher_name] = (pitcherStake[p.pitcher_name] || 0) + pStake
   }
   const avgEdge = allEdges.length ? allEdges.reduce((s,e) => s+e, 0) / allEdges.length : 0
-  const maxEdge = allEdges.length ? Math.max(...allEdges) : 0
 
   // Best pick = highest-edge bet
   let bestPick = null, bestEdgeVal = -Infinity
@@ -241,6 +246,12 @@ function renderDaySummary(date, data) {
       }
     }
   }
+
+  // Top 3 pitchers by $ at stake
+  const topWatches = Object.entries(pitcherStake)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([name, stake]) => `<strong>${name.split(' ').pop()}</strong> (${fmt$(stake)})`)
 
   // Verdict
   let verdict, verdictCls
@@ -259,7 +270,7 @@ function renderDaySummary(date, data) {
   }
 
   const bestLine = bestPick
-    ? ` Our best pick is <strong>${bestPick.name}</strong> (${bestPick.side === 'YES' ? `${bestPick.strike}+ Ks` : `under ${bestPick.strike} Ks`}, ${bestEdgeVal.toFixed(1)}¢ edge).`
+    ? ` Best edge: <strong>${bestPick.name}</strong> (${bestPick.side === 'YES' ? `${bestPick.strike}+ Ks` : `under ${bestPick.strike} Ks`}, +${bestEdgeVal.toFixed(1)}¢).`
     : ''
 
   const pending = data.day_pending
@@ -270,13 +281,18 @@ function renderDaySummary(date, data) {
       ? `${data.day_wins}W · ${data.day_losses}L today.`
       : ''
 
+  const watchLine = topWatches.length
+    ? `<div class="day-summary-watch">🎯 Watch: ${topWatches.join(' · ')}</div>`
+    : ''
+
   el.innerHTML = `
-    <div class="day-summary-verdict ${verdictCls}">${verdict}</div>
+    <div class="day-summary-verdict ${verdictCls}">${verdict}${bestLine}</div>
     <div class="day-summary-body">
-      ${data.day_bets} bet${data.day_bets !== 1 ? 's' : ''} across ${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''}.${bestLine}
-      Total at risk: <strong>${fmt$(totalRisk)}</strong> · Best case: <strong>+${fmt$(totalPotential)}</strong>.
+      ${data.day_bets} bet${data.day_bets !== 1 ? 's' : ''} across ${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''} ·
+      At risk: <strong>${fmt$(totalRisk)}</strong> · Best case: <strong>+${fmt$(totalPotential)}</strong> after fees.
       ${statusLine ? `<span class="muted">${statusLine}</span>` : ''}
-    </div>`
+    </div>
+    ${watchLine}`
 }
 
 function buildPitcherCard(p) {
@@ -335,8 +351,10 @@ function buildPitcherCard(p) {
     // Fill at ask price (mid + halfSpread for YES, (100-mid) + halfSpread for NO)
     const fillCents  = mid != null ? (b.side === 'YES' ? mid + halfSpread : (100 - mid) + halfSpread) : null
     const winCents   = mid != null ? (b.side === 'YES' ? (100 - mid) - halfSpread : mid - halfSpread) : null
+    // Kalshi takes 7% of gross winnings
+    const KALSHI_FEE = 0.07
     const wager  = fillCents != null && face != null ? fmt$(face * fillCents / 100) : '—'
-    const potWin = winCents  != null && face != null ? fmt$(face * winCents  / 100) : '—'
+    const potWin = winCents  != null && face != null ? fmt$(face * winCents / 100 * (1 - KALSHI_FEE)) : '—'
 
     // Plain-English description of what we're betting on
     const direction = b.side === 'YES'
@@ -374,7 +392,7 @@ function buildPitcherCard(p) {
     // Plain-English explainer — what this Kalshi contract actually is
     const firstName = p.pitcher_name.split(' ')[0]
     const betExplainer = (() => {
-      const winAmt  = winCents  != null && face != null ? fmt$(face * winCents  / 100) : null
+      const winAmt  = winCents  != null && face != null ? fmt$(face * winCents / 100 * (1 - KALSHI_FEE)) : null
       const riskAmt = fillCents != null && face != null ? fmt$(face * fillCents / 100) : null
       if (b.side === 'YES') {
         return `This is a Kalshi contract that pays out if ${firstName} records ${b.strike} or more strikeouts today. ` +
@@ -421,9 +439,13 @@ function buildPitcherCard(p) {
       ? `<a class="pc-kalshi-btn" href="https://kalshi.com/markets/kxmlbks/${b.ticker}" target="_blank" rel="noopener">Place Bet →</a>`
       : ''
 
-    return `<div class="pc-bet-tile ${tileCls}" data-bet-id="${b.id}">
+    return `<div class="pc-bet-tile ${tileCls}" data-bet-id="${b.id}" data-strike="${b.strike}" data-side="${b.side}">
       <div class="pc-bet-main">
         <div class="pc-bet-desc">${direction}</div>
+        <div class="pc-ks-progress" hidden>
+          <div class="pc-ks-bar"><div class="pc-ks-fill"></div></div>
+          <span class="pc-ks-label"></span>
+        </div>
         <div class="pc-bet-bottom">
           <span class="pc-bet-wager">Bet ${wager}</span>
           ${moneyLine}
@@ -585,6 +607,18 @@ function updatePitcherCardLive(p) {
     if (!badge || !badge.classList.contains('pc-badge--pending')) continue
 
     const isNo = tile.querySelector('.pc-bet-desc')?.textContent?.includes('fewer') ?? false
+
+    // Progress bar
+    const prog = tile.querySelector('.pc-ks-progress')
+    if (prog && !p.is_final) {
+      const pct    = Math.min(bs.ks / bs.strike * 100, 100)
+      const fill   = prog.querySelector('.pc-ks-fill')
+      const label  = prog.querySelector('.pc-ks-label')
+      prog.hidden  = false
+      if (fill) { fill.style.width = `${pct}%`; fill.className = `pc-ks-fill${bs.needed === 0 && !isNo ? ' hit' : ''}` }
+      if (label) label.textContent = isNo ? `${bs.ks} Ks (need < ${bs.strike})` : `${bs.ks} / ${bs.strike} Ks`
+    }
+
     if (!isNo) {
       if (bs.needed === 0) {
         badge.textContent = '✓ HIT'; badge.className = 'pc-badge pc-badge--win'

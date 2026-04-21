@@ -475,6 +475,24 @@ a:hover { text-decoration: underline; }
   font-size: 14px; color: var(--text-dim); line-height: 1.6;
 }
 .day-summary-body strong { color: var(--text); }
+.day-summary-watch {
+  margin-top: 8px; font-size: 13px; color: var(--text-dim);
+}
+.day-summary-watch strong { color: var(--accent); }
+
+/* Ks progress bar — shown during live games */
+.pc-ks-progress {
+  padding: 6px 0 4px; display: flex; align-items: center; gap: 10px;
+}
+.pc-ks-bar {
+  flex: 1; height: 6px; background: var(--border-2); border-radius: 3px; overflow: hidden;
+}
+.pc-ks-fill {
+  height: 100%; background: rgba(0,212,170,0.45); border-radius: 3px;
+  transition: width 0.4s ease; width: 0%;
+}
+.pc-ks-fill.hit { background: var(--good); }
+.pc-ks-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; min-width: 80px; text-align: right; }
 
 /* Bet tiles — one per bet, plain English */
 .pc-bet-tiles { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }

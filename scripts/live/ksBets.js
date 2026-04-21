@@ -339,8 +339,9 @@ async function settleBets() {
     const halfSpread = spread / 2 / 100
     const mid        = bet.market_mid != null ? bet.market_mid / 100 : (bet.model_prob ?? 0.5)
     const fillFraction = bet.side === 'YES' ? mid + halfSpread : (1 - mid) + halfSpread
+    const KALSHI_FEE = 0.07
     const pnl = won
-      ? bet.bet_size * (1 - fillFraction)
+      ? bet.bet_size * (1 - fillFraction) * (1 - KALSHI_FEE)
       : -bet.bet_size * fillFraction
 
     await db.run(
