@@ -134,11 +134,12 @@ async function refreshTodayView() {
 }
 
 async function refreshDates() {
-  const dates = await fetchJson('/api/ks/dates').catch(() => [])
+  const datesWithBets = await fetchJson('/api/ks/dates').catch(() => [])
   const today = new Date().toISOString().slice(0, 10)
-  if (!dates.includes(today)) dates.unshift(today)
+  const dates = datesWithBets.includes(today) ? datesWithBets : [today, ...datesWithBets]
   if (!state.selectedDate || !dates.includes(state.selectedDate)) {
-    state.selectedDate = dates[0] || today
+    // Default to the most recent date that actually has bets, not today if it's empty
+    state.selectedDate = datesWithBets[0] || today
   }
 
   const container = document.getElementById('date-pills')
