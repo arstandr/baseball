@@ -35,7 +35,7 @@ export function sessionMiddleware() {
 // ------------------------------------------------------------------
 const DEFAULT_USERS = [
   { name: 'adam',   pin: '1031'  },
-  { name: 'isaiah', pin: '49994' },
+  { name: 'isaiah', pin: '4994' },
 ]
 
 export async function seedUsersFromEnv() {
