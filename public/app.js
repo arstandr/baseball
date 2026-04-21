@@ -197,6 +197,12 @@ function buildPitcherCard(p) {
     const modelPct  = b.model_prob != null ? `${(b.model_prob * 100).toFixed(1)}%` : '—'
     const betAmt    = b.bet_size != null ? fmt$(b.bet_size) : '—'
 
+    // Wager = what you put in; potential = what you'd win
+    const mid = b.market_mid != null ? Number(b.market_mid) : null
+    const face = b.bet_size != null ? Number(b.bet_size) : null
+    const wager    = mid != null && face != null ? fmt$(face * mid / 100) : '—'
+    const potWin   = mid != null && face != null ? fmt$(face * (100 - mid) / 100) : '—'
+
     let resultHtml, pnlHtml
     if (b.result === 'win') {
       resultHtml = `<span class="result-win">WIN</span>`
@@ -205,8 +211,8 @@ function buildPitcherCard(p) {
       resultHtml = `<span class="result-loss">LOSS</span>`
       pnlHtml    = `<span class="bad">${fmt$(b.pnl)}</span>`
     } else {
-      resultHtml = `<span class="pending-pill">LIVE</span>`
-      pnlHtml    = `<span class="muted">—</span>`
+      resultHtml = `<span class="pending-pill">PENDING</span>`
+      pnlHtml    = `<span class="muted">win ${potWin}</span>`
     }
 
     const rowCls = b.result === 'win' ? 'win-row' : b.result === 'loss' ? 'loss-row' : ''
@@ -216,7 +222,7 @@ function buildPitcherCard(p) {
       <div>${midCents}</div>
       <div>${edgeCents}</div>
       <div>${modelPct}</div>
-      <div>${betAmt}</div>
+      <div title="Wager">${wager}</div>
       <div>${resultHtml}</div>
       <div>${pnlHtml}</div>
     </div>`
