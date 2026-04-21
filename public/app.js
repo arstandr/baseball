@@ -335,6 +335,7 @@ function buildPitcherCard(p) {
   }
   card.className = `pitcher-card ${colorCls}`
   if (p.pitcher_id) card.dataset.pitcherId = p.pitcher_id
+  if (p.game_time)  card.dataset.gameTime  = p.game_time
 
   // ── Collapsed header ────────────────────────────────────────────────────
   const pnlCls = p.pnl >= 0 ? 'good' : 'bad'
@@ -586,15 +587,21 @@ async function pollLive(date) {
     updatePitcherCardLive(p)
   }
 
-  // Re-sort: in-progress games first, then by stake
+  // Re-sort: live first → pre-game by start time → final at bottom
   const list = document.getElementById('pitcher-list')
   if (list) {
     const cards = [...list.querySelectorAll('.pitcher-card')]
     cards.sort((a, b) => {
-      const aLive  = !!a.querySelector('.pc-live-badge.pulsing')
-      const bLive  = !!b.querySelector('.pc-live-badge.pulsing')
-      if (aLive !== bLive) return aLive ? -1 : 1
-      return Number(b.dataset.stake || 0) - Number(a.dataset.stake || 0)
+      const aLive  = !!a.querySelector('.pc-live-chip.live')
+      const bLive  = !!b.querySelector('.pc-live-chip.live')
+      const aFinal = !!a.querySelector('.pc-live-chip.final')
+      const bFinal = !!b.querySelector('.pc-live-chip.final')
+      if (aLive  !== bLive)  return aLive  ? -1 : 1
+      if (aFinal !== bFinal) return aFinal ?  1 : -1
+      if (aLive  && bLive)   return Number(b.dataset.stake || 0) - Number(a.dataset.stake || 0)
+      const at = a.dataset.gameTime || '', bt = b.dataset.gameTime || ''
+      if (at && bt) return at.localeCompare(bt)
+      return at ? -1 : bt ? 1 : 0
     })
     cards.forEach(c => list.appendChild(c))
   }
