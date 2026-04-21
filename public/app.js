@@ -669,20 +669,45 @@ function renderLiveBanner(data) {
   }
 }
 
+// ── Poisson probability helpers ───────────────────────────────────────────
+function poissonCDF(k, lambda) {
+  if (lambda <= 0) return k >= 0 ? 1 : 0
+  let cdf = 0, term = Math.exp(-lambda)
+  for (let i = 0; i <= Math.floor(k); i++) {
+    cdf += term
+    term *= lambda / (i + 1)
+  }
+  return Math.min(1, cdf)
+}
+
+// Probability a pitcher gets ≥ needed more Ks given remaining lambda
+function probAtLeast(needed, remainLambda) {
+  if (needed <= 0) return 1
+  return 1 - poissonCDF(needed - 1, remainLambda)
+}
+
+// Remaining expected Ks based on current K rate and pitch count
+function remainingLambda(ks, ip, pitches) {
+  if (ip <= 0 || pitches <= 0) return null
+  const kPerIp       = ks / ip
+  const pitchPerIp   = pitches / ip
+  const AVG_PITCH_LIMIT = 95
+  const remainIp     = Math.max(0, AVG_PITCH_LIMIT - pitches) / pitchPerIp
+  return kPerIp * remainIp
+}
+
 function updatePitcherCardLive(p) {
   const card = document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(String(p.pitcher_id))}"]`)
   if (!card) return
 
+  const isWarmup  = !p.is_final && p.pitches === 0 && p.ip === 0
+  const hasLiveData = p.ip > 0 && p.pitches > 0
+  const remLambda   = hasLiveData ? remainingLambda(p.ks, p.ip, p.pitches) : null
+
   // ── K pace projection ─────────────────────────────────────────────────────
-  // k_rate (Ks/IP this game) × estimated remaining IP → projected final Ks
-  const AVG_PITCH_LIMIT = 95
   let projKs = null
-  if (!p.is_final && p.ip > 0 && p.pitches > 0) {
-    const kPerIp        = p.ks / p.ip
-    const pitchesPerIp  = p.pitches / p.ip
-    const remainPitches = Math.max(0, AVG_PITCH_LIMIT - p.pitches)
-    const remainIp      = remainPitches / pitchesPerIp
-    projKs = Math.round((p.ks + kPerIp * remainIp) * 10) / 10
+  if (!p.is_final && hasLiveData && remLambda != null) {
+    projKs = Math.round((p.ks + remLambda) * 10) / 10
   }
 
   // ── Score / danger flags ──────────────────────────────────────────────────
@@ -690,7 +715,21 @@ function updatePitcherCardLive(p) {
     ? Math.abs(p.home_score - p.away_score) : null
   const isBlowout = scoreDiff != null && scoreDiff >= 5 && !p.is_final
 
-  // ── Build / update live info row in collapsed header ─────────────────────
+  // ── K count + status visible on collapsed header ──────────────────────────
+  const actualKsEl = card.querySelector('.pc-actual-ks')
+  if (actualKsEl) {
+    if (p.is_final) {
+      actualKsEl.innerHTML = `<strong>${p.ks}</strong> Ks`
+    } else if (!p.still_in) {
+      actualKsEl.innerHTML = `<span class="pc-pulled-badge">PULLED</span> <strong>${p.ks}</strong> Ks`
+    } else if (!isWarmup) {
+      actualKsEl.innerHTML = `<strong>${p.ks}</strong> Ks`
+    } else {
+      actualKsEl.innerHTML = ''
+    }
+  }
+
+  // ── Live info row in header left ──────────────────────────────────────────
   let liveRow = card.querySelector('.pc-live-row')
   if (!liveRow) {
     liveRow = document.createElement('div')
@@ -698,28 +737,22 @@ function updatePitcherCardLive(p) {
     card.querySelector('.pc-header-left')?.appendChild(liveRow)
   }
 
-  const isWarmup = !p.is_final && p.pitches === 0 && p.ip === 0
   if (p.is_final) {
-    liveRow.innerHTML = `<span class="pc-live-chip final">Final · ${p.ks} Ks · ${p.ip.toFixed(1)} IP</span>`
+    liveRow.innerHTML = `<span class="pc-live-chip final">Final · ${p.ip.toFixed(1)} IP</span>`
   } else if (!p.still_in) {
-    liveRow.innerHTML = `<span class="pc-live-chip pulled">⚠ PULLED · ${p.ks} Ks in ${p.ip.toFixed(1)} IP</span>`
+    liveRow.innerHTML = `<span class="pc-live-chip pulled">⚠ PULLED · ${p.ip.toFixed(1)} IP</span>`
   } else if (isWarmup) {
     liveRow.innerHTML = `<span class="pc-live-chip warmup">⚡ Warmup</span>`
   } else {
-    const score   = p.home_score != null ? `${p.away_score}–${p.home_score}` : ''
-    const parts   = [
-      `${p.inning}`,
-      `<strong>${p.ks}</strong> Ks`,
-      `${p.ip.toFixed(1)} IP`,
-      p.pitches ? `${p.pitches}p` : null,
-      score || null,
-    ].filter(Boolean).join(' · ')
+    const score  = p.home_score != null ? `${p.away_score}–${p.home_score}` : ''
+    const parts  = [`${p.inning}`, `${p.ip.toFixed(1)} IP`, p.pitches ? `${p.pitches}p` : null, score || null]
+      .filter(Boolean).join(' · ')
     const blowout = isBlowout ? ` <span class="pc-blowout-warn">⚠ blowout</span>` : ''
     const pace    = projKs != null ? `<span class="pc-pace-chip">proj <strong>${projKs}</strong> Ks</span>` : ''
     liveRow.innerHTML = `<span class="pc-live-chip live">${parts}${blowout}</span>${pace}`
   }
 
-  // ── Update overall header bar ─────────────────────────────────────────────
+  // ── Overall progress bar ──────────────────────────────────────────────────
   const overallFill = card.querySelector('.pc-overall-fill')
   if (overallFill) {
     let winning = 0
@@ -737,45 +770,40 @@ function updatePitcherCardLive(p) {
     overallFill.className = `pc-overall-fill ${pct >= 60 ? 'good' : winning === 0 && total > 0 ? 'bad' : ''}`
   }
 
-  // ── Update each bet row ───────────────────────────────────────────────────
+  // ── Update each bet row (badge + progress bar) ────────────────────────────
   for (const bs of p.bet_statuses) {
     const row = card.querySelector(`.pc-bet-row[data-bet-id="${bs.id}"]`)
     if (!row) continue
     const badge = row.querySelector('.pc-badge')
     if (!badge || !badge.classList.contains('pc-badge--pending')) continue
-
     const isNo = row.dataset.side === 'NO'
 
     const prog = row.querySelector('.pc-ks-progress')
     if (prog) {
-      const pct   = isNo
-        ? Math.min(bs.ks / bs.strike * 100, 100)   // fill = danger zone for NO
-        : Math.min(bs.ks / bs.strike * 100, 100)
-      const fill  = prog.querySelector('.pc-ks-fill')
-      const label = prog.querySelector('.pc-ks-label')
-      const onTrack = !isNo ? bs.needed === 0 : bs.ks < bs.strike
+      const pct  = Math.min(bs.ks / bs.strike * 100, 100)
+      const fill = prog.querySelector('.pc-ks-fill')
+      const lbl  = prog.querySelector('.pc-ks-label')
+      const onTrack = !isNo ? bs.ks >= bs.strike : bs.ks < bs.strike
       if (fill) {
         fill.style.width = `${pct}%`
         fill.className   = `pc-ks-fill${!p.is_final && onTrack && !isNo ? ' hit' : isNo && bs.ks >= bs.strike ? ' miss' : ''}`
       }
-      if (label) label.textContent = isNo
-        ? `${bs.ks} Ks (need < ${bs.strike})`
-        : `${bs.ks} / ${bs.strike} Ks`
+      if (lbl) lbl.textContent = isNo ? `${bs.ks} Ks (need < ${bs.strike})` : `${bs.ks} / ${bs.strike} Ks`
     }
 
     if (!isNo) {
-      if (bs.needed === 0)      { badge.textContent = '✓ HIT';  badge.className = 'pc-badge pc-badge--win' }
-      else if (!p.still_in)     { badge.textContent = `Pulled — ${bs.ks} Ks`; badge.className = 'pc-badge pc-badge--loss' }
-      else                      { badge.textContent = `Need ${bs.needed} more` }
+      if (bs.needed === 0)  { badge.textContent = '✓ HIT';  badge.className = 'pc-badge pc-badge--win' }
+      else if (!p.still_in) { badge.textContent = `Pulled — ${bs.ks} Ks`; badge.className = 'pc-badge pc-badge--loss' }
+      else                  { badge.textContent = `Need ${bs.needed} more` }
     } else {
-      if (bs.ks >= bs.strike)   { badge.textContent = '✗ Over'; badge.className = 'pc-badge pc-badge--loss' }
-      else if (p.is_final)      { badge.textContent = '✓ Safe'; badge.className = 'pc-badge pc-badge--win' }
-      else if (!p.still_in)     { badge.textContent = `✓ Safe (out)`;  badge.className = 'pc-badge pc-badge--win' }
-      else                      { badge.textContent = `At ${bs.ks} of ${bs.strike}` }
+      if (bs.ks >= bs.strike)  { badge.textContent = '✗ Over';      badge.className = 'pc-badge pc-badge--loss' }
+      else if (p.is_final)     { badge.textContent = '✓ Safe';      badge.className = 'pc-badge pc-badge--win' }
+      else if (!p.still_in)    { badge.textContent = '✓ Safe (out)'; badge.className = 'pc-badge pc-badge--win' }
+      else                     { badge.textContent = `At ${bs.ks} of ${bs.strike}` }
     }
   }
 
-  // ── Update live coverage chips ────────────────────────────────────────────
+  // ── Live coverage % — Poisson once game is active, model_prob during warmup ──
   let coverSum = 0, coverCount = 0
   for (const bs of p.bet_statuses) {
     const row = card.querySelector(`.pc-bet-row[data-bet-id="${bs.id}"]`)
@@ -783,19 +811,29 @@ function updatePitcherCardLive(p) {
     const coverChip = row.querySelector('.pc-bet-cover')
     if (!coverChip) continue
     const isNo = row.dataset.side === 'NO'
-    let pct
-    const done = p.is_final || !p.still_in
-    if (done) {
-      pct = !isNo ? (bs.ks >= bs.strike ? 100 : 0) : (bs.ks < bs.strike ? 100 : 0)
+
+    let prob
+    if (p.is_final || !p.still_in) {
+      // Game over — definitive
+      prob = !isNo ? (bs.ks >= bs.strike ? 1 : 0) : (bs.ks < bs.strike ? 1 : 0)
+    } else if (hasLiveData && remLambda != null) {
+      // Game active — Poisson probability based on current K rate + remaining pitches
+      const needed = !isNo ? bs.strike - bs.ks : null
+      prob = !isNo
+        ? probAtLeast(needed, remLambda)
+        : poissonCDF(bs.strike - bs.ks - 1, remLambda)
     } else {
-      pct = !isNo
-        ? Math.min(99, Math.round(bs.ks / bs.strike * 100))
-        : Math.max(1, Math.round((1 - bs.ks / bs.strike) * 100))
+      // Warmup — keep showing model_prob (pre-game estimate)
+      continue
     }
+
+    const pct = Math.round(prob * 100)
     coverChip.textContent = `${pct}%`
     coverChip.className = `pc-bet-cover ${pct >= 60 ? 'good' : pct >= 40 ? 'warn' : 'bad'}`
     if (!bs.result) { coverSum += pct; coverCount++ }
   }
+
+  // Update header coverage chip
   const coverageEl = card.querySelector('.pc-coverage')
   if (coverageEl && coverCount > 0) {
     const avgPct = Math.round(coverSum / coverCount)
