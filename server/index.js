@@ -56,7 +56,7 @@ export function createApp() {
   })
 
   // Public deploy-date endpoint for login page footer
-  const _startedAt = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+  const _startedAt = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
   app.get('/api/deploy-date', (req, res) => res.json({ date: _startedAt }))
 
   // Static assets that aren't behind auth (css/js shipped to the browser).
