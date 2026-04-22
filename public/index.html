@@ -4,9 +4,9 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Money Tree 2.0</title>
-  <link rel="stylesheet" href="/style.css"/>
+  <link rel="stylesheet" href="/style.css?v=3"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
-  <script type="module" src="/app.js" defer></script>
+  <script type="module" src="/app.js?v=3" defer></script>
 </head>
 <body>
 
@@ -37,12 +37,21 @@
   <!-- ── Bankroll hero ── -->
   <div class="bankroll-card" id="bankroll-hero">
     <div class="bankroll-main">
-      <div class="bankroll-label">Bankroll</div>
-      <div class="bankroll-value skel" id="hero-bankroll">$—</div>
-      <div class="bankroll-meta">
-        Start: <b id="hero-start">$—</b>
-        <span class="dot">·</span>
-        Total ROI: <b id="hero-roi">—</b>
+      <div class="bankroll-label-row">
+        <div>
+          <div class="bankroll-label">Paper Bankroll</div>
+          <div class="bankroll-value skel" id="hero-bankroll">$—</div>
+          <div class="bankroll-meta">
+            Start: <b id="hero-start">$—</b>
+            <span class="dot">·</span>
+            Total ROI: <b id="hero-roi">—</b>
+          </div>
+        </div>
+        <div class="kalshi-balance-block">
+          <div class="bankroll-label">Kalshi Balance</div>
+          <div class="bankroll-value skel" id="hero-kalshi">$—</div>
+          <div class="bankroll-meta">Live account</div>
+        </div>
       </div>
     </div>
     <div class="bankroll-deltas">
@@ -58,6 +67,7 @@
       <div class="delta"><span>Avg Edge</span><b id="hero-edge" class="skel">—</b></div>
       <div class="delta"><span>Streak</span><div class="hero-val skel" id="hero-streak">—</div></div>
     </div>
+    <div id="hero-live" class="hero-live-bar" style="display:none"></div>
   </div>
 
   <main class="page">
@@ -299,7 +309,7 @@
     <section class="view" id="view-settings" hidden>
       <div class="grid-2">
         <div class="panel">
-          <div class="panel-head"><h2>Users</h2><span class="panel-sub">Website &amp; CLI access</span></div>
+          <div class="panel-head"><h2>Users &amp; Bettors</h2><span class="panel-sub">Dashboard access + Kalshi credentials</span></div>
           <div class="user-list" id="user-list">
             <div class="skel-row"></div><div class="skel-row"></div>
           </div>

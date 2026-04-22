@@ -12,6 +12,11 @@ const state = {
   countdownTimer: null,
 }
 
+// Live overlay: pitcher_id → { ks, still_in, is_final }
+// Updated every poll cycle; used by computeMaxTheoretical to reflect pulled/finished pitchers
+let _liveOverlay = {}
+let _dailyPitchers = []
+
 // ──────────────────────────────────────────────────────────────────────────
 // Boot
 // ──────────────────────────────────────────────────────────────────────────
@@ -107,6 +112,13 @@ async function refreshHero() {
   bankrollEl.classList.remove('skel')
   bankrollEl.textContent = fmt$(s.bankroll, true)
   bankrollEl.className = s.total_pnl >= 0 ? 'bankroll-value good' : 'bankroll-value bad'
+  bankrollEl.title = 'Paper bankroll (starting balance + P&L)'
+
+  const kalshiEl = document.getElementById('hero-kalshi')
+  if (kalshiEl) {
+    kalshiEl.classList.remove('skel')
+    kalshiEl.textContent = s.kalshi_balance != null ? fmt$(s.kalshi_balance, true) : '—'
+  }
 
   setText('hero-start', fmt$(s.start_bankroll, true))
   const roi = s.start_bankroll > 0 ? s.total_pnl / s.start_bankroll : 0
@@ -142,6 +154,20 @@ async function refreshHero() {
   const edgeEl = document.getElementById('hero-edge')
   edgeEl.classList.remove('skel')
   edgeEl.textContent = s.avg_edge != null ? `${(s.avg_edge * 100).toFixed(1)}¢` : '—'
+
+  // Live money section
+  const liveEl = document.getElementById('hero-live')
+  if (liveEl && (s.live_pending > 0 || s.live_wins > 0 || s.live_losses > 0)) {
+    const livePnlCls = s.live_pnl >= 0 ? 'good' : 'bad'
+    const livePnlSign = s.live_pnl >= 0 ? '+' : ''
+    liveEl.innerHTML = `
+      <span class="hero-live-label">💵 Live</span>
+      <span class="hero-live-bankroll ${livePnlCls}">${fmt$(s.live_bankroll, true)}</span>
+      <span class="hero-live-pnl ${livePnlCls}">${livePnlSign}${fmt$(s.live_pnl)}</span>
+      <span class="hero-live-record">${s.live_wins}W-${s.live_losses}L${s.live_pending > 0 ? ` · ${s.live_pending} pending` : ''}</span>
+    `
+    liveEl.style.display = 'flex'
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -194,8 +220,12 @@ async function loadDay(date) {
   }
   empty.hidden = true
 
+  _dailyPitchers = data.pitchers || []
+  _liveOverlay = {} // reset on new day load
+
   hdr.hidden = false
   const pnlCls = data.day_pnl >= 0 ? 'good' : 'bad'
+  const maxT = computeMaxTheoretical(data.pitchers)
   hdr.innerHTML = `
     <div>
       <div class="day-date">${fmtDateFull(date)}</div>
@@ -204,7 +234,11 @@ async function loadDay(date) {
     <div>
       <span class="day-meta">${data.day_wins}W · ${data.day_losses}L${data.day_pending > 0 ? ` · ${data.day_pending} pending` : ''}</span>
     </div>
-    <div class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>`
+    <div class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>
+    <div class="day-max-wrap">
+      <span class="day-max-label">best case</span>
+      <span class="day-max-val" id="day-max-val">${maxT >= 0 ? '+' : ''}${fmt$(maxT)}</span>
+    </div>`
 
   // Sort by game_time ascending (earliest games first) — live polling switches to live-first
   const sorted = [...data.pitchers].sort((a, b) => {
@@ -336,7 +370,7 @@ function buildPitcherCard(p) {
   card.className = `pitcher-card ${colorCls}`
   if (p.pitcher_id) card.dataset.pitcherId = p.pitcher_id
   if (p.game_time)  card.dataset.gameTime  = p.game_time
-  card.dataset.coverage = coverPct ?? 0
+  // card.dataset.coverage set below after coverPct is computed
 
   // ── Collapsed header ────────────────────────────────────────────────────
   const pnlCls = p.pnl >= 0 ? 'good' : 'bad'
@@ -375,6 +409,7 @@ function buildPitcherCard(p) {
     : p.bets.length > 0 ? p.bets.reduce((s, b) => s + coverProb(b), 0) / p.bets.length : null
   const coverPct = avgCoverage != null ? Math.round(avgCoverage * 100) : null
   const coverCls = coverPct >= 60 ? 'good' : coverPct >= 40 ? 'warn' : 'bad'
+  card.dataset.coverage = coverPct ?? 0
 
   // ── Expanded body ────────────────────────────────────────────────────────
 
@@ -466,8 +501,47 @@ function buildPitcherCard(p) {
     }
 
     const kalshiBtn = b.ticker
-      ? `<a class="pc-kalshi-btn" href="https://kalshi.com/markets/kxmlbks/${b.ticker}" target="_blank" rel="noopener">Bet →</a>`
+      ? `<a class="pc-kalshi-btn" href="https://kalshi.com/markets/kxmlbks/${b.ticker}" target="_blank" rel="noopener">Kalshi →</a>`
       : ''
+
+    // Order confirmation block — shown when a real order has been placed
+    let orderConfirm = ''
+    if (b.order_id) {
+      const shortId = b.order_id.length > 16 ? '…' + b.order_id.slice(-12) : b.order_id
+      const fillDisp = b.fill_price != null ? `${Math.round(b.fill_price)}¢/c` : ''
+      const contsDisp = b.filled_contracts != null ? `${b.filled_contracts}c` : ''
+      const timeDisp = b.filled_at ? fmtTs(b.filled_at) : ''
+      const statusCls = b.order_status === 'filled' ? 'good' : b.order_status === 'canceled' ? 'bad' : ''
+      orderConfirm = `<div class="pc-order-confirm">
+        <span class="pc-order-chip ${statusCls}">✓ LIVE BET</span>
+        <span class="pc-order-detail">${[fillDisp, contsDisp].filter(Boolean).join(' · ')}</span>
+        <span class="pc-order-id" title="${esc(b.order_id)}">#${shortId}</span>
+        ${timeDisp ? `<span class="pc-order-time">${timeDisp}</span>` : ''}
+      </div>`
+    } else if (b.paper === 0) {
+      orderConfirm = `<div class="pc-order-confirm"><span class="pc-order-chip">Placed</span></div>`
+    }
+
+    // Live money badge — shown when real money is on this bet (separate user)
+    let liveBadge = ''
+    if (b.live) {
+      const lv = b.live
+      const contracts = lv.filled_contracts ?? lv.bet_size ?? '?'
+      const price = lv.fill_price != null ? `${Math.round(lv.fill_price)}¢` : ''
+      const spent = lv.fill_price != null && lv.filled_contracts != null
+        ? fmt$(lv.filled_contracts * lv.fill_price / 100) : ''
+      let livePnlHtml = ''
+      if (lv.result === 'win') {
+        livePnlHtml = `<span class="pc-live-pnl win">+${fmt$(lv.pnl)}</span>`
+      } else if (lv.result === 'loss') {
+        livePnlHtml = `<span class="pc-live-pnl loss">${fmt$(lv.pnl)}</span>`
+      }
+      liveBadge = `<div class="pc-live-badge">
+        <span class="pc-live-chip">💵 LIVE</span>
+        <span class="pc-live-detail">${[`${contracts}c`, price, spent].filter(Boolean).join(' · ')}</span>
+        ${livePnlHtml}
+      </div>`
+    }
 
     const rowCls = b.result === 'win' ? 'pc-bet-row--win' : b.result === 'loss' ? 'pc-bet-row--loss' : ''
     const tooltipText = b.side === 'YES'
@@ -514,6 +588,8 @@ function buildPitcherCard(p) {
         </div>
       </div>
       ${progressBar}
+      ${orderConfirm}
+      ${liveBadge}
     </div>`
   }).join('')
 
@@ -578,6 +654,35 @@ function updateCountdowns() {
   })
 }
 
+function computeMaxTheoretical(pitchers) {
+  const FEE = 0.07
+  let total = 0
+  for (const p of pitchers) {
+    const live = _liveOverlay[String(p.pitcher_id)] || {}
+    // Pitcher is "done" if game final OR pulled from the game (won't get more Ks)
+    const determined = live.is_final === true || live.still_in === false
+    const currentKs  = live.ks
+    for (const b of p.bets) {
+      const mid  = b.market_mid != null ? Number(b.market_mid) / 100 : 0.5
+      const hs   = (b.spread ?? 4) / 200
+      const fill = b.side === 'YES' ? mid + hs : (1 - mid) + hs
+      const size = b.bet_size ?? 0
+      if (b.result === 'win' || b.result === 'loss') {
+        // Already formally settled in DB
+        total += b.pnl ?? 0
+      } else if (determined && currentKs != null) {
+        // Pitcher done — compute real outcome from current K count
+        const won = b.side === 'YES' ? currentKs >= b.strike : currentKs < b.strike
+        total += won ? size * (1 - fill) * (1 - FEE) : -(size * fill)
+      } else {
+        // Still live — show optimistic best case
+        total += size * (1 - fill) * (1 - FEE)
+      }
+    }
+  }
+  return total
+}
+
 async function pollLive(date) {
   const data = await fetchJson(`/api/ks/live?date=${date}`).catch(() => null)
   if (!data) return
@@ -589,6 +694,23 @@ async function pollLive(date) {
   }
 
   updateBannerChipColors(data.pitchers)
+
+  // Update live overlay: track ks/still_in/is_final per pitcher
+  for (const p of data.pitchers) {
+    _liveOverlay[String(p.pitcher_id)] = {
+      ks:       p.ks,
+      still_in: p.still_in,
+      is_final: p.is_final,
+    }
+  }
+
+  // Recompute best case using daily data + live overlay
+  const maxEl = document.getElementById('day-max-val')
+  if (maxEl && _dailyPitchers.length) {
+    const maxT = computeMaxTheoretical(_dailyPitchers)
+    maxEl.textContent = (maxT >= 0 ? '+' : '') + fmt$(maxT)
+    maxEl.className = 'day-max-val ' + (maxT >= 0 ? 'good' : 'bad')
+  }
 
   // Re-sort: live first → pre-game by start time → final at bottom
   const list = document.getElementById('pitcher-list')
@@ -1581,23 +1703,125 @@ async function loadUsers() {
   }
   for (const u of users) {
     const isMe = u.name.toLowerCase() === state.currentUser?.toLowerCase()
-    const item = document.createElement('div')
-    item.className = 'user-item'
-    item.innerHTML = `
-      <div>
-        <div class="u-name">${esc(u.name)}${isMe ? ' <span class="u-you">(you)</span>' : ''}</div>
-        <div class="u-since">Added ${fmtDateFull(u.created_at?.slice(0, 10) || '')}</div>
-      </div>
-      ${isMe ? '' : `<button class="u-del" data-name="${esc(u.name)}">Remove</button>`}`
-    if (!isMe) {
-      item.querySelector('.u-del').addEventListener('click', async () => {
-        if (!confirm(`Remove user "${u.name}"?`)) return
-        await fetchJson(`/api/users/${encodeURIComponent(u.name)}`, { method: 'DELETE' }).catch(() => null)
-        await loadUsers()
-      })
-    }
-    list.appendChild(item)
+    list.appendChild(buildUserCard(u, isMe))
   }
+}
+
+function buildUserCard(u, isMe) {
+  const bettorBadge = u.active_bettor
+    ? (u.paper ? '<span class="u-badge paper">PAPER</span>' : '<span class="u-badge live">LIVE</span>')
+    : ''
+  const keyStatus = u.has_kalshi_key
+    ? '<span class="u-keychip ok">key ✓</span>'
+    : '<span class="u-keychip miss">no key</span>'
+
+  const wrap = document.createElement('div')
+  wrap.className = 'user-item-wrap'
+  wrap.innerHTML = `
+    <div class="user-item">
+      <div>
+        <div class="u-name">${esc(u.name)}${isMe ? ' <span class="u-you">(you)</span>' : ''} ${bettorBadge}</div>
+        <div class="u-since">Added ${fmtDateFull(u.created_at?.slice(0, 10) || '')} ${u.active_bettor ? '· ' + keyStatus : ''}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="u-edit filter-btn secondary">Edit</button>
+        ${isMe ? '' : `<button class="u-del">Remove</button>`}
+      </div>
+    </div>
+    <div class="u-bettor-form" style="display:none">
+      <div class="bettor-form-grid">
+        <label>Active Bettor
+          <input type="checkbox" class="bf-active" ${u.active_bettor ? 'checked' : ''}/>
+        </label>
+        <label>Mode
+          <select class="bf-paper">
+            <option value="1" ${u.paper !== 0 ? 'selected' : ''}>Paper</option>
+            <option value="0" ${u.paper === 0 ? 'selected' : ''}>Live</option>
+          </select>
+        </label>
+        <label>Starting Bankroll ($)
+          <input type="number" class="bf-bankroll" value="${u.starting_bankroll ?? 5000}" min="100" step="100"/>
+        </label>
+        <label>Daily Risk %
+          <input type="number" class="bf-risk" value="${Math.round((u.daily_risk_pct ?? 0.20) * 100)}" min="1" max="100"/>
+        </label>
+      </div>
+      <label class="bf-label-full">Kalshi Key ID
+        <input type="text" class="bf-keyid" value="${esc(u.kalshi_key_id || '')}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"/>
+      </label>
+      <label class="bf-label-full">Kalshi Private Key (RSA PEM) ${u.has_kalshi_key ? '<span class="u-keychip ok">saved</span>' : ''}
+        <textarea class="bf-pem" rows="4" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...paste full PEM here...&#10;-----END RSA PRIVATE KEY-----" autocomplete="off"></textarea>
+        <span class="bf-pem-hint">Leave blank to keep existing key.</span>
+      </label>
+      <label class="bf-label-full">Discord Webhook URL (optional)
+        <input type="text" class="bf-discord" value="${esc(u.discord_webhook || '')}" placeholder="https://discord.com/api/webhooks/…" autocomplete="off"/>
+      </label>
+      <label class="bf-label-full">Change PIN (leave blank to keep)
+        <input type="password" class="bf-pin" placeholder="New PIN (4+ digits)" maxlength="10" inputmode="numeric" autocomplete="new-password"/>
+      </label>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="u-save filter-btn">Save</button>
+        <button class="u-cancel filter-btn secondary">Cancel</button>
+      </div>
+      <div class="form-msg bf-msg"></div>
+    </div>`
+
+  const editBtn   = wrap.querySelector('.u-edit')
+  const form      = wrap.querySelector('.u-bettor-form')
+  const saveBtn   = wrap.querySelector('.u-save')
+  const cancelBtn = wrap.querySelector('.u-cancel')
+  const delBtn    = wrap.querySelector('.u-del')
+  const msg       = wrap.querySelector('.bf-msg')
+
+  editBtn.addEventListener('click', () => {
+    const open = form.style.display !== 'none'
+    form.style.display = open ? 'none' : 'block'
+    editBtn.textContent = open ? 'Edit' : 'Close'
+  })
+  cancelBtn.addEventListener('click', () => {
+    form.style.display = 'none'
+    editBtn.textContent = 'Edit'
+  })
+
+  saveBtn.addEventListener('click', async () => {
+    msg.className = 'form-msg'; msg.textContent = ''
+    const body = {
+      active_bettor:     wrap.querySelector('.bf-active').checked,
+      paper:             wrap.querySelector('.bf-paper').value === '1',
+      starting_bankroll: Number(wrap.querySelector('.bf-bankroll').value),
+      daily_risk_pct:    Number(wrap.querySelector('.bf-risk').value) / 100,
+      kalshi_key_id:     wrap.querySelector('.bf-keyid').value.trim() || null,
+      discord_webhook:   wrap.querySelector('.bf-discord').value.trim() || null,
+    }
+    const pem = wrap.querySelector('.bf-pem').value.trim()
+    if (pem) body.kalshi_private_key = pem
+    const pin = wrap.querySelector('.bf-pin').value.trim()
+    if (pin) {
+      if (pin.length < 4) { msg.className = 'form-msg err'; msg.textContent = 'PIN must be at least 4 digits.'; return }
+      body.pin = pin
+    }
+    try {
+      const r = await fetch(`/api/users/${u.id}`, {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const d = await r.json()
+      if (!r.ok) { msg.className = 'form-msg err'; msg.textContent = d.error || 'Error'; return }
+      msg.className = 'form-msg ok'; msg.textContent = 'Saved.'
+      setTimeout(() => { msg.textContent = ''; form.style.display = 'none'; editBtn.textContent = 'Edit' }, 1500)
+      await loadUsers()
+    } catch { msg.className = 'form-msg err'; msg.textContent = 'Network error.' }
+  })
+
+  if (delBtn) {
+    delBtn.addEventListener('click', async () => {
+      if (!confirm(`Remove user "${u.name}"?`)) return
+      await fetchJson(`/api/users/${encodeURIComponent(u.name)}`, { method: 'DELETE' }).catch(() => null)
+      await loadUsers()
+    })
+  }
+  return wrap
 }
 
 function wireAddUser() {
@@ -1678,6 +1902,13 @@ function fmt$(n, noSign = false) {
 function fmtPct(n, dp = 1) {
   if (n == null || Number.isNaN(n)) return '—'
   return (n * 100).toFixed(dp) + '%'
+}
+function fmtTs(iso) {
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+  } catch { return '' }
 }
 function fmtDatePill(d) {
   try {

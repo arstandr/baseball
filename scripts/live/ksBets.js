@@ -16,26 +16,33 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { toKalshiAbbr, getAuthHeaders } from '../../lib/kalshi.js'
+import { toKalshiAbbr, getAuthHeaders, placeOrder } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport } from '../../lib/discord.js'
+import { parseArgs } from '../../lib/cli-args.js'
 
-const args = process.argv.slice(2)
-const MODE         = args[0] || 'report'
-const dateArg      = args.includes('--date')     ? args[args.indexOf('--date')     + 1] : null
-const daysArg      = args.includes('--days')     ? Number(args[args.indexOf('--days')     + 1]) : 30
-const minEdge      = args.includes('--min-edge') ? Number(args[args.indexOf('--min-edge') + 1]) : 0.05
-const BET_SIZE     = args.includes('--bet-size') ? Number(args[args.indexOf('--bet-size') + 1]) : 100
+const MODE = process.argv[2] || 'report'
+
+const opts = parseArgs({
+  date:     { default: new Date().toISOString().slice(0, 10) },
+  days:     { type: 'number', default: 30 },
+  minEdge:  { flag: 'min-edge', type: 'number', default: 0.05 },
+  betSize:  { flag: 'bet-size', type: 'number', default: 100 },
+  riskPct:  { flag: 'risk-pct', type: 'number', default: null },
+})
+
+const TODAY    = opts.date
+const daysArg  = opts.days
+const minEdge  = opts.minEdge
+const BET_SIZE = opts.betSize
 
 // Portfolio risk cap: max % of bankroll to risk per day.
-// Budget is allocated proportionally to each bet's edge — higher edge = more dollars.
-const DAILY_RISK_PCT = args.includes('--risk-pct')
-  ? Number(args[args.indexOf('--risk-pct') + 1]) / 100
-  : Number(process.env.DAILY_RISK_PCT || 0.20)  // default 20%
+const DAILY_RISK_PCT = opts.riskPct != null
+  ? opts.riskPct / 100
+  : Number(process.env.DAILY_RISK_PCT || 0.20)
 const STARTING_BANKROLL = Number(process.env.STARTING_BANKROLL || 5000)
 const MIN_BET_FACE = 5   // don't log bets below $5 face value
 
-const TODAY    = dateArg || new Date().toISOString().slice(0, 10)
-const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
+const MLB_BASE    = 'https://statsapi.mlb.com/api/v1'
 const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
 // ── Table setup ───────────────────────────────────────────────────────────────
@@ -99,6 +106,11 @@ async function ensureTable() {
     'park_factor REAL', 'weather_mult REAL', 'ump_factor REAL', 'ump_name TEXT',
     'velo_adj REAL', 'velo_trend_mph REAL', 'bb_penalty REAL', 'raw_adj_factor REAL', 'spread REAL',
     'raw_model_prob REAL',  // pre-shrinkage probability (honest calibration)
+    'order_id TEXT',        // Kalshi order ID after placement
+    'fill_price REAL',      // actual fill price in cents (e.g. 47 = 47¢)
+    'filled_at TEXT',       // ISO timestamp when order was placed
+    'filled_contracts INTEGER', // number of contracts placed
+    'order_status TEXT',    // resting | filled | canceled
   ]) {
     try { await db.run(`ALTER TABLE ks_bets ADD COLUMN ${col}`) } catch {}
   }
@@ -139,90 +151,179 @@ async function logEdges() {
     return
   }
 
-  // ── Edge-weighted portfolio allocation ────────────────────────────────────
-  // 1. Compute current bankroll
-  const settled = await db.all(
-    `SELECT SUM(pnl) as total FROM ks_bets WHERE result IS NOT NULL AND bet_date < ?`,
-    [TODAY],
+  // ── Load active bettors ───────────────────────────────────────────────────
+  // Fall back to single-user env-based config if no active_bettor rows exist.
+  let bettors = await db.all(
+    `SELECT id, name, starting_bankroll, daily_risk_pct, paper, kalshi_key_id, kalshi_private_key
+     FROM users WHERE active_bettor = 1 ORDER BY id ASC`,
   )
-  const bankroll    = STARTING_BANKROLL + Number(settled[0]?.total || 0)
-  const dailyBudget = bankroll * DAILY_RISK_PCT
+  if (!bettors.length) {
+    // Legacy single-user mode — use env vars
+    bettors = [{
+      id:               null,
+      name:             'default',
+      starting_bankroll: STARTING_BANKROLL,
+      daily_risk_pct:   DAILY_RISK_PCT,
+      paper:            Number(process.env.LIVE_TRADING === 'true') ? 0 : 1,
+      kalshi_key_id:    null,
+      kalshi_private_key: null,
+    }]
+  }
 
-  // 2. For each bet, compute fill fraction (what fraction of face value you put at risk)
-  //    fill = cost/face: YES → mid + halfSpread; NO → (100-mid) + halfSpread  (in cents /100)
+  // ── Pre-compute fill fractions (shared across all users) ──────────────────
   const withFill = edgesJson.map(e => {
-    const mid  = (e.market_mid ?? 50) / 100
-    const hs   = (e.spread     ??  4) / 200
-    const fill = e.side === 'YES' ? mid + hs : (1 - mid) + hs
-    const edgeVal = Math.max(Number(e.edge) || 0, 0.001)  // floor to avoid div-by-zero
+    const mid    = (e.market_mid ?? 50) / 100
+    const hs     = (e.spread     ??  4) / 200
+    const fill   = e.side === 'YES' ? mid + hs : (1 - mid) + hs
+    const edgeVal = Math.max(Number(e.edge) || 0, 0.001)
     return { ...e, _fill: fill, _edgeVal: edgeVal }
   })
-
-  // 3. Allocate budget proportional to edge (higher edge → more dollars at risk)
   const totalEdge = withFill.reduce((s, e) => s + e._edgeVal, 0)
-  const sized = withFill.map(e => {
-    const riskAlloc = (e._edgeVal / totalEdge) * dailyBudget  // $ at risk for this bet
-    const faceValue = Math.round(riskAlloc / e._fill)         // face value of contract
-    return { ...e, _face: Math.max(faceValue, MIN_BET_FACE) }
-  })
 
-  console.log(
-    `[ks-bets] Bankroll $${bankroll.toFixed(0)} · daily budget $${dailyBudget.toFixed(0)} (${(DAILY_RISK_PCT*100).toFixed(0)}%) · ${sized.length} bets`
-  )
-  // Show top 5 allocations
-  const top5 = [...sized].sort((a,b) => b._face - a._face).slice(0, 5)
-  for (const e of top5) {
-    console.log(`  ${e.pitcher.padEnd(26)} ${e.side} ${e.strike}+  edge=${(e._edgeVal*100).toFixed(1)}¢  face=$${e._face}  risk=$${(e._face*e._fill).toFixed(0)}`)
-  }
-
-  const now = new Date().toISOString()
+  // ── Log bets for each bettor (staggered to avoid market impact) ───────────
+  const STAGGER_MS = 45_000   // 45s between users on live orders
   let logged = 0
-  for (const e of sized) {
-    await db.upsert('ks_bets', {
-      bet_date:     TODAY,
-      logged_at:    now,
-      pitcher_id:   e.pitcher_id || null,
-      pitcher_name: e.pitcher,
-      team:         e.team,
-      game:         e.game,
-      strike:       e.strike,
-      side:         e.side,
-      model_prob:   e.model_prob,
-      market_mid:   e.market_mid,
-      edge:         e.edge,
-      lambda:       e.lambda,
-      k9_career:    e.k9_career ?? null,
-      k9_season:    e.k9_season ?? null,
-      k9_l5:        e.k9_l5 ?? null,
-      opp_k_pct:    e.opp_k_pct,
-      adj_factor:   e.adj_factor,
-      n_starts:     e.n_starts,
-      confidence:   e.confidence,
-      savant_k_pct: e.savant_k_pct ?? null,
-      savant_whiff: e.savant_whiff ?? null,
-      savant_fbv:    e.savant_fbv    ?? null,
-      whiff_flag:    e.whiff_flag    ?? null,
-      ticker:        e.ticker,
-      bet_size:      e._face,
-      kelly_fraction: e.kelly_fraction ?? null,
-      raw_model_prob: e.raw_model_prob ?? null,
-      capital_at_risk: Math.round(e._face * e._fill * 100) / 100,
-      park_factor:    e.park_factor   ?? null,
-      weather_mult:   e.weather_note  ? (e.weather_mult ?? null) : null,
-      ump_factor:     e.ump_factor    ?? null,
-      ump_name:       e.ump_name      ?? null,
-      velo_adj:       e.velo_adj      ?? null,
-      velo_trend_mph: e.velo_trend_mph ?? null,
-      bb_penalty:     e.bb_penalty    ?? null,
-      raw_adj_factor: e.raw_adj_factor ?? null,
-      spread:         e.spread        ?? null,
-      live_bet:       0,
-    }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
-    logged++
-  }
 
-  const totalRisk = sized.reduce((s, e) => s + e._face * e._fill, 0)
-  console.log(`[ks-bets] Logged ${logged} bets · total at risk $${totalRisk.toFixed(0)} of $${bankroll.toFixed(0)} (${(totalRisk/bankroll*100).toFixed(1)}%)`)
+  for (let bi = 0; bi < bettors.length; bi++) {
+    const bettor = bettors[bi]
+    if (bi > 0) {
+      console.log(`[ks-bets] Staggering ${STAGGER_MS / 1000}s before next user…`)
+      await new Promise(r => setTimeout(r, STAGGER_MS))
+    }
+
+    // Bankroll = starting + all settled P&L for this user
+    const settledRow = await db.one(
+      `SELECT SUM(pnl) as total FROM ks_bets
+       WHERE result IS NOT NULL AND bet_date < ?
+         AND (user_id = ? OR (user_id IS NULL AND ? IS NULL))`,
+      [TODAY, bettor.id, bettor.id],
+    )
+    const bankroll    = (bettor.starting_bankroll ?? STARTING_BANKROLL) + Number(settledRow?.total || 0)
+    const riskPct     = bettor.daily_risk_pct ?? DAILY_RISK_PCT
+    const dailyBudget = bankroll * riskPct
+    const isLive      = bettor.paper === 0
+
+    // Size each bet proportionally, then enforce hard budget cap by taking
+    // highest-edge bets first and stopping once the budget is spent.
+    const withFace = withFill
+      .map(e => {
+        const riskAlloc = (e._edgeVal / totalEdge) * dailyBudget
+        const faceValue = Math.round(riskAlloc / e._fill)
+        const face = Math.max(faceValue, MIN_BET_FACE)
+        return { ...e, _face: face, _actualRisk: face * e._fill }
+      })
+      .sort((a, b) => b._edgeVal - a._edgeVal)  // highest edge first
+
+    let budgetLeft = dailyBudget
+    const sized = []
+    for (const e of withFace) {
+      if (budgetLeft <= 0) break
+      // If the minimum floor would blow the remaining budget, skip
+      if (e._actualRisk > budgetLeft + 1) continue
+      sized.push(e)
+      budgetLeft -= e._actualRisk
+    }
+
+    console.log(
+      `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · budget $${dailyBudget.toFixed(0)} (${(riskPct*100).toFixed(0)}%) · ${sized.length} bets · ${isLive ? 'LIVE' : 'paper'}`,
+    )
+
+    const now = new Date().toISOString()
+    let bettorLogged = 0, ordersPlaced = 0, ordersFailed = 0
+    const creds = bettor.kalshi_key_id
+      ? { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
+      : {}
+
+    for (const e of sized) {
+      const existing = await db.one(
+        `SELECT order_id FROM ks_bets
+         WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0
+           AND (user_id=? OR (user_id IS NULL AND ? IS NULL))`,
+        [TODAY, e.pitcher, e.strike, e.side, bettor.id, bettor.id],
+      )
+
+      await db.upsert('ks_bets', {
+        bet_date:        TODAY,
+        logged_at:       now,
+        user_id:         bettor.id,
+        pitcher_id:      e.pitcher_id || null,
+        pitcher_name:    e.pitcher,
+        team:            e.team,
+        game:            e.game,
+        strike:          e.strike,
+        side:            e.side,
+        model_prob:      e.model_prob,
+        market_mid:      e.market_mid,
+        edge:            e.edge,
+        lambda:          e.lambda,
+        k9_career:       e.k9_career       ?? null,
+        k9_season:       e.k9_season       ?? null,
+        k9_l5:           e.k9_l5           ?? null,
+        opp_k_pct:       e.opp_k_pct,
+        adj_factor:      e.adj_factor,
+        n_starts:        e.n_starts,
+        confidence:      e.confidence,
+        savant_k_pct:    e.savant_k_pct    ?? null,
+        savant_whiff:    e.savant_whiff    ?? null,
+        savant_fbv:      e.savant_fbv      ?? null,
+        whiff_flag:      e.whiff_flag      ?? null,
+        ticker:          e.ticker,
+        bet_size:        e._face,
+        kelly_fraction:  e.kelly_fraction  ?? null,
+        raw_model_prob:  e.raw_model_prob  ?? null,
+        capital_at_risk: Math.round(e._face * e._fill * 100) / 100,
+        park_factor:     e.park_factor     ?? null,
+        weather_mult:    e.weather_note    ? (e.weather_mult ?? null) : null,
+        ump_factor:      e.ump_factor      ?? null,
+        ump_name:        e.ump_name        ?? null,
+        velo_adj:        e.velo_adj        ?? null,
+        velo_trend_mph:  e.velo_trend_mph  ?? null,
+        bb_penalty:      e.bb_penalty      ?? null,
+        raw_adj_factor:  e.raw_adj_factor  ?? null,
+        spread:          e.spread          ?? null,
+        live_bet:        0,
+      }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
+      bettorLogged++
+      logged++
+
+      if (isLive && e.ticker && !existing?.order_id) {
+        try {
+          const mid        = e.market_mid ?? 50
+          const halfSpread = (e.spread ?? 4) / 2
+          const askCents   = e.side === 'YES'
+            ? Math.min(99, Math.round(mid + halfSpread))
+            : Math.min(99, Math.round(100 - mid + halfSpread))
+          const contracts  = Math.max(1, Math.round(e._face))
+
+          const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, askCents, creds)
+          const order  = result?.order ?? result
+
+          const orderId     = order?.order_id    ?? null
+          const fillPrice   = order?.yes_price   ?? order?.no_price ?? askCents
+          const filledConts = order?.count       ?? contracts
+          const placedAt    = order?.created_time ?? new Date().toISOString()
+          const status      = order?.status      ?? 'placed'
+
+          await db.run(
+            `UPDATE ks_bets SET order_id=?, fill_price=?, filled_at=?, filled_contracts=?, order_status=?, paper=0
+             WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0
+               AND (user_id=? OR (user_id IS NULL AND ? IS NULL))`,
+            [orderId, fillPrice, placedAt, filledConts, status, TODAY, e.pitcher, e.strike, e.side, bettor.id, bettor.id],
+          )
+          ordersPlaced++
+          console.log(`  [kalshi] PLACED ${e.side} ${e.strike}+ ${e.pitcher.padEnd(24)} ${contracts}c @ ${askCents}¢  id=${orderId}`)
+        } catch (err) {
+          ordersFailed++
+          console.error(`  [kalshi] FAILED  ${e.side} ${e.strike}+ ${e.pitcher}: ${err.message}`)
+        }
+      } else if (existing?.order_id) {
+        console.log(`  [kalshi] SKIP    ${e.side} ${e.strike}+ ${e.pitcher} — already ordered`)
+      }
+    }
+
+    const totalRisk = sized.reduce((s, e) => s + e._face * e._fill, 0)
+    console.log(`[ks-bets] ${bettor.name}: logged ${bettorLogged} · orders ${ordersPlaced} placed / ${ordersFailed} failed · risk $${totalRisk.toFixed(0)} of $${bankroll.toFixed(0)} (${(totalRisk/bankroll*100).toFixed(1)}%)`)
+  }
 
   // Cache today's Kalshi open prices for real-price backtest
   try {
@@ -407,9 +508,9 @@ async function settleBets() {
   }
 
   // Discord end-of-day report
-  const allSettled = await db.all(`SELECT * FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL`, [TODAY])
+  const allSettled = await db.all(`SELECT * FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL AND live_bet = 0`, [TODAY])
   const season = await db.all(
-    `SELECT SUM(pnl) as pnl, COUNT(*) as n, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(bet_size) as wagered FROM ks_bets WHERE result IS NOT NULL`,
+    `SELECT SUM(pnl) as pnl, COUNT(*) as n, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(bet_size) as wagered FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0`,
   )
   const sp = season[0] || {}
   const dayPnl = allSettled.reduce((s, b) => s + (b.pnl || 0), 0)
@@ -432,7 +533,7 @@ async function report() {
   const since = cutoff.toISOString().slice(0, 10)
 
   const bets = await db.all(
-    `SELECT * FROM ks_bets WHERE bet_date >= ? ORDER BY bet_date DESC, edge DESC`,
+    `SELECT * FROM ks_bets WHERE bet_date >= ? AND live_bet = 0 ORDER BY bet_date DESC, edge DESC`,
     [since],
   )
 

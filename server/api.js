@@ -10,31 +10,26 @@
 
 import express from 'express'
 import * as db from '../lib/db.js'
+import { getBalance as getKalshiBalance } from '../lib/kalshi.js'
+import { safeJson, todayISO, roundTo, winRate, fmtShort } from '../lib/utils.js'
+import {
+  computeModeSummary,
+  computeCalibration,
+  computeBankrollRollup,
+  runningBankroll,
+} from '../lib/analytics.js'
+import { mlbFetch, extractStarterFromBoxscore } from '../lib/mlb-live.js'
 
 const router = express.Router()
 const SERVER_START = new Date().toISOString()
 
-// ------------------------------------------------------------------
-// Small utilities
-// ------------------------------------------------------------------
-function safeJson(str, fallback = null) {
-  if (str == null) return fallback
-  try { return JSON.parse(str) } catch { return fallback }
-}
-
-function todayISO() {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function roundTo(n, d = 4) {
-  if (n == null || Number.isNaN(n)) return 0
-  const f = 10 ** d
-  return Math.round(n * f) / f
-}
-
-function winRate(wins, losses) {
-  const d = (wins || 0) + (losses || 0)
-  return d > 0 ? (wins || 0) / d : 0
+// Returns SQL fragment + args to scope ks_bets to the logged-in user.
+// Legacy bets (user_id IS NULL) are visible to all users for backward compat
+// until we have enough history under the new per-user schema.
+function userFilter(req) {
+  const uid = req.session?.user?.id ?? null
+  if (uid == null) return { clause: '', args: [] }
+  return { clause: `AND (user_id = ? OR user_id IS NULL)`, args: [uid] }
 }
 
 // Wrap an async handler so unhandled errors become a 500 with a safe JSON body.
@@ -93,133 +88,6 @@ router.get('/summary', wrap(async (req, res) => {
   })
 }))
 
-async function computeModeSummary(mode) {
-  const row = await db.one(
-    `SELECT
-       COUNT(*)                                                     AS n,
-       SUM(CASE WHEN o.result = 'WIN'  THEN 1 ELSE 0 END)            AS wins,
-       SUM(CASE WHEN o.result = 'LOSS' THEN 1 ELSE 0 END)            AS losses,
-       SUM(CASE WHEN o.result = 'PUSH' THEN 1 ELSE 0 END)            AS pushes,
-       SUM(COALESCE(o.pnl_usd, 0))                                   AS pnl,
-       SUM(t.position_size_usd)                                      AS wagered,
-       AVG(t.adjusted_edge)                                          AS avg_edge
-     FROM trades t
-     LEFT JOIN outcomes o ON o.trade_id = t.id
-     WHERE t.mode = ?`,
-    [mode],
-  ) || {}
-  const wins = Number(row.wins || 0)
-  const losses = Number(row.losses || 0)
-  const pushes = Number(row.pushes || 0)
-  const pnl = Number(row.pnl || 0)
-  const wagered = Number(row.wagered || 0)
-  return {
-    trades: Number(row.n || 0),
-    wins, losses, pushes,
-    signals: Number(row.n || 0),   // alias for UI clarity
-    winRate: roundTo(winRate(wins, losses), 4),
-    pnl: roundTo(pnl, 2),
-    wagered: roundTo(wagered, 2),
-    roi: wagered > 0 ? roundTo(pnl / wagered, 4) : 0,
-    avgEdge: row.avg_edge != null ? roundTo(row.avg_edge, 4) : 0,
-  }
-}
-
-// Calibration: bucket trades by model probability and compare to hit rate.
-async function computeCalibration(mode) {
-  const rows = await db.all(
-    `SELECT t.model_probability, t.side, o.result
-     FROM trades t INNER JOIN outcomes o ON o.trade_id = t.id
-     WHERE t.mode = ? AND o.result IN ('WIN','LOSS')`,
-    [mode],
-  )
-  if (!rows.length) return []
-
-  const bands = [
-    { label: '50-55%', lo: 0.50, hi: 0.55 },
-    { label: '55-60%', lo: 0.55, hi: 0.60 },
-    { label: '60-65%', lo: 0.60, hi: 0.65 },
-    { label: '65-70%', lo: 0.65, hi: 0.70 },
-    { label: '70%+',   lo: 0.70, hi: 1.01 },
-  ]
-  const buckets = bands.map(b => ({ ...b, n: 0, wins: 0, predSum: 0 }))
-
-  for (const r of rows) {
-    // model_probability is for the OVER side. Convert to "probability of
-    // the side we actually took" so the band reflects the real bet.
-    const pOver = Number(r.model_probability || 0)
-    const pSide = r.side === 'OVER' ? pOver : 1 - pOver
-    const bucket = buckets.find(b => pSide >= b.lo && pSide < b.hi)
-    if (!bucket) continue
-    bucket.n += 1
-    bucket.predSum += pSide
-    if (r.result === 'WIN') bucket.wins += 1
-  }
-
-  return buckets
-    .filter(b => b.n > 0)
-    .map(b => ({
-      band: b.label,
-      predicted: roundTo(b.predSum / b.n, 4),
-      actual: roundTo(b.wins / b.n, 4),
-      n: b.n,
-    }))
-}
-
-// Bankroll rollups: current / week / month / max drawdown / streak.
-async function computeBankrollRollup() {
-  const startBankroll = Number(process.env.BANKROLL || 5000)
-  const rows = await db.all(
-    `SELECT t.trade_date, o.pnl_usd, o.result
-     FROM trades t INNER JOIN outcomes o ON o.trade_id = t.id
-     WHERE t.mode = 'live' ORDER BY t.trade_date ASC, t.id ASC`,
-  )
-  if (!rows.length) {
-    return {
-      bankroll: startBankroll,
-      startBankroll,
-      totalPnl: 0,
-      todayPnl: 0,
-      weekPnl: 0,
-      monthPnl: 0,
-      maxDrawdown: 0,
-      longestStreak: 0,
-    }
-  }
-
-  const today = todayISO()
-  const now = new Date()
-  const weekAgo = new Date(now.getTime() - 7 * 86400 * 1000).toISOString().slice(0, 10)
-  const monthAgo = new Date(now.getTime() - 30 * 86400 * 1000).toISOString().slice(0, 10)
-
-  let running = startBankroll
-  let peak = startBankroll
-  let maxDd = 0
-  let streak = 0, bestWinStreak = 0
-  let total = 0, todayP = 0, weekP = 0, monthP = 0
-  for (const r of rows) {
-    const p = Number(r.pnl_usd || 0)
-    running += p
-    total += p
-    if (r.trade_date === today) todayP += p
-    if (r.trade_date >= weekAgo) weekP += p
-    if (r.trade_date >= monthAgo) monthP += p
-    peak = Math.max(peak, running)
-    maxDd = Math.min(maxDd, running - peak)
-    if (r.result === 'WIN') { streak = streak >= 0 ? streak + 1 : 1; bestWinStreak = Math.max(bestWinStreak, streak) }
-    else if (r.result === 'LOSS') { streak = streak <= 0 ? streak - 1 : -1 }
-  }
-  return {
-    bankroll: roundTo(running, 2),
-    startBankroll,
-    totalPnl: roundTo(total, 2),
-    todayPnl: roundTo(todayP, 2),
-    weekPnl: roundTo(weekP, 2),
-    monthPnl: roundTo(monthP, 2),
-    maxDrawdown: roundTo(maxDd, 2),   // negative number
-    longestStreak: bestWinStreak,
-  }
-}
 
 // ------------------------------------------------------------------
 // GET /api/games/dates?mode=paper|live
@@ -619,10 +487,6 @@ router.get('/performance/weekly', wrap(async (req, res) => {
   })))
 }))
 
-function fmtShort(d) {
-  const m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  return `${m[d.getUTCMonth()]} ${d.getUTCDate()}`
-}
 
 // ------------------------------------------------------------------
 // GET /api/performance/monthly?mode=paper|live
@@ -922,50 +786,6 @@ router.get('/backtest/convergence', wrap(async (req, res) => {
   })
 }))
 
-// ===========================================================================
-// Live game helpers — MLB Stats API (no API key needed)
-// ===========================================================================
-
-const _liveCache = new Map()
-const LIVE_TTL   = 25_000  // 25-second cache keeps the dashboard fast
-
-async function mlbFetch(url) {
-  const hit = _liveCache.get(url)
-  if (hit && hit.expiry > Date.now()) return hit.data
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(10_000) })
-    if (!r.ok) return null
-    const data = await r.json()
-    _liveCache.set(url, { data, expiry: Date.now() + LIVE_TTL })
-    return data
-  } catch { return null }
-}
-
-function ipToDecimalLive(ip) {
-  const n = Number(ip || 0)
-  return Math.floor(n) + Math.round((n % 1) * 10) / 3
-}
-
-function extractStarterFromBoxscore(bs, side) {
-  const team = bs?.teams?.[side]
-  if (!team) return null
-  const ids = team.pitchers || []
-  if (!ids.length) return null
-  const sid  = ids[0]
-  const p    = team.players?.[`ID${sid}`]
-  if (!p) return null
-  const st   = p.stats?.pitching
-  if (!st) return null
-  return {
-    id:       String(sid),
-    name:     p.person?.fullName || String(sid),
-    ks:       Number(st.strikeOuts      || 0),
-    ip:       ipToDecimalLive(Number(st.inningsPitched || 0)),
-    bf:       Number(st.battersFaced    || 0),
-    pitches:  Number(st.pitchesThrown   || 0),
-    still_in: ids[ids.length - 1] === sid,
-  }
-}
 
 // ------------------------------------------------------------------
 // GET /api/ks/live?date=YYYY-MM-DD
@@ -975,10 +795,11 @@ function extractStarterFromBoxscore(bs, side) {
 router.get('/ks/live', wrap(async (req, res) => {
   const date = req.query.date || todayISO()
 
+  const uf = userFilter(req)
   const pending = await db.all(
-    `SELECT id, pitcher_id, pitcher_name, strike, side
-       FROM ks_bets WHERE bet_date = ? AND result IS NULL AND live_bet = 0`,
-    [date],
+    `SELECT id, pitcher_id, pitcher_name, strike, side, market_mid, spread, bet_size
+       FROM ks_bets WHERE bet_date = ? AND result IS NULL AND live_bet = 0 ${uf.clause}`,
+    [date, ...uf.args],
   )
   if (!pending.length) return res.json({ date, has_live: false, pitchers: [] })
 
@@ -1018,6 +839,25 @@ router.get('/ks/live', wrap(async (req, res) => {
 
       const myBets = pending.filter(b => String(b.pitcher_id) === starter.id)
 
+      // Auto-settle bets when game is final
+      if (isFinal && myBets.length) {
+        const FEE = 0.07
+        const now = new Date().toISOString()
+        for (const b of myBets) {
+          const won  = b.side === 'YES' ? starter.ks >= b.strike : starter.ks < b.strike
+          const mid  = (b.market_mid ?? 50) / 100
+          const hs   = (b.spread ?? 4) / 200
+          const fill = b.side === 'YES' ? mid + hs : (1 - mid) + hs
+          const pnl  = won
+            ? (b.bet_size ?? 100) * (1 - fill) * (1 - FEE)
+            : -((b.bet_size ?? 100) * fill)
+          await db.run(
+            `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
+            [starter.ks, won ? 'win' : 'loss', now, roundTo(pnl, 2), b.id],
+          )
+        }
+      }
+
       results.push({
         pitcher_id:   starter.id,
         pitcher_name: starter.name,
@@ -1054,14 +894,19 @@ router.get('/ks/live', wrap(async (req, res) => {
 
 const STARTING_BANKROLL = Number(process.env.BANKROLL || 5000)
 
-// Helper: compute running bankroll from sorted P&L rows
-function runningBankroll(rows) {
-  let br = STARTING_BANKROLL
-  return rows.map(r => {
-    br += Number(r.pnl || 0)
-    return br
-  })
-}
+
+// ------------------------------------------------------------------
+// GET /api/ks/balance
+// Real Kalshi portfolio balance (what you could withdraw right now).
+// ------------------------------------------------------------------
+router.get('/ks/balance', wrap(async (req, res) => {
+  try {
+    const bal = await getKalshiBalance()
+    res.json({ balance_cents: bal.balance_cents, balance_usd: bal.balance_usd })
+  } catch (err) {
+    res.status(502).json({ error: 'kalshi_unavailable', message: err.message })
+  }
+}))
 
 // ------------------------------------------------------------------
 // GET /api/ks/summary
@@ -1074,6 +919,7 @@ router.get('/ks/summary', wrap(async (req, res) => {
   const weekAgo  = new Date(now.getTime() - 7  * 86400000).toISOString().slice(0, 10)
   const monthAgo = new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10)
 
+  const uf = userFilter(req)
   const [totals, pending, bankrollRow] = await Promise.all([
     db.one(`
       SELECT
@@ -1088,10 +934,10 @@ router.get('/ks/summary', wrap(async (req, res) => {
         COUNT(CASE WHEN live_bet = 0 THEN 1 END)                                            AS total_bets,
         AVG(CASE WHEN live_bet = 0 AND result IS NOT NULL THEN edge END)                    AS avg_edge
       FROM ks_bets
-      WHERE live_bet = 0
-    `, [today, weekAgo, monthAgo, yearStart]),
-    db.one(`SELECT COUNT(*) AS n FROM ks_bets WHERE result IS NULL AND live_bet = 0`),
-    db.one(`SELECT SUM(COALESCE(pnl,0)) AS total FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0`),
+      WHERE live_bet = 0 ${uf.clause}
+    `, [today, weekAgo, monthAgo, yearStart, ...uf.args]),
+    db.one(`SELECT COUNT(*) AS n FROM ks_bets WHERE result IS NULL AND live_bet = 0 ${uf.clause}`, uf.args),
+    db.one(`SELECT SUM(COALESCE(pnl,0)) AS total FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 ${uf.clause}`, uf.args),
   ])
 
   const wins   = Number(totals?.wins   || 0)
@@ -1114,6 +960,24 @@ router.get('/ks/summary', wrap(async (req, res) => {
   const last5W = last5.filter(r => r.result === 'win').length
   const last5L = last5.filter(r => r.result === 'loss').length
 
+  // Fetch real Kalshi balance — this is ground truth (what you could withdraw)
+  let kalshiBalance = null
+  try {
+    const kb = await getKalshiBalance()
+    kalshiBalance = kb.balance_usd
+  } catch { /* non-fatal — fall back to computed */ }
+
+  // Live money P&L (real-money bets, all users)
+  const liveTotals = await db.one(`
+    SELECT
+      SUM(CASE WHEN result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS total_pnl,
+      SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+      SUM(CASE WHEN result IS NULL  THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN bet_date = ? AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl
+    FROM ks_bets WHERE live_bet = 0 AND paper = 0
+  `, [today])
+
   res.json({
     today_pnl:  roundTo(Number(totals?.today_pnl  || 0), 2),
     week_pnl:   roundTo(Number(totals?.week_pnl   || 0), 2),
@@ -1127,10 +991,17 @@ router.get('/ks/summary', wrap(async (req, res) => {
     total_bets: Number(totals?.total_bets || 0),
     pending:    Number(pending?.n || 0),
     avg_edge:   totals?.avg_edge != null ? roundTo(totals.avg_edge, 4) : 0,
-    bankroll:   roundTo(STARTING_BANKROLL + total, 2),
+    bankroll:        roundTo(STARTING_BANKROLL + total, 2),
+    kalshi_balance:  kalshiBalance,
     start_bankroll: STARTING_BANKROLL,
     current_streak: streak,
     last5: last5.length ? `${last5W}-${last5L}` : null,
+    live_pnl:        roundTo(Number(liveTotals?.total_pnl || 0), 2),
+    live_today_pnl:  roundTo(Number(liveTotals?.today_pnl || 0), 2),
+    live_wins:       Number(liveTotals?.wins    || 0),
+    live_losses:     Number(liveTotals?.losses  || 0),
+    live_pending:    Number(liveTotals?.pending || 0),
+    live_bankroll:   roundTo(110 + Number(liveTotals?.total_pnl || 0), 2),
   })
 }))
 
@@ -1139,8 +1010,10 @@ router.get('/ks/summary', wrap(async (req, res) => {
 // Distinct bet_dates that have pre-game bets, most recent first.
 // ------------------------------------------------------------------
 router.get('/ks/dates', wrap(async (req, res) => {
+  const uf = userFilter(req)
   const rows = await db.all(
-    `SELECT DISTINCT bet_date FROM ks_bets WHERE live_bet = 0 ORDER BY bet_date DESC LIMIT 60`,
+    `SELECT DISTINCT bet_date FROM ks_bets WHERE live_bet = 0 ${uf.clause} ORDER BY bet_date DESC LIMIT 60`,
+    uf.args,
   )
   res.json(rows.map(r => r.bet_date).filter(Boolean))
 }))
@@ -1152,6 +1025,7 @@ router.get('/ks/dates', wrap(async (req, res) => {
 router.get('/ks/daily', wrap(async (req, res) => {
   const date = req.query.date && req.query.date !== 'today' ? req.query.date : todayISO()
 
+  const uf = userFilter(req)
   const bets = await db.all(
     `SELECT id, bet_date, logged_at, pitcher_name, pitcher_id, team, game,
             strike, side, model_prob, market_mid, edge, lambda, actual_ks,
@@ -1159,12 +1033,25 @@ router.get('/ks/daily', wrap(async (req, res) => {
             park_factor, ump_factor, ump_name, velo_adj, bb_penalty,
             spread, k9_career, k9_season, k9_l5,
             savant_k_pct, savant_whiff, savant_fbv,
-            weather_mult, velo_trend_mph, raw_model_prob
+            weather_mult, velo_trend_mph, raw_model_prob,
+            order_id, fill_price, filled_at, filled_contracts, order_status, paper
      FROM ks_bets
-     WHERE bet_date = ? AND live_bet = 0
+     WHERE bet_date = ? AND live_bet = 0 ${uf.clause}
      ORDER BY pitcher_name, strike ASC`,
+    [date, ...uf.args],
+  )
+
+  // Fetch all live (real-money) bets for this date — match them to paper bets below
+  const liveBets = await db.all(
+    `SELECT pitcher_name, strike, side, bet_size, fill_price, filled_contracts,
+            order_id, order_status, result, pnl
+     FROM ks_bets
+     WHERE bet_date = ? AND live_bet = 0 AND paper = 0`,
     [date],
   )
+  const liveKey = b => `${b.pitcher_name}|${b.strike}|${b.side}`
+  const liveMap = new Map()
+  for (const lb of liveBets) liveMap.set(liveKey(lb), lb)
 
   // Group by pitcher/game
   const pitcherMap = new Map()
@@ -1207,6 +1094,25 @@ router.get('/ks/daily', wrap(async (req, res) => {
       savant_k_pct:   b.savant_k_pct,
       savant_whiff:   b.savant_whiff,
       savant_fbv:     b.savant_fbv,
+      order_id:         b.order_id        ?? null,
+      fill_price:       b.fill_price      ?? null,
+      filled_at:        b.filled_at       ?? null,
+      filled_contracts: b.filled_contracts ?? null,
+      order_status:     b.order_status    ?? null,
+      paper:            b.paper           ?? 1,
+      live:             (() => {
+        const lb = liveMap.get(`${b.pitcher_name}|${b.strike}|${b.side}`)
+        if (!lb) return null
+        return {
+          bet_size:         lb.bet_size,
+          fill_price:       lb.fill_price,
+          filled_contracts: lb.filled_contracts,
+          order_id:         lb.order_id,
+          order_status:     lb.order_status,
+          result:           lb.result,
+          pnl:              lb.pnl != null ? roundTo(lb.pnl, 2) : null,
+        }
+      })(),
     })
   }
 
@@ -1460,9 +1366,15 @@ router.get('/meta', wrap(async (req, res) => {
   res.json({ deploy_time: SERVER_START })
 }))
 
-// GET /api/users — list all users
+// GET /api/users — list all users with bettor profile (never returns private key)
 router.get('/users', wrap(async (req, res) => {
-  const rows = await db.all(`SELECT id, name, created_at FROM users ORDER BY created_at ASC`)
+  const rows = await db.all(`
+    SELECT id, name, created_at,
+           active_bettor, starting_bankroll, daily_risk_pct, paper,
+           kalshi_key_id,
+           CASE WHEN kalshi_private_key IS NOT NULL AND kalshi_private_key != '' THEN 1 ELSE 0 END AS has_kalshi_key,
+           discord_webhook
+    FROM users ORDER BY created_at ASC`)
   res.json(rows)
 }))
 
@@ -1478,6 +1390,39 @@ router.post('/users', wrap(async (req, res) => {
     if (err.message?.includes('UNIQUE')) return res.status(409).json({ error: 'Username already exists' })
     throw err
   }
+}))
+
+// PUT /api/users/:id — update bettor profile
+router.put('/users/:id', wrap(async (req, res) => {
+  const id = Number(req.params.id)
+  if (!id) return res.status(400).json({ error: 'invalid id' })
+  const {
+    active_bettor, starting_bankroll, daily_risk_pct, paper,
+    kalshi_key_id, kalshi_private_key, discord_webhook, pin,
+  } = req.body || {}
+
+  const sets = []
+  const vals = []
+
+  if (active_bettor     != null) { sets.push('active_bettor = ?');     vals.push(active_bettor     ? 1 : 0) }
+  if (starting_bankroll != null) { sets.push('starting_bankroll = ?'); vals.push(Number(starting_bankroll)) }
+  if (daily_risk_pct    != null) { sets.push('daily_risk_pct = ?');    vals.push(Number(daily_risk_pct)) }
+  if (paper             != null) { sets.push('paper = ?');             vals.push(paper ? 1 : 0) }
+  if (kalshi_key_id     != null) { sets.push('kalshi_key_id = ?');     vals.push(String(kalshi_key_id).trim() || null) }
+  if (kalshi_private_key != null && String(kalshi_private_key).trim()) {
+    sets.push('kalshi_private_key = ?')
+    vals.push(String(kalshi_private_key).trim())
+  }
+  if (discord_webhook   != null) { sets.push('discord_webhook = ?');   vals.push(String(discord_webhook).trim() || null) }
+  if (pin               != null) {
+    if (String(pin).length < 4) return res.status(400).json({ error: 'PIN must be at least 4 digits' })
+    sets.push('pin = ?'); vals.push(String(pin).trim())
+  }
+
+  if (!sets.length) return res.status(400).json({ error: 'nothing to update' })
+  vals.push(id)
+  await db.run(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, vals)
+  res.json({ ok: true })
 }))
 
 // DELETE /api/users/:name — remove a user (can't remove yourself)
