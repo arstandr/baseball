@@ -11,7 +11,6 @@
 import express from 'express'
 import * as db from '../lib/db.js'
 import { getBalance as getKalshiBalance } from '../lib/kalshi.js'
-import { safeJson, todayISO, roundTo, winRate, fmtShort } from '../lib/utils.js'
 import {
   computeModeSummary,
   computeCalibration,
@@ -22,6 +21,24 @@ import { mlbFetch, extractStarterFromBoxscore } from '../lib/mlb-live.js'
 
 const router = express.Router()
 const SERVER_START = new Date().toISOString()
+
+function safeJson(str, fallback = null) {
+  if (str == null) return fallback
+  try { return JSON.parse(str) } catch { return fallback }
+}
+function todayISO() { return new Date().toISOString().slice(0, 10) }
+function roundTo(n, d = 4) {
+  if (n == null || Number.isNaN(n)) return 0
+  return Math.round(n * 10 ** d) / 10 ** d
+}
+function winRate(wins, losses) {
+  const d = (wins || 0) + (losses || 0)
+  return d > 0 ? (wins || 0) / d : 0
+}
+function fmtShort(d) {
+  const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  return `${m[d.getUTCMonth()]} ${d.getUTCDate()}`
+}
 
 // Returns SQL fragment + args to scope ks_bets to the logged-in user.
 // Legacy bets (user_id IS NULL) are visible to all users for backward compat
