@@ -105,11 +105,17 @@ export function startScheduler() {
   // 3:30 PM ET — MLB lineup refresh
   cron.schedule('30 15 * * *', () => mlbRun('MLB lineup refresh', '--lineups'), { timezone: 'America/New_York' })
 
+  // Mid-game partial settles — resolve guaranteed YES wins as they happen
+  // 4 PM, 6 PM, 8 PM, 10 PM ET
+  for (const hour of [16, 18, 20, 22]) {
+    cron.schedule(`0 ${hour} * * *`, () => mlbRun(`MLB mid-game settle (${hour}:00)`, '--settle'), { timezone: 'America/New_York' })
+  }
+
   // 11:55 PM ET — settle both MLB + NBA + EOD reports
   cron.schedule('55 23 * * *', () => {
     mlbRun('MLB settle + EOD', '--settle')
     nbaRun('NBA settle', '--settle')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 9:00am MLB+monitor | 9:30am NBA | 3:30pm MLB lineups | 11:55pm settle all')
+  console.log('[scheduler] daily jobs (ET): 9:00am MLB+monitor | 9:30am NBA | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
 }

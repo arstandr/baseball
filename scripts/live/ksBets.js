@@ -375,7 +375,7 @@ async function isGameFinal(gamePk) {
   } catch { return false }
 }
 
-async function fetchActualKs(pitcherId, pitcherName, gameDate) {
+async function fetchActualKs(pitcherId, pitcherName, gameDate, { requireFinal = true } = {}) {
   try {
     const games = await db.all(
       `SELECT id, pitcher_home_id, pitcher_away_id FROM games WHERE date = ?`,
@@ -384,7 +384,7 @@ async function fetchActualKs(pitcherId, pitcherName, gameDate) {
 
     for (const g of games) {
       const final = await isGameFinal(g.id)
-      if (!final) continue
+      if (!final && requireFinal) continue
 
       // Determine side using pitcher_id (exact match, no name guessing)
       const side = g.pitcher_home_id === pitcherId ? 'home'
@@ -401,7 +401,7 @@ async function fetchActualKs(pitcherId, pitcherName, gameDate) {
         const player = playerStats[`ID${pitcherId}`]
         if (player) {
           const ks = player.stats?.pitching?.strikeOuts
-          if (ks != null) return { ks: Number(ks) }
+          if (ks != null) return { ks: Number(ks), final }
         }
 
         // Fallback: name match (handles edge cases where box score ID differs)
@@ -412,7 +412,7 @@ async function fetchActualKs(pitcherId, pitcherName, gameDate) {
           if (!p) continue
           if ((p.person?.fullName || '').toLowerCase().includes(lastName)) {
             const ks = p.stats?.pitching?.strikeOuts
-            if (ks != null) return { ks: Number(ks) }
+            if (ks != null) return { ks: Number(ks), final }
           }
         }
       } catch { continue }
@@ -443,6 +443,7 @@ async function settleBets() {
   const postponedPitcherIds = new Set(postponed.flatMap(g => [g.pitcher_home_id, g.pitcher_away_id].filter(Boolean)))
 
   // Group by pitcher_id to avoid redundant box score fetches
+  // requireFinal=false so we can resolve guaranteed YES wins mid-game
   const pitcherKs = new Map()
   for (const bet of open) {
     const key = bet.pitcher_id || bet.pitcher_name
@@ -451,10 +452,10 @@ async function settleBets() {
         pitcherKs.set(key, 'postponed')
         console.log(`  ${bet.pitcher_name}: POSTPONED — voiding bet`)
       } else {
-        const result = await fetchActualKs(bet.pitcher_id, bet.pitcher_name, bet.bet_date)
+        const result = await fetchActualKs(bet.pitcher_id, bet.pitcher_name, bet.bet_date, { requireFinal: false })
         pitcherKs.set(key, result)
-        if (result) console.log(`  ${bet.pitcher_name}: ${result.ks} Ks`)
-        else        console.log(`  ${bet.pitcher_name}: game not final yet`)
+        if (result) console.log(`  ${bet.pitcher_name}: ${result.ks} Ks${result.final ? '' : ' (in progress)'}`)
+        else        console.log(`  ${bet.pitcher_name}: no data yet`)
       }
     }
   }
@@ -475,6 +476,18 @@ async function settleBets() {
 
     const actualKs = data.ks
     const hit = actualKs >= bet.strike
+
+    // Mid-game: only settle bets that are already guaranteed
+    // YES bets that crossed threshold are locked wins (Ks never decrease)
+    // NO bets and uncrossed YES bets need a final box score
+    if (!data.final) {
+      if (bet.side === 'YES' && hit) {
+        // guaranteed win — settle now
+      } else {
+        unknown++; continue
+      }
+    }
+
     const won = bet.side === 'YES' ? hit : !hit
 
     // Correct P&L: use actual fill price (ask), not mid
