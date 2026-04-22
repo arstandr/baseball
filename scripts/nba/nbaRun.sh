@@ -23,6 +23,7 @@ if [ "$SETTLE_MODE" = true ]; then
   echo " NBA Totals — Settle ${DATE}"
   echo "════════════════════════════════════════"
   node scripts/nba/nbaBets.js settle --date "$DATE"
+  node scripts/nba/nba3PTBets.js settle --date "$DATE" || true
   exit 0
 fi
 
@@ -51,8 +52,9 @@ echo "── 5. Find edges (totals + 3PT) and log bets ──"
 node scripts/nba/nbaBets.js log --date "$DATE"
 
 echo ""
-echo "── 6. 3PT edge scan ──"
+echo "── 6. 3PT edge scan + log paper bets ──"
 node scripts/nba/nba3PTEdge.js --date "$DATE"
+node scripts/nba/nba3PTBets.js log --date "$DATE" || true
 
 echo ""
 echo "════════════════════════════════════════"
