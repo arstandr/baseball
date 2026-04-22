@@ -11,13 +11,22 @@
 import express from 'express'
 import * as db from '../lib/db.js'
 import { getBalance as getKalshiBalance } from '../lib/kalshi.js'
-import {
-  computeModeSummary,
-  computeCalibration,
-  computeBankrollRollup,
-  runningBankroll,
-} from '../lib/analytics.js'
-import { mlbFetch, extractStarterFromBoxscore } from '../lib/mlb-live.js'
+
+// Optional modules — loaded dynamically so server starts even if files are missing
+let computeModeSummary, computeCalibration, computeBankrollRollup, runningBankroll
+let mlbFetch, extractStarterFromBoxscore
+try {
+  const analytics = await import('../lib/analytics.js')
+  computeModeSummary   = analytics.computeModeSummary
+  computeCalibration   = analytics.computeCalibration
+  computeBankrollRollup = analytics.computeBankrollRollup
+  runningBankroll      = analytics.runningBankroll
+} catch { /* routes using these will return empty gracefully */ }
+try {
+  const mlbLive = await import('../lib/mlb-live.js')
+  mlbFetch                = mlbLive.mlbFetch
+  extractStarterFromBoxscore = mlbLive.extractStarterFromBoxscore
+} catch { /* live polling gracefully degrades */ }
 
 const router = express.Router()
 const SERVER_START = new Date().toISOString()
