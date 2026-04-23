@@ -2109,8 +2109,8 @@ router.get('/ks/kalshi-positions', wrap(async (req, res) => {
   // Look up Kalshi creds for this user
   let creds = {}
   if (user_id) {
-    const u = await db.one(`SELECT kalshi_key_id, kalshi_key_content FROM users WHERE id = ?`, [user_id])
-    if (u?.kalshi_key_id) creds = { keyId: u.kalshi_key_id, keyContent: u.kalshi_key_content }
+    const u = await db.one(`SELECT kalshi_key_id, kalshi_private_key FROM users WHERE id = ?`, [user_id])
+    if (u?.kalshi_key_id) creds = { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key }
   }
   const { default: axios } = await import('axios')
   const { getAuthHeaders } = await import('../lib/kalshi.js')
