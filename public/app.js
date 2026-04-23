@@ -1853,7 +1853,6 @@ function renderLbRows(id, rows) {
 // ──────────────────────────────────────────────────────────────────────────
 async function refreshLogView() {
   wireLogFilters()
-  updateSortIcons()
   await loadBets()
 }
 
@@ -1898,35 +1897,6 @@ function wireLogFilters() {
     })
   })
 
-  // Sortable column headers
-  document.querySelectorAll('.ks-log-head .sortable').forEach(th => {
-    th.addEventListener('click', () => {
-      const col = th.dataset.sort
-      if (state.log.sort === col) {
-        state.log.dir = state.log.dir === 'desc' ? 'asc' : 'desc'
-      } else {
-        state.log.sort = col
-        state.log.dir = 'desc'
-      }
-      state.log.page = 1
-      updateSortIcons()
-      loadBets()
-    })
-  })
-}
-
-function updateSortIcons() {
-  document.querySelectorAll('.ks-log-head .sortable').forEach(th => {
-    const icon = th.querySelector('.sort-icon')
-    if (!icon) return
-    if (th.dataset.sort === state.log.sort) {
-      icon.textContent = state.log.dir === 'asc' ? '↑' : '↓'
-      th.classList.add('sort-active')
-    } else {
-      icon.textContent = '↕'
-      th.classList.remove('sort-active')
-    }
-  })
 }
 
 async function loadBets() {
@@ -1951,42 +1921,41 @@ async function loadBets() {
   body.innerHTML = ''
 
   if (!data?.bets?.length) {
-    body.innerHTML = '<div style="padding:24px;color:var(--text-dim);text-align:center;font-size:13px;">No bets found.</div>'
+    body.innerHTML = '<div class="sc-empty">No bets found.</div>'
     renderLogPagination(null)
     return
   }
 
   for (const b of data.bets) {
-    const rowCls = b.result === 'win' ? 'win-row' : b.result === 'loss' ? 'loss-row' : ''
-    const row = document.createElement('div')
-    row.className = `ks-log-row ${rowCls}`
-    const mid  = b.market_mid != null ? Number(b.market_mid) : null
-    const face = b.bet_size   != null ? Number(b.bet_size)   : null
-    const lhs  = (b.spread ?? 4) / 2
-    const wager = mid != null && face != null ? fmt$(face * (mid + lhs) / 100) : (face ? fmt$(face) : '—')
+    const isWin  = b.result === 'win'
+    const isLoss = b.result === 'loss'
+    const isPend = !b.result || b.result === 'pending'
+    const cls    = isWin ? 'sc-win' : isLoss ? 'sc-loss' : 'sc-wait'
 
-    const betDesc = b.side === 'YES'
-      ? `${b.strike}+ strikeouts YES`
-      : `Under ${b.strike} strikeouts NO`
+    const face = b.bet_size != null ? Number(b.bet_size) : null
+    const desc    = betDescPlain(b.side, b.strike)
+    const outcome = betOutcomePlain(b.side, b.strike, b.actual_ks, b.result)
 
-    const resultHtml = b.result === 'win'
-      ? `<span class="pc-badge pc-badge--win">✓ WIN</span>`
-      : b.result === 'loss'
-      ? `<span class="pc-badge pc-badge--loss">✗ LOSS</span>`
-      : `<span class="muted">—</span>`
-    const pnlHtml = b.pnl != null
-      ? `<span class="${b.pnl >= 0 ? 'good' : 'bad'}">${b.pnl >= 0 ? '+' : ''}${fmt$(b.pnl)}</span>`
-      : '<span class="muted">—</span>'
+    const pnlText = b.pnl != null
+      ? `${b.pnl >= 0 ? '+' : ''}${fmt$(b.pnl)}`
+      : isPend && face ? `To win +${fmt$(face)}` : '—'
+    const pnlCls = b.pnl != null ? (b.pnl >= 0 ? 'good' : 'bad') : 'muted'
 
-    row.innerHTML = `
-      <div class="muted">${b.bet_date || '—'}</div>
-      <div class="log-pitcher">${esc(b.pitcher_name || '—')}</div>
-      <div class="muted">${betDesc}</div>
-      <div>${wager}</div>
-      <div>${b.actual_ks != null ? b.actual_ks + 'K' : '—'}</div>
-      <div>${resultHtml}</div>
-      <div>${pnlHtml}</div>`
-    body.appendChild(row)
+    const card = document.createElement('div')
+    card.className = `sc-bet-card ${cls}`
+    card.innerHTML = `
+      <div class="sc-bet-header">
+        <div>
+          <div class="sc-bet-date">${b.bet_date || '—'}</div>
+          <div class="sc-bet-pitcher">${esc(b.pitcher_name || '—')}</div>
+          <div class="sc-bet-desc">${desc}</div>
+          ${!isPend ? `<div class="sc-bet-outcome">${outcome}</div>` : ''}
+        </div>
+        <div class="sc-bet-right">
+          <div class="sc-bet-amount ${pnlCls}">${pnlText}</div>
+        </div>
+      </div>`
+    body.appendChild(card)
   }
   renderLogPagination(data)
 }

@@ -1358,6 +1358,14 @@ a:hover { text-decoration: underline; }
   padding: 0 18px 14px;
 }
 
+.sc-bet-date {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .sc-bet-pitcher {
   font-size: 18px;
   font-weight: 700;
