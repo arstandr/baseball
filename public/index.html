@@ -4,9 +4,9 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Money Tree 2.0</title>
-  <link rel="stylesheet" href="/style.css?v=3"/>
+  <link rel="stylesheet" href="/style.css?v=4"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
-  <script type="module" src="/app.js?v=3" defer></script>
+  <script type="module" src="/app.js?v=4" defer></script>
 </head>
 <body>
 
@@ -16,11 +16,11 @@
       <span class="brand-sub">Strikeout Intelligence</span>
     </div>
     <nav class="modes" role="tablist">
-      <button class="mode active" data-view="today"    role="tab">TODAY</button>
-      <button class="mode"        data-view="trends"   role="tab">TRENDS</button>
-      <button class="mode"        data-view="testing"  role="tab">TESTING</button>
-      <button class="mode"        data-view="log"      role="tab">BET LOG</button>
-      <button class="mode"        data-view="settings" role="tab">SETTINGS</button>
+      <button class="mode active" data-view="today"    role="tab">Today</button>
+      <button class="mode"        data-view="trends"   role="tab">How We're Doing</button>
+      <button class="mode"        data-view="log"      role="tab">History</button>
+      <button class="mode"        data-view="settings" role="tab">Settings</button>
+      <button class="mode"        data-view="testing"  role="tab" style="opacity:0.5;font-size:10px">Advanced</button>
     </nav>
     <div class="user" id="user-chip">
       <div class="user-meta">
@@ -35,40 +35,34 @@
     </div>
   </header>
 
-  <!-- ── Bankroll hero ── -->
-  <div class="bankroll-card" id="bankroll-hero">
-    <div class="bankroll-main">
-      <div class="bankroll-label-row">
-        <div>
-          <div class="bankroll-label">Paper Bankroll</div>
-          <div class="bankroll-value skel" id="hero-bankroll">$—</div>
-          <div class="bankroll-meta">
-            Start: <b id="hero-start">$—</b>
-            <span class="dot">·</span>
-            Total ROI: <b id="hero-roi">—</b>
-          </div>
-        </div>
-        <div class="kalshi-balance-block">
-          <div class="bankroll-label">Kalshi Balance</div>
-          <div class="bankroll-value skel" id="hero-kalshi">$—</div>
-          <div class="bankroll-meta">Live account</div>
-        </div>
+  <!-- ── Status hero ── -->
+  <div class="status-hero" id="status-hero">
+    <div class="sh-main">
+      <div class="sh-verdict" id="sh-verdict">Getting today's bets…</div>
+      <div class="sh-record" id="sh-record"></div>
+    </div>
+    <div class="sh-stats">
+      <div class="sh-stat">
+        <div class="sh-stat-label">Your money now</div>
+        <div class="sh-stat-value" id="sh-bankroll">$—</div>
+        <div class="sh-stat-sub">Started with <b id="sh-start">$—</b></div>
+      </div>
+      <div class="sh-stat">
+        <div class="sh-stat-label">Since you started</div>
+        <div class="sh-stat-value" id="sh-total-pnl">—</div>
+        <div class="sh-stat-sub" id="sh-total-roi"></div>
+      </div>
+      <div class="sh-stat" id="sh-bestcase-card" style="display:none">
+        <div class="sh-stat-label">Best case today</div>
+        <div class="sh-stat-value good" id="sh-bestcase">—</div>
+        <div class="sh-stat-sub">if all pending bets win</div>
+      </div>
+      <div class="sh-stat sh-stat-live" id="sh-live-stat" style="display:none">
+        <div class="sh-stat-label">Real money account</div>
+        <div class="sh-stat-value" id="sh-kalshi">—</div>
+        <div class="sh-stat-sub" id="sh-live-pnl"></div>
       </div>
     </div>
-    <div class="bankroll-deltas">
-      <div class="delta"><span>Today</span><b id="hero-today" class="skel">$—</b></div>
-      <div class="delta"><span>Week</span><b id="hero-week" class="skel">$—</b></div>
-      <div class="delta"><span>Month</span><b id="hero-month" class="skel">$—</b></div>
-      <div class="delta"><span>YTD</span><b id="hero-ytd" class="skel">$—</b></div>
-    </div>
-    <div class="bankroll-deltas">
-      <div class="delta"><span>Win Rate</span><b id="hero-wr" class="skel">—</b></div>
-      <div class="delta"><span>Bets</span><b id="hero-bets" class="skel">—</b></div>
-      <div class="delta"><span>Pending</span><b id="hero-pending" class="skel">—</b></div>
-      <div class="delta"><span>Avg Edge</span><b id="hero-edge" class="skel">—</b></div>
-      <div class="delta"><span>Streak</span><div class="hero-val skel" id="hero-streak">—</div></div>
-    </div>
-    <div id="hero-live" class="hero-live-bar" style="display:none"></div>
   </div>
 
   <!-- ── Per-bettor bankroll cards ── -->

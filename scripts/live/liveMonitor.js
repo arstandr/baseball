@@ -145,8 +145,9 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
   const now    = new Date().toISOString()
 
   // DB-level dedup: skip if already logged this session (survives monitor restarts)
+  // Use IS instead of = for user_id because SQLite NULL = NULL is always false
   const existing = await db.one(
-    `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id=?`,
+    `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id IS ?`,
     [TODAY, pitcherName, strike, side, userId],
   )
   if (existing) return

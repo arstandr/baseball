@@ -75,25 +75,75 @@ function connectSSE() {
       const date = state.selectedDate || new Date().toISOString().slice(0, 10)
       if (ev.lastDataUpdate) updateLastUpdated(ev.lastDataUpdate)
       if (ev.type === 'settled') {
-        // Bets settled — refresh P&L banner, bettor cards, live bets section
+        // Snapshot current results before reload so we can detect covers
+        const prevResults = {}
+        for (const p of _dailyPitchers) {
+          for (const b of p.bets) {
+            prevResults[b.id] = { result: b.result, pitcher_name: p.pitcher_name, pitcher_id: p.pitcher_id }
+          }
+        }
         if (state.view === 'today') {
-          loadDay(date)
+          loadDay(date).then(() => {
+            // After reload: find bets that just went pending → win or → loss
+            const newlyCovered = new Set()
+            for (const p of _dailyPitchers) {
+              for (const b of p.bets) {
+                const prev = prevResults[b.id]
+                if (!prev || prev.result) continue // wasn't pending before
+                if (b.result === 'win') {
+                  if (!newlyCovered.has(String(p.pitcher_id))) {
+                    newlyCovered.add(String(p.pitcher_id))
+                    flashPitcherCard(p.pitcher_id, 'win', p.pitcher_name)
+                  }
+                } else if (b.result === 'loss') {
+                  if (!newlyCovered.has(String(p.pitcher_id))) {
+                    newlyCovered.add(String(p.pitcher_id))
+                    flashPitcherCard(p.pitcher_id, 'loss', p.pitcher_name)
+                  }
+                }
+              }
+            }
+          })
         }
         refreshBettorCards()
       }
       if (ev.type === 'live_bet') {
-        // New in-game bet placed — refresh live bets section and bettor cards
-        if (state.view === 'today') {
-          loadLiveBets(date)
-        }
+        if (state.view === 'today') loadLiveBets(date)
         refreshBettorCards()
       }
     } catch {}
   }
-  es.onerror = () => {
-    es.close()
-    setTimeout(connectSSE, 5000)
+  es.onerror = () => { es.close(); setTimeout(connectSSE, 5000) }
+}
+
+function flashPitcherCard(pitcherId, type, pitcherName) {
+  const card = pitcherId
+    ? document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(String(pitcherId))}"]`)
+    : null
+  if (card) {
+    card.classList.remove('flash-win', 'flash-loss')
+    void card.offsetWidth  // force reflow so animation restarts
+    card.classList.add(`flash-${type}`)
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    setTimeout(() => card.classList.remove(`flash-${type}`), 3500)
   }
+  const name = pitcherName || 'Bet'
+  const msg  = type === 'win' ? `✓ COVERED — ${name} just won!` : `✗ ${name} bet settled as a loss`
+  showToast(msg, type)
+}
+
+function showToast(message, type = 'win') {
+  let toast = document.getElementById('cover-toast')
+  if (!toast) {
+    toast = document.createElement('div')
+    toast.id        = 'cover-toast'
+    toast.className = 'cover-toast'
+    document.body.appendChild(toast)
+  }
+  toast.textContent = message
+  toast.className   = `cover-toast cover-toast--${type} cover-toast--show`
+  clearTimeout(toast._timer)
+  toast._timer = setTimeout(() => toast.classList.remove('cover-toast--show'), 5000)
 }
 
 async function loadUser() {
@@ -157,66 +207,43 @@ async function refreshAll() {
 async function refreshHero() {
   const s = await fetchJson('/api/ks/summary').catch(() => null)
   if (!s) return
-  const bankrollEl = document.getElementById('hero-bankroll')
-  bankrollEl.classList.remove('skel')
-  bankrollEl.textContent = fmt$(s.bankroll, true)
-  bankrollEl.className = s.total_pnl >= 0 ? 'bankroll-value good' : 'bankroll-value bad'
-  bankrollEl.title = 'Paper bankroll (starting balance + P&L)'
 
-  const kalshiEl = document.getElementById('hero-kalshi')
-  if (kalshiEl) {
-    kalshiEl.classList.remove('skel')
-    kalshiEl.textContent = s.kalshi_balance != null ? fmt$(s.kalshi_balance, true) : '—'
+  // ── New status hero ──────────────────────────────────────────────────────
+  const bankrollEl = document.getElementById('sh-bankroll')
+  if (bankrollEl) {
+    bankrollEl.textContent = fmt$(s.bankroll, true)
+    bankrollEl.className = 'sh-stat-value'
+  }
+  setText('sh-start', fmt$(s.start_bankroll, true))
+
+  const totalPnlEl = document.getElementById('sh-total-pnl')
+  if (totalPnlEl) {
+    const sign = s.total_pnl >= 0 ? '+' : ''
+    totalPnlEl.textContent = sign + fmt$(s.total_pnl)
+    totalPnlEl.className   = `sh-stat-value ${s.total_pnl >= 0 ? 'good' : 'bad'}`
+  }
+  const roiEl = document.getElementById('sh-total-roi')
+  if (roiEl) {
+    const roi = s.start_bankroll > 0 ? (s.total_pnl / s.start_bankroll * 100).toFixed(1) : 0
+    const roiSign = roi >= 0 ? '+' : ''
+    roiEl.textContent = `${roiSign}${roi}% overall`
   }
 
-  setText('hero-start', fmt$(s.start_bankroll, true))
-  const roi = s.start_bankroll > 0 ? s.total_pnl / s.start_bankroll : 0
-  setHtml('hero-roi', `<span class="${roi >= 0 ? 'good' : 'bad'}">${fmtPct(roi, 1)}</span>`)
-
-  setDelta('hero-today', s.today_pnl)
-  setDelta('hero-week',  s.week_pnl)
-  setDelta('hero-month', s.month_pnl)
-  setDelta('hero-ytd',   s.ytd_pnl)
-
-  const wr = s.win_rate
-  setHtml('hero-wr', `<span class="${wr >= 0.55 ? 'good' : wr >= 0.5 ? '' : 'bad'}">${fmtPct(wr)}</span>`)
-
-  if (s.last5 != null) {
-    const streakEl = document.getElementById('hero-streak')
-    if (streakEl) {
-      streakEl.classList.remove('skel')
-      const sc = s.current_streak
-      if (sc >= 3)       streakEl.innerHTML = `<span class="good">🔥 ${sc} in a row</span>`
-      else if (sc <= -3) streakEl.innerHTML = `<span class="bad">❄️ ${Math.abs(sc)} straight losses</span>`
-      else               streakEl.innerHTML = `<span>Last 5: ${s.last5}</span>`
+  // Real money (Kalshi) section
+  const liveStatEl = document.getElementById('sh-live-stat')
+  const kalshiEl   = document.getElementById('sh-kalshi')
+  const livePnlEl  = document.getElementById('sh-live-pnl')
+  if (liveStatEl && (s.kalshi_balance != null || s.live_wins > 0 || s.live_losses > 0)) {
+    liveStatEl.style.display = 'flex'
+    if (kalshiEl) kalshiEl.textContent = s.kalshi_balance != null ? fmt$(s.kalshi_balance, true) : '—'
+    if (livePnlEl && s.live_pnl != null) {
+      const lsign = s.live_pnl >= 0 ? '+' : ''
+      livePnlEl.textContent = `${lsign}${fmt$(s.live_pnl)} · ${s.live_wins}W ${s.live_losses}L`
+      livePnlEl.className   = `sh-stat-sub ${s.live_pnl >= 0 ? 'good' : 'bad'}`
     }
   }
-  const betsEl = document.getElementById('hero-bets')
-  betsEl.classList.remove('skel')
-  betsEl.textContent = `${s.settled}/${s.total_bets}`
 
-  const pendEl = document.getElementById('hero-pending')
-  pendEl.classList.remove('skel')
-  pendEl.textContent = s.pending > 0 ? `${s.pending} live` : '0'
-  pendEl.style.color = s.pending > 0 ? 'var(--accent)' : 'var(--muted)'
-
-  const edgeEl = document.getElementById('hero-edge')
-  edgeEl.classList.remove('skel')
-  edgeEl.textContent = s.avg_edge != null ? `${(s.avg_edge * 100).toFixed(1)}¢` : '—'
-
-  // Live money section
-  const liveEl = document.getElementById('hero-live')
-  if (liveEl && (s.live_pending > 0 || s.live_wins > 0 || s.live_losses > 0)) {
-    const livePnlCls = s.live_pnl >= 0 ? 'good' : 'bad'
-    const livePnlSign = s.live_pnl >= 0 ? '+' : ''
-    liveEl.innerHTML = `
-      <span class="hero-live-label">💵 Live</span>
-      <span class="hero-live-bankroll ${livePnlCls}">${fmt$(s.live_bankroll, true)}</span>
-      <span class="hero-live-pnl ${livePnlCls}">${livePnlSign}${fmt$(s.live_pnl)}</span>
-      <span class="hero-live-record">${s.live_wins}W-${s.live_losses}L${s.live_pending > 0 ? ` · ${s.live_pending} pending` : ''}</span>
-    `
-    liveEl.style.display = 'flex'
-  }
+  // Note: sh-verdict and sh-record are updated by renderDaySummary (has day-specific data)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -532,48 +559,72 @@ async function loadDay(date) {
 }
 
 function renderDaySummary(date, data) {
-  const el = document.getElementById('day-summary')
-  if (!el) return
-  if (!data || !data.pitchers?.length) { el.hidden = true; return }
-  el.hidden = false
+  // Update the big status banner in the hero
+  const verdictEl   = document.getElementById('sh-verdict')
+  const recordEl    = document.getElementById('sh-record')
+  const bestcaseCard = document.getElementById('sh-bestcase-card')
+  const bestcaseEl  = document.getElementById('sh-bestcase')
 
   const KALSHI_FEE = 0.07
   let atRisk = 0, bestCase = 0
-  for (const p of data.pitchers) {
-    for (const b of p.bets) {
-      if (b.result) continue
-      const mid  = Number(b.market_mid ?? 50)
-      const face = Number(b.bet_size   ?? 0)
-      const hs   = (b.spread ?? 4) / 2
-      const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
-      const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
-      atRisk   += face * fill / 100
-      bestCase += face * win / 100 * (1 - KALSHI_FEE)
+
+  if (!data || !data.pitchers?.length) {
+    if (verdictEl) verdictEl.textContent = 'No bets for this day.'
+    if (recordEl)  recordEl.textContent = ''
+    if (bestcaseCard) bestcaseCard.style.display = 'none'
+  } else {
+    // Compute best case from pending bets
+    for (const p of data.pitchers) {
+      for (const b of p.bets) {
+        if (b.result) continue
+        const mid  = Number(b.market_mid ?? 50)
+        const face = Number(b.bet_size   ?? 0)
+        const hs   = (b.spread ?? 4) / 2
+        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+        atRisk   += face * fill / 100
+        bestCase += face * win / 100 * (1 - KALSHI_FEE)
+      }
+    }
+
+    if (verdictEl) {
+      const pnl = data.day_pnl
+      if (pnl === 0 && data.day_wins === 0 && data.day_losses === 0) {
+        verdictEl.textContent = `No settled bets yet today.`
+      } else {
+        const direction = pnl > 0 ? 'UP' : pnl < 0 ? 'DOWN' : 'EVEN'
+        const cls       = pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''
+        const amount    = Math.abs(pnl) > 0.005 ? ` <span class="${cls}">${direction} ${fmt$(Math.abs(pnl))}</span>` : ` <span>EVEN</span>`
+        verdictEl.innerHTML = `Today you are${amount}`
+      }
+    }
+
+    if (recordEl) {
+      const parts = []
+      if (data.day_wins > 0)    parts.push(`${data.day_wins} bet${data.day_wins !== 1 ? 's' : ''} won`)
+      if (data.day_losses > 0)  parts.push(`${data.day_losses} lost`)
+      if (data.day_pending > 0) parts.push(`${data.day_pending} still settling`)
+      if (parts.length === 0 && (data.day_wins + data.day_losses + data.day_pending) === 0)
+        parts.push('No activity yet')
+      recordEl.textContent = parts.join(' · ')
+    }
+
+    if (bestcaseCard && bestcaseEl) {
+      if (data.day_pending > 0) {
+        bestcaseCard.style.display = 'flex'
+        const projectedEnd = data.day_pnl + bestCase
+        const sign = projectedEnd >= 0 ? '+' : ''
+        bestcaseEl.textContent = sign + fmt$(projectedEnd)
+        bestcaseEl.className = `sh-stat-value ${projectedEnd >= 0 ? 'good' : 'bad'}`
+      } else {
+        bestcaseCard.style.display = 'none'
+      }
     }
   }
 
-  const pnlCls = data.day_pnl >= 0 ? 'good' : 'bad'
-  const sign   = data.day_pnl >= 0 ? '+' : ''
-  const settled = data.day_wins + data.day_losses
-
-  el.innerHTML = `
-    <div class="dpb-grid">
-      <div class="dpb-cell">
-        <div class="dpb-label">SETTLED P&L</div>
-        <div class="dpb-val ${pnlCls}">${sign}${fmt$(data.day_pnl)}</div>
-        <div class="dpb-sub">${data.day_wins}W · ${data.day_losses}L · ${settled} done</div>
-      </div>
-      <div class="dpb-cell dpb-cell-mid">
-        <div class="dpb-label">PENDING</div>
-        <div class="dpb-val">${data.day_pending}</div>
-        <div class="dpb-sub">${fmt$(atRisk)} at risk</div>
-      </div>
-      <div class="dpb-cell">
-        <div class="dpb-label">BEST CASE</div>
-        <div class="dpb-val good">+${fmt$(bestCase)}</div>
-        <div class="dpb-sub">if all pending win</div>
-      </div>
-    </div>`
+  // Minimal day-summary panel (kept but hidden — banner above handles it now)
+  const el = document.getElementById('day-summary')
+  if (el) el.hidden = true
 }
 
 async function loadLiveBets(date) {
@@ -1029,97 +1080,115 @@ function buildLiveBanner(pitchers) {
   if (!pitchers?.length) { banner.hidden = true; return }
   banner.hidden = false
 
-  const sorted = [...pitchers].sort((a, b) => a.pitcher_name.localeCompare(b.pitcher_name))
+  banner.className = 'live-now-panel'
+  const sorted = [...pitchers].sort((a, b) => {
+    if (a.game_time && b.game_time) return a.game_time.localeCompare(b.game_time)
+    return a.pitcher_name.localeCompare(b.pitcher_name)
+  })
 
   banner.innerHTML = `
-    <div class="lb-header">
+    <div class="lnp-header">
       <span class="live-dot"></span>
-      <span class="lb-count">${pitchers.length} TODAY</span>
+      <span class="lnp-title">${pitchers.length} pitcher${pitchers.length !== 1 ? 's' : ''} today</span>
     </div>
-    <div class="lb-grid">
+    <div class="lnp-rows" id="lnp-rows">
       ${sorted.map(p => {
-        const lastName = p.pitcher_name.split(' ').slice(-1)[0]
-        const timeStr  = fmtGameTime(p.game_time)
-        return `<div class="lb-chip" data-pitcher-id="${p.pitcher_id || ''}" data-name="${esc(p.pitcher_name)}">
-          <span class="lb-name">${esc(lastName)}</span>
-          <span class="lb-status lb-pregame">${timeStr || 'Pre-Game'}</span>
+        const timeStr = fmtGameTime(p.game_time)
+        const status  = timeStr ? `Game starts at ${timeStr}` : 'Warming up'
+        return `<div class="lnp-row" data-pitcher-id="${p.pitcher_id || ''}" data-name="${esc(p.pitcher_name)}">
+          <span class="lnp-name">${esc(p.pitcher_name)}</span>
+          <span class="lnp-status lnp-pregame">${status}</span>
+          <span class="lnp-jump">▸ bets</span>
         </div>`
       }).join('')}
     </div>`
 
-  banner.querySelectorAll('.lb-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const pid  = chip.dataset.pitcherId
-      const name = chip.dataset.name
-      let card = pid ? document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(pid)}"]`) : null
-      if (!card) {
-        document.querySelectorAll('.pitcher-card').forEach(c => {
-          if (c.querySelector('.pc-pitcher')?.textContent === name) card = c
-        })
-      }
-      if (card) {
-        card.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        card.classList.add('lb-highlight')
-        setTimeout(() => card.classList.remove('lb-highlight'), 1500)
-      }
-    })
+  banner.querySelectorAll('.lnp-row').forEach(row => {
+    row.addEventListener('click', () => scrollToPitcher(row.dataset.pitcherId, row.dataset.name))
   })
+}
+
+function scrollToPitcher(pid, name) {
+  let card = pid ? document.querySelector(`.pitcher-card[data-pitcher-id="${CSS.escape(pid)}"]`) : null
+  if (!card) {
+    document.querySelectorAll('.pitcher-card').forEach(c => {
+      if (c.querySelector('.pc-pitcher')?.textContent?.trim() === name) card = c
+    })
+  }
+  if (card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    card.classList.add('lb-highlight')
+    setTimeout(() => card.classList.remove('lb-highlight'), 1500)
+  }
 }
 
 function renderLiveBanner(data) {
   const banner = document.getElementById('live-banner')
   if (!banner || banner.hidden) return
 
-  // Update live count
-  const liveNow = data.pitchers.filter(p => !p.is_final).length
-  const countEl = banner.querySelector('.lb-count')
-  if (countEl) countEl.textContent = `${liveNow} LIVE · ${data.pitchers.length} TODAY`
+  const liveNow = data.pitchers.filter(p => !p.is_final && p.ip > 0).length
+  const titleEl = banner.querySelector('.lnp-title')
+  if (titleEl) {
+    titleEl.textContent = liveNow > 0
+      ? `${liveNow} game${liveNow !== 1 ? 's' : ''} happening right now · ${data.pitchers.length} total today`
+      : `${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''} today`
+  }
 
-  // Update each chip's status
   for (const p of data.pitchers) {
-    const chip = p.pitcher_id
-      ? banner.querySelector(`.lb-chip[data-pitcher-id="${p.pitcher_id}"]`)
+    const row = p.pitcher_id
+      ? banner.querySelector(`.lnp-row[data-pitcher-id="${p.pitcher_id}"]`)
       : null
-    if (!chip) continue
-    const statusEl = chip.querySelector('.lb-status')
+    if (!row) continue
+    const statusEl = row.querySelector('.lnp-status')
     if (!statusEl) continue
 
+    const ksWord = p.ks === 1 ? '1 strikeout' : `${p.ks} strikeouts`
+
     if (p.is_final) {
-      statusEl.textContent  = `${p.ks}K · Final`
-      statusEl.className    = 'lb-status lb-final'
-      chip.classList.remove('lb-chip--live')
-      chip.classList.add('lb-chip--final')
+      statusEl.textContent = `Final — threw ${ksWord}`
+      statusEl.className   = 'lnp-status lnp-final'
+    } else if (!p.still_in) {
+      statusEl.textContent = `Out of the game — ${ksWord} (won't throw more)`
+      statusEl.className   = 'lnp-status lnp-pulled'
+    } else if (p.ip === 0) {
+      const timeStr = fmtGameTime(p.game_time)
+      statusEl.textContent = timeStr ? `Game starts at ${timeStr}` : 'Warming up'
+      statusEl.className   = 'lnp-status lnp-pregame'
     } else {
-      const warn = !p.still_in ? ' ⚠' : p.tto3 ? ' ~TTO3' : ''
-      statusEl.textContent = `${p.ks}K · ${p.ip.toFixed(1)}IP · ${p.inning}${warn}`
-      statusEl.className   = 'lb-status lb-live'
-      chip.classList.add('lb-chip--live')
+      statusEl.textContent = `${ksWord} · ${p.inning}`
+      statusEl.className   = 'lnp-status lnp-live'
+    }
+
+    // Verdict from card coverage (card is built and updated separately)
+    const card     = p.pitcher_id ? document.querySelector(`.pitcher-card[data-pitcher-id="${p.pitcher_id}"]`) : null
+    const coverage = card ? Number(card.dataset.coverage || 0) : 0
+    let verdictEl  = row.querySelector('.lnp-verdict')
+
+    if (p.is_final || !p.still_in) {
+      // Definitive outcome
+      if (!verdictEl) {
+        verdictEl = document.createElement('span')
+        row.insertBefore(verdictEl, row.querySelector('.lnp-jump'))
+      }
+      verdictEl.textContent = coverage >= 50 ? 'You win' : 'You lose'
+      verdictEl.className   = `lnp-verdict ${coverage >= 50 ? 'good' : 'bad'}`
+    } else if (p.ip > 0 && coverage > 0) {
+      if (!verdictEl) {
+        verdictEl = document.createElement('span')
+        row.insertBefore(verdictEl, row.querySelector('.lnp-jump'))
+      }
+      if (coverage >= 65)      { verdictEl.textContent = 'Looking good'; verdictEl.className = 'lnp-verdict good' }
+      else if (coverage >= 40) { verdictEl.textContent = 'On track';     verdictEl.className = 'lnp-verdict' }
+      else                     { verdictEl.textContent = 'Worried';      verdictEl.className = 'lnp-verdict bad' }
+    } else if (verdictEl) {
+      verdictEl.remove()
     }
   }
 }
 
 function updateBannerChipColors(pitchers) {
-  const banner = document.getElementById('live-banner')
-  if (!banner || banner.hidden) return
-  for (const p of pitchers) {
-    const chip = p.pitcher_id
-      ? banner.querySelector(`.lb-chip[data-pitcher-id="${p.pitcher_id}"]`)
-      : null
-    if (!chip) continue
-    const card = p.pitcher_id
-      ? document.querySelector(`.pitcher-card[data-pitcher-id="${p.pitcher_id}"]`)
-      : null
-    const coverage  = card ? Number(card.dataset.coverage || 0) : 0
-    const isWarmup  = !p.is_final && p.pitches === 0 && p.ip === 0
-    const hasData   = p.is_final || !isWarmup
-
-    chip.classList.remove('lb-chip--green', 'lb-chip--yellow', 'lb-chip--red')
-    if (hasData) {
-      if (coverage >= 60)      chip.classList.add('lb-chip--green')
-      else if (coverage >= 40) chip.classList.add('lb-chip--yellow')
-      else                     chip.classList.add('lb-chip--red')
-    }
-  }
+  // Coverage colors are now applied directly in renderLiveBanner via .lnp-verdict classes
+  // This function is kept as a no-op for compatibility
 }
 
 // ── Poisson probability helpers ───────────────────────────────────────────
