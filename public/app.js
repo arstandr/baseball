@@ -33,6 +33,45 @@ async function init() {
   await refreshAll()
   setInterval(refreshHero, 3 * 60 * 1000)
   setInterval(updateLastSeen, 15 * 1000)
+  refreshCloserStatus()
+  setInterval(refreshCloserStatus, 60 * 1000)
+  initTrendsPeriodBar()
+}
+
+async function refreshCloserStatus() {
+  const dot   = document.getElementById('closer-dot')
+  const meta  = document.getElementById('closer-meta')
+  if (!dot || !meta) return
+
+  const data = await fetchJson('/api/agent/status').catch(() => null)
+  if (!data?.heartbeat) {
+    dot.className = 'closer-dot'
+    meta.textContent = 'offline'
+    return
+  }
+
+  const hb  = data.heartbeat
+  const ago = hb.updated_at ? Math.floor((Date.now() - new Date(hb.updated_at + 'Z').getTime()) / 60000) : null
+  const fresh = ago != null && ago < 5
+
+  dot.className = `closer-dot ${fresh ? 'online' : 'stale'}`
+
+  let metaParts = []
+  if (fresh) {
+    metaParts.push(hb.status === 'running' ? 'running' : 'idle')
+    if (ago === 0) metaParts.push('just now')
+    else metaParts.push(`${ago}m ago`)
+  } else {
+    metaParts.push(ago != null ? `last seen ${ago}m ago` : 'stale')
+  }
+
+  if (data.last_update?.msg) {
+    const u = data.last_update
+    const uAgo = u.updated_at ? Math.floor((Date.now() - new Date(u.updated_at + 'Z').getTime()) / 60000) : null
+    metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : ''}: ${u.msg.slice(0, 40)}`)
+  }
+
+  meta.textContent = metaParts.join(' ')
 }
 
 function fmtAgo(ts) {
@@ -209,7 +248,12 @@ async function refreshHero() {
   // Fetch bettors first to get liveBettorId, then fetch summary scoped to that user.
   // This avoids a chicken-and-egg where the first summary call has no user filter.
   const bettors = await fetchJson('/api/ks/bettors').catch(() => [])
-  const liveBettor = (bettors || []).find(b => !b.paper)
+  // Match hero to the logged-in user by name (e.g. 'adam' matches 'adam-live')
+  const sessionName = (state.currentUser || '').toLowerCase().split(' ')[0]
+  const myBettor = sessionName
+    ? (bettors || []).find(b => b.name?.toLowerCase().includes(sessionName))
+    : null
+  const liveBettor = myBettor || (bettors || []).find(b => !b.paper)
   if (liveBettor) state.liveBettorId = liveBettor.id  // cache so all data fetches use the right user
 
   const uidParam = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
@@ -218,6 +262,7 @@ async function refreshHero() {
 
   const heroBalance  = liveBettor?.bankroll       ?? s.kalshi_balance ?? s.bankroll
   const heroStart    = liveBettor?.start_bankroll  ?? s.start_bankroll
+  const heroTodayPnl = liveBettor?.today_pnl       ?? s.today_pnl ?? 0
   const heroTotalPnl = liveBettor?.total_pnl       ?? s.total_pnl
 
   // ── New status hero ──────────────────────────────────────────────────────
@@ -230,15 +275,15 @@ async function refreshHero() {
 
   const totalPnlEl = document.getElementById('sh-total-pnl')
   if (totalPnlEl) {
-    const sign = heroTotalPnl >= 0 ? '+' : ''
-    totalPnlEl.textContent = sign + fmt$(heroTotalPnl)
-    totalPnlEl.className   = `sh-stat-value ${heroTotalPnl >= 0 ? 'good' : 'bad'}`
+    const sign = heroTodayPnl >= 0 ? '+' : ''
+    totalPnlEl.textContent = heroTodayPnl === 0 ? '$0.00' : sign + fmt$(heroTodayPnl)
+    totalPnlEl.className   = `sh-stat-value ${heroTodayPnl > 0 ? 'good' : heroTodayPnl < 0 ? 'bad' : ''}`
   }
   const roiEl = document.getElementById('sh-total-roi')
   if (roiEl) {
-    const roi = heroStart > 0 ? (heroTotalPnl / heroStart * 100).toFixed(1) : 0
-    const roiSign = roi >= 0 ? '+' : ''
-    roiEl.textContent = `${roiSign}${roi}% overall`
+    const allTimeSign = heroTotalPnl >= 0 ? '+' : ''
+    roiEl.textContent = `${allTimeSign}${fmt$(heroTotalPnl)} all-time`
+    roiEl.className   = heroTotalPnl >= 0 ? 'sh-stat-sub good' : 'sh-stat-sub bad'
   }
 
   // Hide the redundant "Real money account" secondary stat — Kalshi balance is now the primary hero number
@@ -349,10 +394,15 @@ function renderSimpleBetList(pitchers, date) {
     p.bets.map(b => ({ ...b, pitcher_name: p.pitcher_name, pitcher_id: p.pitcher_id }))
   )
 
+  const picksHead = document.getElementById('sc-picks-head')
+
   if (!allBets.length) {
     container.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
+    if (picksHead) picksHead.hidden = true
     return
   }
+
+  if (picksHead) picksHead.hidden = false
 
   // Sort: losses first, then wins, then pending
   const sortOrder = b => b.result === 'loss' ? 0 : b.result === 'win' ? 1 : 2
@@ -1507,16 +1557,66 @@ function updatePitcherCardLive(p) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// TRENDS view
+// TRENDS view — period filter
 // ──────────────────────────────────────────────────────────────────────────
+
+const TRENDS_START_DATE = '2026-04-23'  // "Since the beginning"
+
+const trendsState = { period: 'all', from: null, to: null }
+
+function getTrendsDates() {
+  const today = new Date().toLocaleDateString('en-CA')
+  const { period, from, to } = trendsState
+  if (period === 'week') {
+    const d = new Date(); const dow = (d.getDay() + 6) % 7
+    const mon = new Date(d); mon.setDate(d.getDate() - dow)
+    return { from: mon.toLocaleDateString('en-CA'), to: today }
+  }
+  if (period === 'month') {
+    const d = new Date()
+    return { from: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`, to: today }
+  }
+  if (period === 'since_start') return { from: TRENDS_START_DATE, to: today }
+  if (period === 'custom')      return { from, to }
+  return { from: null, to: null }
+}
+
+function buildTrendsParams() {
+  const uid   = state.liveBettorId ? `user_id=${state.liveBettorId}` : ''
+  const dates = getTrendsDates()
+  const parts = [uid, dates.from ? `from=${dates.from}` : '', dates.to ? `to=${dates.to}` : ''].filter(Boolean)
+  return parts.length ? '?' + parts.join('&') : ''
+}
+
+function initTrendsPeriodBar() {
+  document.querySelectorAll('.period-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'))
+      btn.classList.add('active')
+      trendsState.period = btn.dataset.period
+      const customRange = document.getElementById('period-custom-range')
+      if (customRange) customRange.style.display = trendsState.period === 'custom' ? 'flex' : 'none'
+      if (trendsState.period !== 'custom') refreshTrendsView()
+    })
+  })
+  const applyBtn = document.getElementById('period-apply')
+  if (applyBtn) applyBtn.addEventListener('click', () => {
+    trendsState.from = document.getElementById('period-from')?.value || null
+    trendsState.to   = document.getElementById('period-to')?.value   || null
+    refreshTrendsView()
+  })
+}
+
 async function refreshTrendsView() {
+  const p = buildTrendsParams()
+  const baseP = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
   const [bankroll, monthly, weekly, stats, breakdown, leaderboard] = await Promise.all([
-    fetchJson('/api/ks/bankroll').catch(() => []),
-    fetchJson('/api/ks/monthly').catch(() => []),
-    fetchJson('/api/ks/weekly').catch(() => []),
-    fetchJson('/api/ks/stats').catch(() => null),
-    fetchJson('/api/ks/edge-breakdown').catch(() => null),
-    fetchJson('/api/ks/pitcher-leaderboard').catch(() => null),
+    fetchJson(`/api/ks/bankroll${p}`).catch(() => []),
+    fetchJson(`/api/ks/monthly${p}`).catch(() => []),
+    fetchJson(`/api/ks/weekly${p}`).catch(() => []),
+    fetchJson(`/api/ks/stats${p}`).catch(() => null),
+    fetchJson(`/api/ks/edge-breakdown${baseP}`).catch(() => null),
+    fetchJson(`/api/ks/pitcher-leaderboard${baseP}`).catch(() => null),
   ])
   drawBankrollChart(bankroll)
   drawDailyChart(bankroll)
