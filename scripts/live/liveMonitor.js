@@ -19,7 +19,7 @@ import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { getAuthHeaders, placeOrder, getMarketPrice } from '../../lib/kalshi.js'
-import { kellySizing, capitalAtRisk } from '../../lib/kelly.js'
+import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
 import { notifyLiveBet, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
 import { parseArgs } from '../../lib/cli-args.js'
@@ -30,7 +30,7 @@ const opts     = parseArgs({
 })
 const TODAY       = opts.date
 const POLL_SEC    = opts.poll
-const LIVE        = process.env.LIVE_TRADING === 'true'
+let   LIVE        = process.env.LIVE_TRADING === 'true'
 const LIVE_EDGE   = Number(process.env.LIVE_EDGE_MIN || 0.08)
 const LOSS_LIMIT  = Number(process.env.DAILY_LOSS_LIMIT || 500)
 
@@ -46,26 +46,47 @@ const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
 // λ_remaining = expected_remaining_BF × pK
 // expected_remaining_BF derived from pitch count pace vs. avg total pitches.
 
-function computeLiveModel(preGame, currentKs, currentIP, currentPitches) {
+function computeLiveModel(preGame, currentKs, currentIP, currentPitches, currentBF = 0, scoreDiff = 0) {
   const { pK_blended, avgPitches, avgBF } = preGame
 
-  // Estimate remaining IP from pitch count
-  const totalExpectedPitches = avgPitches || 90
-  const pitchesLeft = Math.max(0, totalExpectedPitches - currentPitches)
+  // Score-state modifier: managers pull starters earlier when blowout, push them in close games
+  let pitchBudget = avgPitches || 90
+  if      (scoreDiff >=  5) pitchBudget *= 0.88   // blowout win  → early hook
+  else if (scoreDiff <= -5) pitchBudget *= 0.92   // blowout loss → early hook
+  else if (Math.abs(scoreDiff) <= 2) pitchBudget *= 1.03  // close game → push starter
+
+  // TTO penalty: 3rd time through lineup (~BF≥21) → manager more likely to pull
+  if (currentBF >= 21) pitchBudget *= 0.93
+
+  const pitchesLeft = Math.max(0, pitchBudget - currentPitches)
   const remainingIP = pitchesLeft / AVG_PITCHES_PER_IP
 
   // Expected remaining BF
   const remainingBF = remainingIP * LEAGUE_PA_PER_IP
 
+  // Bayesian blend of live K% with pre-game prior.
+  //   BF < 9   → pure prior (too small a sample)
+  //   BF ≥ 9   → blend liveKpct with pK_blended, weight rising to 0.5 at BF=18
+  // Clamped to [0.10, 0.45] to avoid runaway extremes on small samples.
+  let pK_effective = pK_blended
+  if (currentBF >= 9) {
+    const liveKpct = currentBF > 0 ? currentKs / currentBF : pK_blended
+    const w_live   = Math.min(0.5, currentBF / 36)
+    const blended  = w_live * liveKpct + (1 - w_live) * pK_blended
+    pK_effective   = Math.max(0.10, Math.min(0.45, blended))
+  }
+
   // λ_remaining = remaining BF × K rate
-  const lambdaRemaining = Math.max(0, remainingBF * pK_blended)
+  const lambdaRemaining = Math.max(0, remainingBF * pK_effective)
 
   return {
     lambdaRemaining,
     remainingIP,
     remainingBF,
     currentKs,
+    currentBF,
     pK_blended,
+    pK_effective,
     // P(total ≥ n) = P(additional ≥ n - currentKs) for each threshold
     probAtLeast: (n) => {
       if (currentKs >= n) return 1.0  // already hit
@@ -111,7 +132,14 @@ async function loadDailyLoss() {
 const LIVE_USER_ID  = 284  // Adam-Live
 const PAPER_USER_ID = 1    // Adam (paper)
 
-async function executeBet({ pitcherName, pitcherId, game, strike, side, modelProb, marketMid, edge, ticker, betSize, kellyFraction, capitalRisk, preGameBetId }) {
+async function isLiveEnabled() {
+  const row = await db.one(`SELECT paper FROM users WHERE id = ?`, [LIVE_USER_ID])
+  return row?.paper === 0
+}
+
+async function executeBet({ pitcherName, pitcherId, game, strike, side, modelProb, marketMid, edge, ticker, betSize, kellyFraction, capitalRisk,
+  liveKs, liveIP, livePitches, liveBF, liveInning, livePkEffective, liveLambda, liveScore }) {
+  LIVE = await isLiveEnabled()
   const paper  = !LIVE
   const userId = LIVE ? LIVE_USER_ID : PAPER_USER_ID
   const now    = new Date().toISOString()
@@ -122,6 +150,22 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     [TODAY, pitcherName, strike, side, userId],
   )
   if (existing) return
+
+  // In-game daily cap: check user's live_daily_risk_pct against total live bets today
+  const userRow = await db.one(
+    `SELECT starting_bankroll, live_daily_risk_pct FROM users WHERE id = ?`, [userId],
+  )
+  if (userRow) {
+    const cap = (userRow.starting_bankroll || 1000) * (userRow.live_daily_risk_pct ?? 0.10)
+    const spent = await db.one(
+      `SELECT COALESCE(SUM(bet_size), 0) as total FROM ks_bets WHERE bet_date=? AND live_bet=1 AND user_id=?`,
+      [TODAY, userId],
+    )
+    if ((spent?.total || 0) + betSize > cap) {
+      console.log(`  [CAP] ${pitcherName} ${strike}+ ${side} skipped — live cap $${cap.toFixed(0)} reached ($${(spent?.total || 0).toFixed(0)} already out)`)
+      return
+    }
+  }
 
   if (LIVE) {
     // Real order — Kalshi expects contracts (integer) and price (cents)
@@ -153,9 +197,17 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     bet_size:        betSize,
     kelly_fraction:  kellyFraction,
     capital_at_risk: capitalRisk,
-    paper:           paper ? 1 : 0,
-    live_bet:        1,
+    paper:                paper ? 1 : 0,
+    live_bet:             1,
     ticker,
+    live_ks_at_bet:       liveKs       ?? null,
+    live_ip_at_bet:       liveIP       ?? null,
+    live_pitches_at_bet:  livePitches  ?? null,
+    live_bf_at_bet:       liveBF       ?? null,
+    live_inning:          liveInning   ?? null,
+    live_pk_effective:    livePkEffective ?? null,
+    live_lambda_remaining: liveLambda  ?? null,
+    live_score:           liveScore    ?? null,
   }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
 }
 
@@ -376,7 +428,17 @@ async function main() {
           const currentIPraw   = player.stats?.pitching?.inningsPitched || '0.0'
           const currentIP      = ipToDecimal(currentIPraw)
           const currentPitches = Number(player.stats?.pitching?.numberOfPitches || 0)
+          const currentBF      = Number(player.stats?.pitching?.battersFaced || 0)
           const isCurrent      = player.gameStatus?.isCurrentPitcher
+          const ls             = lsRes.data
+          const currentInning  = ls.currentInning != null ? `${ls.inningHalf?.slice(0,3) ?? ''}${ls.currentInning}` : null
+          const awayScore      = ls.teams?.away?.runs ?? null
+          const homeScore      = ls.teams?.home?.runs ?? null
+          const currentScore   = awayScore != null ? `${awayScore}-${homeScore}` : null
+          // Score diff from pitcher's team perspective (positive = pitcher's team winning)
+          const pitcherScore   = side === 'away' ? awayScore : homeScore
+          const oppScore       = side === 'away' ? homeScore : awayScore
+          const scoreDiff      = (pitcherScore ?? 0) - (oppScore ?? 0)
 
           // ── Cover / dead detection for pre-game bets ───────────────────────
           const openBets = await db.all(
@@ -435,72 +497,138 @@ async function main() {
             }
           }
 
-          if (currentIP < 1) continue  // wait for 1+ IP before live model
+          const pitcherPulledEarly = !isCurrent && currentIP >= 1
 
-          const live = computeLiveModel(ctx, currentKs, currentIP, currentPitches)
+          // BF + inning gates — bypassed for confirmed-pulled pitchers (state already resolved)
+          if (!pitcherPulledEarly && currentBF < 6) continue
+          const currentInn = ls.currentInning ?? 0
+          if (!pitcherPulledEarly && currentInn < 3) continue
+
+          const live = pitcherPulledEarly
+            ? null
+            : computeLiveModel(ctx, currentKs, currentIP, currentPitches, currentBF, scoreDiff)
 
           // Fetch current Kalshi prices for this pitcher's markets
           if (!ctx.baseTicker) continue
           const markets = await fetchLiveKsMarkets(ctx.baseTicker)
           if (!markets.length) continue
 
+          // Pre-load today's pre-game bets for this pitcher — used to dedup by (pitcher, strike, side)
+          const preGameForPitcher = await db.all(
+            `SELECT strike, side FROM ks_bets
+              WHERE bet_date = ? AND pitcher_id = ? AND live_bet = 0`,
+            [TODAY, String(pitcherId)],
+          )
+          const preGameKeys = new Set(preGameForPitcher.map(r => `${r.strike}-${r.side}`))
+
+          // ── Pass 1: collect qualifying edges for this pitcher ──
+          const qualifying = []
+
           for (const mkt of markets) {
-            // Parse threshold from ticker suffix
             const parts = mkt.ticker.split('-')
             const n = parseInt(parts[parts.length - 1])
             if (!Number.isInteger(n) || n < 2 || n > 15) continue
 
-            const modelProb = live.probAtLeast(n)
-            const midCents  = mkt.yes_bid != null && mkt.yes_ask != null
-              ? (mkt.yes_bid + mkt.yes_ask) / 2
-              : null
-            if (midCents == null) continue
-
+            if (mkt.yes_bid == null || mkt.yes_ask == null) continue
+            const midCents   = (mkt.yes_bid + mkt.yes_ask) / 2
+            const halfSpread = (mkt.yes_ask - mkt.yes_bid) / 200
             const marketPrice = midCents / 100
-            const edgeYES = modelProb - marketPrice
-            const edgeNO  = (1 - modelProb) - (1 - marketPrice)
-            const edge    = Math.max(edgeYES, edgeNO)
-            const betSide = edgeYES >= edgeNO ? 'YES' : 'NO'
+            const noMid      = 100 - midCents
 
-            if (edge < LIVE_EDGE) continue
-
-            const betKey = `${pitcherId}-${n}-${betSide}-live`
+            const betKey = `${pitcherId}-${n}-live`  // mode-agnostic dedup key
             if (placed.has(betKey)) continue
+            if (preGameKeys.has(`${n}-NO`) && preGameKeys.has(`${n}-YES`)) continue
 
-            const { betSize, kellyFraction } = kellySizing(
-              betSide === 'YES' ? modelProb : 1 - modelProb,
-              betSide === 'YES' ? marketPrice : 1 - marketPrice,
-              betSide,
-            )
-            if (betSize <= 0) continue
+            // ── MODE 1: Pulled pitcher — structurally resolved, stale market arb ──
+            if (pitcherPulledEarly && n > currentKs) {
+              if (preGameKeys.has(`${n}-NO`)) continue
+              if (noMid >= 90 || noMid <= 5) continue  // already repriced or illiquid
+              qualifying.push({
+                n, mkt, midCents, marketPrice, modelProb: 0.02,
+                edge: 1 - marketPrice - 0.02, betSide: 'NO', betKey, mode: 'pulled',
+                modelProbSide: 0.98, marketPriceSide: 1 - marketPrice,
+              })
+              continue
+            }
 
-            const capitalRisk = capitalAtRisk(betSize, marketPrice, betSide)
+            if (!live) continue  // pulled pitcher — no high-conviction model available
 
-            placed.add(betKey)
-            console.log(`\n[live] EDGE ${ctx.game} ${ctx.pitcherName} ${n}+ Ks ${betSide}  model=${(modelProb*100).toFixed(1)}%  mid=${midCents.toFixed(0)}¢  edge=${(edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p`)
+            const modelProb = live.probAtLeast(n)
+            const edgeYES   = modelProb - marketPrice
+            const edgeNO    = (1 - modelProb) - (1 - marketPrice)
+            const betSide   = edgeYES >= edgeNO ? 'YES' : 'NO'
+            const edge      = betSide === 'YES' ? edgeYES : edgeNO
+
+            if (preGameKeys.has(`${n}-${betSide}`)) continue
+
+            // ── MODE 2: High-conviction only — YES 20¢/75%, NO 15¢/15% ──
+            if (betSide === 'YES') {
+              if (modelProb < 0.75) continue
+              if (edge < Math.max(0.20, halfSpread + 0.04)) continue
+            } else {
+              if (modelProb > 0.15) continue
+              if (edge < Math.max(0.15, halfSpread + 0.04)) continue
+            }
+
+            qualifying.push({
+              n, mkt, midCents, marketPrice, modelProb, edge, betSide, betKey,
+              mode: 'high-conviction',
+              modelProbSide: betSide === 'YES' ? modelProb : 1 - modelProb,
+              marketPriceSide: betSide === 'YES' ? marketPrice : 1 - marketPrice,
+            })
+          }
+
+          if (!qualifying.length) continue
+
+          // ── Pass 2: correlated Kelly across all qualifying thresholds for this pitcher ──
+          const sized = correlatedKellyDivide(
+            qualifying.map(q => ({
+              modelProb:  q.modelProbSide,
+              marketPrice: q.marketPriceSide,
+              side:       q.betSide,
+            })),
+          )
+
+          for (let i = 0; i < qualifying.length; i++) {
+            const q = qualifying[i]
+            const s = sized[i]
+            if (!s || s.betSize <= 0) continue
+
+            const capitalRisk = capitalAtRisk(s.betSize, q.marketPrice, q.betSide)
+
+            placed.add(q.betKey)
+            console.log(`\n[live] ${q.mode === 'pulled' ? '🎯 PULLED' : '🔥 EDGE'} ${ctx.game} ${ctx.pitcherName} ${q.n}+ Ks ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p ${currentBF}BF  [${q.mode}]`)
 
             await executeBet({
-              pitcherName:   ctx.pitcherName,
+              pitcherName:      ctx.pitcherName,
               pitcherId,
-              game:          ctx.game,
-              strike:        n,
-              side:          betSide,
-              modelProb:     betSide === 'YES' ? modelProb : 1 - modelProb,
-              marketMid:     midCents,
-              edge,
-              ticker:        mkt.ticker,
-              betSize,
-              kellyFraction,
+              game:             ctx.game,
+              strike:           q.n,
+              side:             q.betSide,
+              modelProb:        q.modelProbSide,
+              marketMid:        q.midCents,
+              edge:             q.edge,
+              ticker:           q.mkt.ticker,
+              betSize:          s.betSize,
+              kellyFraction:    s.kellyFraction,
               capitalRisk,
+              liveKs:           currentKs,
+              liveIP:           currentIP,
+              livePitches:      currentPitches,
+              liveBF:           currentBF,
+              liveInning:       currentInning,
+              livePkEffective:  live.pK_effective,
+              liveLambda:       live.lambdaRemaining,
+              liveScore:        currentScore,
             })
 
             await notifyLiveBet({
               pitcherName: ctx.pitcherName,
-              strike: n,
-              side: betSide,
-              marketMid: midCents,
-              edge,
-              betSize,
+              strike: q.n,
+              side: q.betSide,
+              marketMid: q.midCents,
+              edge: q.edge,
+              betSize: s.betSize,
               currentKs,
               currentIPraw,
               currentPitches,

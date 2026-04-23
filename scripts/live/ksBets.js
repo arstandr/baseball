@@ -158,16 +158,9 @@ async function logEdges() {
      FROM users WHERE active_bettor = 1 ORDER BY id ASC`,
   )
   if (!bettors.length) {
-    // Legacy single-user mode — use env vars
-    bettors = [{
-      id:               null,
-      name:             'default',
-      starting_bankroll: STARTING_BANKROLL,
-      daily_risk_pct:   DAILY_RISK_PCT,
-      paper:            Number(process.env.LIVE_TRADING === 'true') ? 0 : 1,
-      kalshi_key_id:    null,
-      kalshi_private_key: null,
-    }]
+    console.log('[ks-bets] No active bettors found — nothing to log')
+    await db.close()
+    return
   }
 
   // ── Pre-compute fill fractions (shared across all users) ──────────────────
@@ -559,6 +552,19 @@ async function settleBets() {
   }
 
   console.log(`[ks-bets] Settled: ${wins} wins, ${losses} losses, ${unknown} pending, ${voided} voided (postponed)`)
+
+  // Restore temp-paper users to live once all their pending bets are settled
+  const tempPaperUsers = await db.all(`SELECT id, name FROM users WHERE paper_temp=1 AND paper=1`)
+  for (const u of tempPaperUsers) {
+    const pending = await db.one(
+      `SELECT COUNT(*) AS n FROM ks_bets WHERE user_id=? AND result IS NULL AND live_bet=0`,
+      [u.id],
+    )
+    if (Number(pending?.n) === 0) {
+      await db.run(`UPDATE users SET paper=0, paper_temp=0 WHERE id=?`, [u.id])
+      console.log(`[ks-bets] ${u.name} restored to live mode (all bets settled)`)
+    }
+  }
 
   // Backfill outcomes into Kalshi price cache
   try {

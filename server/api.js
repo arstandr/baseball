@@ -1006,10 +1006,10 @@ router.get('/ks/summary', wrap(async (req, res) => {
         COUNT(CASE WHEN live_bet = 0 THEN 1 END)                                            AS total_bets,
         AVG(CASE WHEN live_bet = 0 AND result IS NOT NULL THEN edge END)                    AS avg_edge
       FROM ks_bets
-      WHERE live_bet = 0 ${uf.clause}
+      WHERE live_bet = 0 AND paper = 0 ${uf.clause}
     `, [today, weekAgo, monthAgo, yearStart, ...uf.args]),
-    db.one(`SELECT COUNT(*) AS n FROM ks_bets WHERE result IS NULL AND live_bet = 0 ${uf.clause}`, uf.args),
-    db.one(`SELECT SUM(COALESCE(pnl,0)) AS total FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 ${uf.clause}`, uf.args),
+    db.one(`SELECT COUNT(*) AS n FROM ks_bets WHERE result IS NULL AND live_bet = 0 AND paper = 0 ${uf.clause}`, uf.args),
+    db.one(`SELECT SUM(COALESCE(pnl,0)) AS total FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 ${uf.clause}`, uf.args),
   ])
 
   const wins   = Number(totals?.wins   || 0)
@@ -1018,7 +1018,7 @@ router.get('/ks/summary', wrap(async (req, res) => {
 
   // Current streak + last 5
   const recentBets = await db.all(
-    `SELECT result FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 ORDER BY settled_at DESC, id DESC LIMIT 10`
+    `SELECT result FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 ORDER BY settled_at DESC, id DESC LIMIT 10`
   )
   let streak = 0
   for (const r of recentBets) {
@@ -1097,7 +1097,7 @@ router.get('/ks/bettors', wrap(async (req, res) => {
         SUM(CASE WHEN result='win'  AND live_bet=0 THEN 1 ELSE 0 END) AS wins,
         SUM(CASE WHEN result='loss' AND live_bet=0 THEN 1 ELSE 0 END) AS losses,
         SUM(CASE WHEN result IS NULL AND live_bet=0 THEN 1 ELSE 0 END) AS pending
-      FROM ks_bets WHERE user_id=? AND live_bet=0
+      FROM ks_bets WHERE user_id=? AND live_bet=0 AND paper=0
     `, [today, today, u.id])
 
     // Fetch live Kalshi balance using user's stored credentials (fall back to env vars for Adam-Live)
@@ -1211,19 +1211,14 @@ router.get('/ks/daily', wrap(async (req, res) => {
             weather_mult, velo_trend_mph, raw_model_prob,
             order_id, fill_price, filled_at, filled_contracts, order_status, paper
      FROM ks_bets
-     WHERE bet_date = ? AND live_bet = 0 ${uf.clause}
+     WHERE bet_date = ? AND live_bet = 0 AND paper = 0 ${uf.clause}
      ORDER BY pitcher_name, strike ASC`,
     [date, ...uf.args],
   )
 
-  // Fetch all live (real-money) bets for this date — match them to paper bets below
-  const liveBets = await db.all(
-    `SELECT pitcher_name, strike, side, bet_size, fill_price, filled_contracts,
-            order_id, order_status, result, pnl
-     FROM ks_bets
-     WHERE bet_date = ? AND live_bet = 0 AND paper = 0`,
-    [date],
-  )
+  // live bet details are now included in the main query (paper=0 already)
+  const liveBets = bets
+
   const liveKey = b => `${b.pitcher_name}|${b.strike}|${b.side}`
   const liveMap = new Map()
   for (const lb of liveBets) liveMap.set(liveKey(lb), lb)
@@ -1392,7 +1387,7 @@ router.get('/ks/bankroll', wrap(async (req, res) => {
             SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
             SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses
      FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0
+     WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0
      GROUP BY bet_date ORDER BY bet_date ASC`,
   )
   let running = STARTING_BANKROLL

@@ -302,14 +302,48 @@ a:hover { text-decoration: underline; }
 
 /* Per-bettor bankroll cards */
 .bettor-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 0 16px 16px; max-width: 1200px; margin: 0 auto; }
-.bettor-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.bettor-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.bettor-card-top { padding: 16px; cursor: pointer; position: relative; user-select: none; transition: background .15s; }
+.bettor-card-top:hover { background: rgba(255,255,255,0.03); }
+.bettor-expand-btn { position: absolute; top: 14px; right: 14px; font-size: 14px; color: var(--text-dim); transition: transform .2s; }
 .bettor-name { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
 .bettor-bankroll { font-family: var(--mono); font-size: 28px; font-weight: 700; }
-.bettor-meta { font-size: 12px; color: var(--text-dim); margin: 4px 0 12px; }
+.bettor-meta { font-size: 12px; color: var(--text-dim); margin: 4px 0 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.dry-toggle { font-family: var(--mono); transition: opacity .15s; border-radius: 10px; border: none; cursor: pointer; font-size: 10px; font-weight: 600; padding: 2px 8px; }
+.dry-on  { background: #2a2a2a; color: #888; }
+.dry-off { background: #1a3a1a; color: #4caf50; }
+.dry-toggle:disabled { opacity: .5; cursor: wait; }
 .bettor-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .bettor-stat { display: flex; flex-direction: column; }
 .bettor-stat span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); }
 .bettor-stat b { font-family: var(--mono); font-size: 14px; margin-top: 2px; }
+
+/* Bettor drawer */
+.bettor-drawer { border-top: 1px solid var(--border); background: var(--card-2, #161b22); }
+.dr-loading { padding: 20px; text-align: center; color: var(--text-dim); font-size: 13px; }
+.dr-inner { padding: 0 0 4px; }
+.dr-summary { display: grid; grid-template-columns: repeat(3, 1fr); padding: 16px; gap: 8px; border-bottom: 1px solid var(--border); }
+.dr-sum-cell { display: flex; flex-direction: column; gap: 3px; }
+.dr-sum-label { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-dim); }
+.dr-sum-val { font-family: var(--mono); font-size: 22px; font-weight: 700; }
+.dr-sum-sub { font-size: 11px; color: var(--text-dim); }
+.dr-section { border-bottom: 1px solid var(--border); padding: 10px 16px 12px; }
+.dr-section-account { display: grid; grid-template-columns: 1fr 1fr; border-bottom: none; }
+.dr-section-head { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; }
+.dr-section-head .muted { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; }
+.dr-col-head { display: grid; grid-template-columns: 1fr 1.2fr 0.7fr 0.5fr 0.7fr; gap: 6px; padding: 4px 0; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+.dr-col-head-live { grid-template-columns: 1fr 1.2fr 1fr 0.7fr 0.5fr 0.7fr; }
+.dr-col-head span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); }
+.dr-row { display: grid; grid-template-columns: 1fr 1.2fr 0.7fr 0.5fr 0.7fr; gap: 6px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: var(--mono); font-size: 12px; align-items: center; }
+.dr-row-live { grid-template-columns: 1fr 1.2fr 1fr 0.7fr 0.5fr 0.7fr; }
+.dr-row:last-child { border-bottom: none; }
+.dr-pitcher { font-weight: 600; color: var(--text); }
+.dr-label { }
+.dr-ctx { font-size: 11px; }
+.dr-size { }
+.dr-status { font-weight: 700; font-size: 11px; }
+.dr-pnl { font-weight: 700; text-align: right; }
+.dr-empty { color: var(--text-dim); font-size: 12px; padding: 8px 0; }
 
 .delta { display: flex; flex-direction: column; align-items: flex-end; }
 .delta span { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
@@ -548,26 +582,33 @@ a:hover { text-decoration: underline; }
 .pc-bet-row-meta  { font-size: 12px; color: var(--text-dim); display: block; margin-top: 2px; }
 .pc-bet-row-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
-/* Day summary card */
+/* Day summary P&L banner */
 .day-summary {
   background: var(--card); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 14px 20px; margin-bottom: 16px;
+  border-radius: var(--radius); margin-bottom: 16px; overflow: hidden;
 }
-.day-summary-verdict {
-  font-size: 15px; font-weight: 700; margin-bottom: 6px;
-}
-.verdict-strong   { color: var(--good); }
-.verdict-ok       { color: #58a6ff; }
-.verdict-moderate { color: var(--warn); }
-.verdict-weak     { color: var(--bad); }
-.day-summary-body {
-  font-size: 14px; color: var(--text-dim); line-height: 1.6;
-}
-.day-summary-body strong { color: var(--text); }
-.day-summary-watch {
-  margin-top: 8px; font-size: 13px; color: var(--text-dim);
-}
-.day-summary-watch strong { color: var(--accent); }
+.dpb-grid { display: grid; grid-template-columns: repeat(3, 1fr); }
+.dpb-cell { padding: 16px 20px; display: flex; flex-direction: column; gap: 4px; }
+.dpb-cell-mid { border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+.dpb-label { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-dim); }
+.dpb-val { font-family: var(--mono); font-size: 26px; font-weight: 700; line-height: 1; }
+.dpb-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+/* In-game wagers section */
+.live-bets-section { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); margin-top: 24px; overflow: hidden; }
+.lbs-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 10px; border-bottom: 1px solid var(--border); }
+.lbs-title { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--accent); }
+.lbs-meta { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+.lbs-list { padding: 0 0 8px; }
+.lbs-pitcher { padding: 8px 16px 4px; }
+.lbs-pitcher-name { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.lbs-row { display: grid; grid-template-columns: 1fr 1.4fr 0.8fr 0.5fr 0.8fr; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: var(--mono); font-size: 12px; align-items: center; }
+.lbs-row:last-child { border-bottom: none; }
+.lbs-bet { font-weight: 600; }
+.lbs-ctx { font-size: 11px; }
+.lbs-size { }
+.lbs-status { font-weight: 700; font-size: 11px; }
+.lbs-pnl { font-weight: 700; text-align: right; }
 
 /* Overall header progress bar */
 .pc-overall-bar {

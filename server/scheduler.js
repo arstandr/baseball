@@ -13,6 +13,7 @@ import cron from 'node-cron'
 import { exec, spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { one as dbOne } from '../lib/db.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -73,15 +74,22 @@ function etHHMM() {
   return now.getHours() * 60 + now.getMinutes()
 }
 
-export function startScheduler() {
+export async function startScheduler() {
   // On startup, fire any jobs whose window has already passed today
   const hm = etHHMM()
   const date = etDate()
 
   if (hm >= 9 * 60) {        // past 9:00am — MLB morning run missed?
-    console.log('[scheduler] startup catch-up: MLB morning run')
-    mlbRun('MLB morning run (catch-up)')
-    setTimeout(() => startLiveMonitor(date), 90_000)
+    // Only catch-up if no bets exist for today yet (prevents re-running on redeploys)
+    const existing = await dbOne(`SELECT COUNT(*) AS n FROM ks_bets WHERE bet_date = ? AND live_bet = 0`, [date])
+    if (!existing?.n) {
+      console.log('[scheduler] startup catch-up: MLB morning run')
+      mlbRun('MLB morning run (catch-up)')
+      setTimeout(() => startLiveMonitor(date), 90_000)
+    } else {
+      console.log(`[scheduler] startup: ${existing.n} bets already logged for ${date} — skipping morning catch-up`)
+      setTimeout(() => startLiveMonitor(date), 5_000)
+    }
   }
   if (hm >= 9 * 60 + 30) {   // past 9:30am — NBA morning run missed?
     console.log('[scheduler] startup catch-up: NBA morning run')

@@ -650,7 +650,8 @@ ALTER TABLE users ADD COLUMN daily_risk_pct     REAL    DEFAULT 0.20;
 ALTER TABLE users ADD COLUMN paper              INTEGER DEFAULT 1;
 ALTER TABLE users ADD COLUMN kalshi_key_id      TEXT;
 ALTER TABLE users ADD COLUMN kalshi_private_key TEXT;
-ALTER TABLE users ADD COLUMN discord_webhook    TEXT;
+ALTER TABLE users ADD COLUMN discord_webhook       TEXT;
+ALTER TABLE users ADD COLUMN live_daily_risk_pct  REAL DEFAULT 0.10;
 
 -- Add user_id to ks_bets (safe no-op if column already exists)
 ALTER TABLE ks_bets ADD COLUMN user_id INTEGER REFERENCES users(id);
