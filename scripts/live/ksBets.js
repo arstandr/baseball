@@ -191,7 +191,19 @@ async function logEdges() {
   }
   const hedgesRemoved = rawEdges.length - bestByKey.size
   if (hedgesRemoved > 0) console.log(`[ks-bets] Removed ${hedgesRemoved} hedged opposite-side bet(s)`)
-  const withFill = [...bestByKey.values()]
+
+  // Cap YES bets per pitcher at 3 (sorted highest edge first) to prevent
+  // stacking losses on a single pitcher who underperforms.
+  const MAX_YES_PER_PITCHER = 3
+  const yesCounts = {}
+  const deduped = [...bestByKey.values()].sort((a, b) => b._edgeVal - a._edgeVal)
+  const withFill = deduped.filter(e => {
+    if (e.side !== 'YES') return true
+    yesCounts[e.pitcher] = (yesCounts[e.pitcher] || 0) + 1
+    return yesCounts[e.pitcher] <= MAX_YES_PER_PITCHER
+  })
+  const yesCapRemoved = deduped.length - withFill.length
+  if (yesCapRemoved > 0) console.log(`[ks-bets] Capped ${yesCapRemoved} YES bet(s) (max ${MAX_YES_PER_PITCHER} per pitcher)`)
 
   const totalEdge = withFill.reduce((s, e) => s + e._edgeVal, 0)
 
