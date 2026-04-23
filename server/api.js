@@ -31,6 +31,54 @@ try {
 const router = express.Router()
 const SERVER_START = new Date().toISOString()
 
+// ------------------------------------------------------------------
+// SSE: push state changes to all connected browser clients
+// ------------------------------------------------------------------
+const _sseClients = new Set()
+let _sseState = { settledCount: -1, liveBetCount: -1, lastSettledAt: null, lastLoggedAt: null }
+let _lastDataUpdate = null
+
+function _broadcastSSE(type, data = {}) {
+  const msg = `data: ${JSON.stringify({ type, ...data })}\n\n`
+  for (const client of [..._sseClients]) {
+    try { client.write(msg) } catch { _sseClients.delete(client) }
+  }
+}
+
+// Poll DB every 10s; push diffs to connected clients
+setInterval(async () => {
+  if (!_sseClients.size) return
+  try {
+    const today = todayISO()
+    const [settlRow, liveRow] = await Promise.all([
+      db.one(`SELECT COUNT(*) as n, MAX(settled_at) as last_settled, MAX(logged_at) as last_logged
+               FROM ks_bets WHERE bet_date=?`, [today]),
+      db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=1`, [today]),
+    ])
+    const newSettled    = settlRow?.n ?? 0
+    const newLive       = liveRow?.n ?? 0
+    const newLastSettled = settlRow?.last_settled ?? null
+    const newLastLogged  = settlRow?.last_logged ?? null
+
+    // Track "last data update" as the most recent write to today's bets
+    const newDataUpdate = [newLastSettled, newLastLogged].filter(Boolean).sort().pop() ?? null
+    if (newDataUpdate && newDataUpdate !== _lastDataUpdate) {
+      _lastDataUpdate = newDataUpdate
+    }
+
+    if (newSettled !== _sseState.settledCount || newLastSettled !== _sseState.lastSettledAt) {
+      _broadcastSSE('settled', { count: newSettled, lastSettledAt: newLastSettled, lastDataUpdate: _lastDataUpdate })
+      _sseState.settledCount  = newSettled
+      _sseState.lastSettledAt = newLastSettled
+    }
+    if (newLive !== _sseState.liveBetCount || newLastLogged !== _sseState.lastLoggedAt) {
+      _broadcastSSE('live_bet', { count: newLive, lastDataUpdate: _lastDataUpdate })
+      _sseState.liveBetCount  = newLive
+      _sseState.lastLoggedAt  = newLastLogged
+    }
+  } catch { /* ignore DB errors */ }
+}, 10_000)
+
 function safeJson(str, fallback = null) {
   if (str == null) return fallback
   try { return JSON.parse(str) } catch { return fallback }
@@ -50,12 +98,10 @@ function fmtShort(d) {
 }
 
 // Returns SQL fragment + args to scope ks_bets to the logged-in user.
-// Legacy bets (user_id IS NULL) are visible to all users for backward compat
-// until we have enough history under the new per-user schema.
 function userFilter(req) {
   const uid = req.session?.user?.id ?? null
   if (uid == null) return { clause: '', args: [] }
-  return { clause: `AND (user_id = ? OR user_id IS NULL)`, args: [uid] }
+  return { clause: `AND user_id = ?`, args: [uid] }
 }
 
 // Wrap an async handler so unhandled errors become a 500 with a safe JSON body.
@@ -1038,7 +1084,7 @@ router.get('/ks/summary', wrap(async (req, res) => {
 router.get('/ks/bettors', wrap(async (req, res) => {
   const today = todayISO()
   const bettors = await db.all(
-    `SELECT id, name, starting_bankroll, daily_risk_pct FROM users WHERE active_bettor = 1 AND paper = 0 ORDER BY id ASC`
+    `SELECT id, name, starting_bankroll, daily_risk_pct, paper, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor = 1 AND (paper = 0 OR paper_temp = 1) ORDER BY id ASC`
   )
 
   const result = await Promise.all(bettors.map(async u => {
@@ -1078,10 +1124,61 @@ router.get('/ks/bettors', wrap(async (req, res) => {
       losses:          Number(row?.losses  || 0),
       pending:         Number(row?.pending || 0),
       daily_risk_pct:  Number(u.daily_risk_pct || 0.3),
+      paper:           u.paper === 1,
     }
   }))
 
   res.json(result)
+}))
+
+// GET /api/ks/live-bets?date=YYYY-MM-DD
+// In-game (live_bet=1) bets for the day, grouped by pitcher.
+// ------------------------------------------------------------------
+router.get('/ks/live-bets', wrap(async (req, res) => {
+  const date = req.query.date && req.query.date !== 'today' ? req.query.date : todayISO()
+  const uf = userFilter(req)
+
+  const bets = await db.all(`
+    SELECT id, pitcher_name, strike, side, bet_size, market_mid, spread,
+           result, pnl, logged_at,
+           live_ks_at_bet, live_ip_at_bet, live_inning, live_score
+    FROM ks_bets
+    WHERE bet_date = ? AND live_bet = 1 ${uf.clause}
+    ORDER BY pitcher_name ASC, strike ASC, logged_at DESC
+  `, [date, ...uf.args])
+
+  // Per pitcher/strike/side keep only the most recent bet (highest id)
+  const bestMap = new Map()
+  for (const b of bets) {
+    const key = `${b.pitcher_name}|${b.strike}|${b.side}`
+    if (!bestMap.has(key)) bestMap.set(key, b)
+  }
+  const deduped = [...bestMap.values()]
+
+  const byPitcher = new Map()
+  for (const b of deduped) {
+    if (!byPitcher.has(b.pitcher_name)) byPitcher.set(b.pitcher_name, [])
+    byPitcher.get(b.pitcher_name).push(b)
+  }
+
+  const pitchers = [...byPitcher.entries()].map(([name, pBets]) => ({
+    pitcher_name: name,
+    bets: pBets,
+    wins:    pBets.filter(b => b.result === 'win').length,
+    losses:  pBets.filter(b => b.result === 'loss').length,
+    pending: pBets.filter(b => !b.result).length,
+    pnl:     roundTo(pBets.reduce((s, b) => s + (b.pnl || 0), 0), 2),
+  }))
+
+  const totals = {
+    bets:    deduped.length,
+    wins:    deduped.filter(b => b.result === 'win').length,
+    losses:  deduped.filter(b => b.result === 'loss').length,
+    pending: deduped.filter(b => !b.result).length,
+    pnl:     roundTo(deduped.reduce((s, b) => s + (b.pnl || 0), 0), 2),
+  }
+
+  res.json({ date, pitchers, totals })
 }))
 
 // GET /api/ks/dates
@@ -1439,10 +1536,41 @@ router.get('/ks/bets', wrap(async (req, res) => {
 // Users management
 // ===========================================================================
 
-// GET /api/meta — server start time (proxy for deploy time)
+// GET /api/meta — server start time (proxy for deploy time) + last data update
 router.get('/meta', wrap(async (req, res) => {
-  res.json({ deploy_time: SERVER_START })
+  const today = todayISO()
+  let lastDataUpdate = _lastDataUpdate
+  if (!lastDataUpdate) {
+    // Lazy init: find most recent write to today's bets
+    const row = await db.one(
+      `SELECT MAX(settled_at) as s, MAX(logged_at) as l FROM ks_bets WHERE bet_date=?`, [today],
+    ).catch(() => null)
+    lastDataUpdate = [row?.s, row?.l].filter(Boolean).sort().pop() ?? null
+    if (lastDataUpdate) _lastDataUpdate = lastDataUpdate
+  }
+  res.json({ deploy_time: SERVER_START, last_data_update: lastDataUpdate })
 }))
+
+// GET /api/events — Server-Sent Events stream for real-time dashboard updates
+router.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders()
+
+  _sseClients.add(res)
+  res.write(': connected\n\n')
+
+  const keepalive = setInterval(() => {
+    try { res.write(': ping\n\n') } catch { clearInterval(keepalive); _sseClients.delete(res) }
+  }, 25_000)
+
+  req.on('close', () => {
+    clearInterval(keepalive)
+    _sseClients.delete(res)
+  })
+})
 
 // GET /api/users — list all users with bettor profile (never returns private key)
 router.get('/users', wrap(async (req, res) => {
@@ -1501,6 +1629,17 @@ router.put('/users/:id', wrap(async (req, res) => {
   vals.push(id)
   await db.run(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, vals)
   res.json({ ok: true })
+}))
+
+// POST /api/users/:id/toggle-live — flip paper on/off for a bettor
+router.post('/users/:id/toggle-live', wrap(async (req, res) => {
+  const id = Number(req.params.id)
+  if (!id) return res.status(400).json({ error: 'invalid id' })
+  const user = await db.one(`SELECT paper FROM users WHERE id = ?`, [id])
+  if (!user) return res.status(404).json({ error: 'not found' })
+  const newPaper = user.paper === 0 ? 1 : 0
+  await db.run(`UPDATE users SET paper = ?, paper_temp = 0 WHERE id = ?`, [newPaper, id])
+  res.json({ ok: true, paper: newPaper, live: newPaper === 0 })
 }))
 
 // DELETE /api/users/:name — remove a user (can't remove yourself)

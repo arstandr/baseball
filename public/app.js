@@ -2,12 +2,13 @@
 // Fetches /api/ks/* and /api/users, renders all four views.
 
 const state = {
-  view:         localStorage.getItem('ks.view') || 'today',
-  selectedDate: null,
-  charts:       { bankroll: null, daily: null, weekly: null },
-  log:          { page: 1, pitcher: '', side: '', result: '', from: '', to: '', sort: 'bet_date', dir: 'desc' },
-  lastRefresh:  null,
-  currentUser:  null,
+  view:           localStorage.getItem('ks.view') || 'today',
+  selectedDate:   null,
+  charts:         { bankroll: null, daily: null, weekly: null },
+  log:            { page: 1, pitcher: '', side: '', result: '', from: '', to: '', sort: 'bet_date', dir: 'desc' },
+  lastRefresh:    null,
+  currentUser:    null,
+  currentUserId:  null,
   liveTimer:      null,
   countdownTimer: null,
 }
@@ -25,6 +26,7 @@ document.addEventListener('DOMContentLoaded', init)
 async function init() {
   await loadUser()
   loadDeployTime()
+  connectSSE()
   wireTabs()
   applyView(state.view, false)
   await refreshAll()
@@ -32,21 +34,66 @@ async function init() {
   setInterval(updateLastSeen, 15 * 1000)
 }
 
+function fmtAgo(ts) {
+  if (!ts) return null
+  const d = new Date(ts)
+  const now = new Date()
+  const diffMin = Math.round((now - d) / 60000)
+  const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const ago = diffMin < 2
+    ? 'just now'
+    : diffMin < 60
+    ? `${diffMin}m ago`
+    : diffMin < 1440
+    ? `${Math.round(diffMin / 60)}h ago`
+    : `${Math.round(diffMin / 1440)}d ago`
+  return { timeStr, ago }
+}
+
+function updateLastUpdated(ts) {
+  const el = document.getElementById('last-updated')
+  if (!el || !ts) return
+  const f = fmtAgo(ts)
+  if (f) el.textContent = `Updated ${f.timeStr} (${f.ago})`
+}
+
 async function loadDeployTime() {
   const el = document.getElementById('deploy-time')
   if (!el) return
   const meta = await fetchJson('/api/meta').catch(() => null)
   if (!meta?.deploy_time) return
-  const d = new Date(meta.deploy_time)
-  const now = new Date()
-  const diffMin = Math.round((now - d) / 60000)
-  const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  const ago = diffMin < 60
-    ? `${diffMin}m ago`
-    : diffMin < 1440
-    ? `${Math.round(diffMin / 60)}h ago`
-    : `${Math.round(diffMin / 1440)}d ago`
-  el.textContent = `Deployed ${timeStr} (${ago})`
+  const f = fmtAgo(meta.deploy_time)
+  if (f) el.textContent = `Deployed ${f.timeStr} (${f.ago})`
+  if (meta.last_data_update) updateLastUpdated(meta.last_data_update)
+}
+
+function connectSSE() {
+  const es = new EventSource('/api/events')
+  es.onmessage = e => {
+    try {
+      const ev = JSON.parse(e.data)
+      const date = state.selectedDate || new Date().toISOString().slice(0, 10)
+      if (ev.lastDataUpdate) updateLastUpdated(ev.lastDataUpdate)
+      if (ev.type === 'settled') {
+        // Bets settled — refresh P&L banner, bettor cards, live bets section
+        if (state.view === 'today') {
+          loadDay(date)
+        }
+        refreshBettorCards()
+      }
+      if (ev.type === 'live_bet') {
+        // New in-game bet placed — refresh live bets section and bettor cards
+        if (state.view === 'today') {
+          loadLiveBets(date)
+        }
+        refreshBettorCards()
+      }
+    } catch {}
+  }
+  es.onerror = () => {
+    es.close()
+    setTimeout(connectSSE, 5000)
+  }
 }
 
 async function loadUser() {
@@ -54,7 +101,8 @@ async function loadUser() {
     const r = await fetch('/auth/me', { credentials: 'same-origin' })
     if (!r.ok) { window.location.href = '/login'; return }
     const { user } = await r.json()
-    state.currentUser = user?.name
+    state.currentUser   = user?.name
+    state.currentUserId = user?.id ?? null
     const n = (user?.name || '—').split(' ')[0]
     document.getElementById('user-name').textContent = n.charAt(0).toUpperCase() + n.slice(1)
   } catch { window.location.href = '/login' }
@@ -185,26 +233,205 @@ async function refreshBettorCards() {
     const todayCls = b.today_pnl >= 0 ? 'good' : 'bad'
     const pnlSign  = b.total_pnl >= 0 ? '+' : ''
     const todaySign = b.today_pnl >= 0 ? '+' : ''
-    const isLive   = b.kalshi_balance != null
     const roi = b.start_bankroll > 0
       ? (((b.bankroll - b.start_bankroll) / b.start_bankroll) * 100).toFixed(1)
       : '0.0'
     const roiSign = Number(roi) >= 0 ? '+' : ''
     return `
-      <div class="bettor-card">
-        <div class="bettor-name">${b.name}</div>
-        <div class="bettor-bankroll ${pnlCls}">${fmt$(b.bankroll, true)}</div>
-        <div class="bettor-meta">Start: ${fmt$(b.start_bankroll, true)} · ROI: <b class="${pnlCls}">${roiSign}${roi}%</b>${isLive ? ' · <span style="color:#4caf50;font-size:10px">LIVE</span>' : ''}</div>
-        <div class="bettor-stats">
-          <div class="bettor-stat"><span>Today P&L</span><b class="${todayCls}">${todaySign}${fmt$(b.today_pnl)}</b></div>
-          <div class="bettor-stat"><span>All-time P&L</span><b class="${pnlCls}">${pnlSign}${fmt$(b.total_pnl)}</b></div>
-          <div class="bettor-stat"><span>Today Wagered</span><b>${fmt$(b.today_wagered)}</b></div>
-          <div class="bettor-stat"><span>Total Wagered</span><b>${fmt$(b.total_wagered)}</b></div>
-          <div class="bettor-stat"><span>Record</span><b>${b.wins}W-${b.losses}L</b></div>
-          <div class="bettor-stat"><span>Pending</span><b>${b.pending}</b></div>
+      <div class="bettor-card" data-bettor-id="${b.id}">
+        <div class="bettor-card-top">
+          <div class="bettor-name">${b.name}</div>
+          <div class="bettor-bankroll ${pnlCls}">${fmt$(b.bankroll, true)}</div>
+          <div class="bettor-meta">Start: ${fmt$(b.start_bankroll, true)} · ROI: <b class="${pnlCls}">${roiSign}${roi}%</b>
+            <button class="dry-toggle ${b.paper ? 'dry-on' : 'dry-off'}" data-id="${b.id}">
+              ${b.paper ? '💧 DRY MODE' : '⚡ LIVE'}
+            </button>
+          </div>
+          <div class="bettor-stats">
+            <div class="bettor-stat"><span>Today P&L</span><b class="${todayCls}">${todaySign}${fmt$(b.today_pnl)}</b></div>
+            <div class="bettor-stat"><span>All-time P&L</span><b class="${pnlCls}">${pnlSign}${fmt$(b.total_pnl)}</b></div>
+            <div class="bettor-stat"><span>Today Wagered</span><b>${fmt$(b.today_wagered)}</b></div>
+            <div class="bettor-stat"><span>Total Wagered</span><b>${fmt$(b.total_wagered)}</b></div>
+            <div class="bettor-stat"><span>Record</span><b>${b.wins}W-${b.losses}L</b></div>
+            <div class="bettor-stat"><span>Pending</span><b>${b.pending}</b></div>
+          </div>
+          <div class="bettor-expand-btn">▾</div>
         </div>
+        <div class="bettor-drawer" hidden></div>
       </div>`
   }).join('')
+
+  wrap.querySelectorAll('.dry-toggle').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation()
+      const id = btn.dataset.id
+      btn.disabled = true
+      const res = await fetchJson(`/api/users/${id}/toggle-live`, { method: 'POST' }).catch(() => null)
+      if (res?.ok) {
+        btn.className = `dry-toggle ${res.paper ? 'dry-on' : 'dry-off'}`
+        btn.textContent = res.paper ? '💧 DRY MODE' : '⚡ LIVE'
+      }
+      btn.disabled = false
+    })
+  })
+
+  wrap.querySelectorAll('.bettor-card-top').forEach(top => {
+    top.addEventListener('click', async e => {
+      if (e.target.closest('.dry-toggle')) return
+      const card   = top.closest('.bettor-card')
+      const drawer = card.querySelector('.bettor-drawer')
+      const expandBtn = top.querySelector('.bettor-expand-btn')
+      const isOpen = !drawer.hidden
+      if (isOpen) {
+        drawer.hidden = true
+        expandBtn.textContent = '▾'
+        return
+      }
+      drawer.hidden = false
+      expandBtn.textContent = '▴'
+      if (!drawer.dataset.loaded) {
+        drawer.innerHTML = '<div class="dr-loading">Loading…</div>'
+        const bettorId = Number(card.dataset.bettorId)
+        const b = bettors.find(x => x.id === bettorId)
+        await buildBettorDrawer(drawer, b)
+        drawer.dataset.loaded = '1'
+      }
+    })
+  })
+}
+
+async function buildBettorDrawer(drawer, b) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [liveBetsData] = await Promise.all([
+    fetchJson(`/api/ks/live-bets?date=${today}`).catch(() => ({ pitchers: [], totals: { bets: 0 } })),
+  ])
+
+  // Pre-game bets from already-loaded daily data
+  const KALSHI_FEE = 0.07
+  const allBets = _dailyPitchers.flatMap(p => p.bets.map(bet => ({ ...bet, pitcher_name: p.pitcher_name })))
+  const wins    = allBets.filter(x => x.result === 'win').length
+  const losses  = allBets.filter(x => x.result === 'loss').length
+  const pending = allBets.filter(x => !x.result).length
+  const settled = allBets.filter(x => x.result)
+  const settledPnl = settled.reduce((s, x) => s + (x.pnl || 0), 0)
+
+  let atRisk = 0, bestCase = 0
+  for (const bet of allBets.filter(x => !x.result)) {
+    const mid  = Number(bet.market_mid ?? 50)
+    const face = Number(bet.bet_size   ?? 0)
+    const hs   = (bet.spread ?? 4) / 2
+    const fill = bet.side === 'YES' ? mid + hs : (100 - mid) + hs
+    const win  = bet.side === 'YES' ? (100 - mid) - hs : mid - hs
+    atRisk   += face * fill / 100
+    bestCase += face * win / 100 * (1 - KALSHI_FEE)
+  }
+
+  const pnlCls  = settledPnl >= 0 ? 'good' : 'bad'
+  const pnlSign = settledPnl >= 0 ? '+' : ''
+
+  // Pre-game bet rows — settled first, then pending
+  const sorted = [...allBets].sort((a, x) => {
+    if (a.result && !x.result) return -1
+    if (!a.result && x.result) return 1
+    if (a.result === 'win' && x.result === 'loss') return -1
+    if (a.result === 'loss' && x.result === 'win') return 1
+    return (a.pitcher_name || '').localeCompare(x.pitcher_name || '')
+  })
+
+  const pregameRows = sorted.map(bet => {
+    const label   = bet.side === 'YES' ? `YES ${bet.strike}+` : `NO ${bet.strike}+`
+    const stCls   = bet.result === 'win' ? 'good' : bet.result === 'loss' ? 'bad' : 'muted'
+    const stText  = bet.result === 'win' ? 'WIN' : bet.result === 'loss' ? 'LOSS' : '⏳'
+    const pnlText = bet.pnl != null ? `${bet.pnl >= 0 ? '+' : ''}${fmt$(bet.pnl)}` : '—'
+    const pnlC    = bet.pnl != null ? (bet.pnl >= 0 ? 'good' : 'bad') : 'muted'
+    return `<div class="dr-row">
+      <span class="dr-pitcher">${bet.pitcher_name.split(' ').pop()}</span>
+      <span class="dr-label">${label}</span>
+      <span class="dr-size muted">${fmt$(bet.bet_size)}</span>
+      <span class="dr-status ${stCls}">${stText}</span>
+      <span class="dr-pnl ${pnlC}">${pnlText}</span>
+    </div>`
+  }).join('')
+
+  // In-game bet rows
+  let liveSection = ''
+  if (liveBetsData.totals?.bets > 0) {
+    const lt = liveBetsData.totals
+    const liveRows = liveBetsData.pitchers.flatMap(p =>
+      p.bets.map(bet => {
+        const label  = bet.side === 'YES' ? `YES ${bet.strike}+` : `NO ${bet.strike}+`
+        const ctx    = bet.live_inning ? `${bet.live_inning} · ${bet.live_ks_at_bet ?? '?'}K` : '—'
+        const stCls  = bet.result === 'win' ? 'good' : bet.result === 'loss' ? 'bad' : 'muted'
+        const stText = bet.result === 'win' ? 'WIN' : bet.result === 'loss' ? 'LOSS' : '⏳'
+        const pnlText = bet.pnl != null ? `${bet.pnl >= 0 ? '+' : ''}${fmt$(bet.pnl)}` : '—'
+        const pnlC   = bet.pnl != null ? (bet.pnl >= 0 ? 'good' : 'bad') : 'muted'
+        return `<div class="dr-row dr-row-live">
+          <span class="dr-pitcher">${p.pitcher_name.split(' ').pop()}</span>
+          <span class="dr-label">${label}</span>
+          <span class="dr-ctx muted">${ctx}</span>
+          <span class="dr-size muted">${fmt$(bet.bet_size)}</span>
+          <span class="dr-status ${stCls}">${stText}</span>
+          <span class="dr-pnl ${pnlC}">${pnlText}</span>
+        </div>`
+      })
+    ).join('')
+
+    const ltPnlSign = lt.pnl >= 0 ? '+' : ''
+    const ltPnlCls  = lt.pnl >= 0 ? 'good' : 'bad'
+    liveSection = `
+      <div class="dr-section">
+        <div class="dr-section-head">IN-GAME WAGERS
+          <span class="muted">${lt.bets} bets · ${lt.wins}W ${lt.losses}L ${lt.pending > 0 ? `· ${lt.pending}⏳` : ''} · <span class="${ltPnlCls}">${ltPnlSign}${fmt$(lt.pnl)}</span></span>
+        </div>
+        <div class="dr-col-head dr-col-head-live"><span>Pitcher</span><span>Bet</span><span>Game State</span><span>Size</span><span>Status</span><span>P&L</span></div>
+        ${liveRows}
+      </div>`
+  }
+
+  const balance = b.kalshi_balance != null ? fmt$(b.kalshi_balance) : 'Paper'
+  const modeCls = b.paper ? 'muted' : 'good'
+
+  drawer.innerHTML = `
+    <div class="dr-inner">
+      <div class="dr-summary">
+        <div class="dr-sum-cell">
+          <div class="dr-sum-label">SETTLED P&L</div>
+          <div class="dr-sum-val ${pnlCls}">${pnlSign}${fmt$(settledPnl)}</div>
+          <div class="dr-sum-sub">${wins}W · ${losses}L · ${wins + losses} done</div>
+        </div>
+        <div class="dr-sum-cell">
+          <div class="dr-sum-label">PENDING</div>
+          <div class="dr-sum-val">${pending}</div>
+          <div class="dr-sum-sub">${fmt$(atRisk)} at risk</div>
+        </div>
+        <div class="dr-sum-cell">
+          <div class="dr-sum-label">BEST CASE</div>
+          <div class="dr-sum-val good">+${fmt$(bestCase)}</div>
+          <div class="dr-sum-sub">if all pending win</div>
+        </div>
+      </div>
+
+      <div class="dr-section">
+        <div class="dr-section-head">PRE-GAME BETS <span class="muted">${allBets.length} total</span></div>
+        <div class="dr-col-head"><span>Pitcher</span><span>Bet</span><span>Size</span><span>Status</span><span>P&L</span></div>
+        ${pregameRows || '<div class="dr-empty">No bets logged for this date.</div>'}
+      </div>
+
+      ${liveSection}
+
+      <div class="dr-section dr-section-account">
+        <div class="dr-sum-cell">
+          <div class="dr-sum-label">ACCOUNT</div>
+          <div class="dr-sum-val">${balance}</div>
+          <div class="dr-sum-sub"><span class="${modeCls}">${b.paper ? '💧 Dry Mode' : '⚡ Live'}</span></div>
+        </div>
+        <div class="dr-sum-cell">
+          <div class="dr-sum-label">DAILY BUDGET</div>
+          <div class="dr-sum-val">${fmt$(b.bankroll * b.daily_risk_pct)}</div>
+          <div class="dr-sum-sub">${(b.daily_risk_pct * 100).toFixed(0)}% of bankroll</div>
+        </div>
+      </div>
+    </div>`
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -294,6 +521,7 @@ async function loadDay(date) {
   }
 
   try { renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
+  try { await loadLiveBets(date)     } catch (err) { console.error('[loadLiveBets]', err) }
 
   buildLiveBanner(data.pitchers)
   startCountdowns()
@@ -308,91 +536,88 @@ function renderDaySummary(date, data) {
   if (!data || !data.pitchers?.length) { el.hidden = true; return }
   el.hidden = false
 
-  const today = new Date().toISOString().slice(0, 10)
-  const isToday = date === today
-
-  // Compute avg edge + best pick
   const KALSHI_FEE = 0.07
-  let allEdges = [], totalRisk = 0, totalPotential = 0
-  const pitcherStake = {}  // pitcher_name → total $ at risk
+  let atRisk = 0, bestCase = 0
   for (const p of data.pitchers) {
-    let pStake = 0
     for (const b of p.bets) {
-      if (b.edge != null) allEdges.push(Number(b.edge) * 100)
-      const mid  = b.market_mid != null ? Number(b.market_mid) : null
-      const face = b.bet_size   != null ? Number(b.bet_size)   : null
+      if (b.result) continue
+      const mid  = Number(b.market_mid ?? 50)
+      const face = Number(b.bet_size   ?? 0)
       const hs   = (b.spread ?? 4) / 2
-      if (mid != null && face != null) {
-        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
-        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
-        const risk = face * fill / 100
-        totalRisk      += risk
-        totalPotential += face * win / 100 * (1 - KALSHI_FEE)
-        pStake         += risk
-      }
-    }
-    pitcherStake[p.pitcher_name] = (pitcherStake[p.pitcher_name] || 0) + pStake
-  }
-  const avgEdge = allEdges.length ? allEdges.reduce((s,e) => s+e, 0) / allEdges.length : 0
-
-  // Best pick = highest-edge bet
-  let bestPick = null, bestEdgeVal = -Infinity
-  for (const p of data.pitchers) {
-    for (const b of p.bets) {
-      const e = b.edge != null ? Number(b.edge) * 100 : 0
-      if (e > bestEdgeVal) {
-        bestEdgeVal = e
-        bestPick = { name: p.pitcher_name, strike: b.strike, side: b.side, edge: e }
-      }
+      const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+      const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+      atRisk   += face * fill / 100
+      bestCase += face * win / 100 * (1 - KALSHI_FEE)
     }
   }
 
-  // Top 3 pitchers by $ at stake
-  const topWatches = Object.entries(pitcherStake)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([name, stake]) => `<strong>${name.split(' ').pop()}</strong> (${fmt$(stake)})`)
-
-  // Verdict
-  let verdict, verdictCls
-  if (avgEdge >= 8) {
-    verdict = 'Strong day — high confidence across the board.'
-    verdictCls = 'verdict-strong'
-  } else if (avgEdge >= 6) {
-    verdict = 'Solid day — good average edge, worth betting.'
-    verdictCls = 'verdict-ok'
-  } else if (avgEdge >= 4) {
-    verdict = 'Moderate day — edge is real but slim. Standard sizing.'
-    verdictCls = 'verdict-moderate'
-  } else {
-    verdict = 'Weak day — edge is thin. Consider skipping or reducing size.'
-    verdictCls = 'verdict-weak'
-  }
-
-  const bestLine = bestPick
-    ? ` Best edge: <strong>${bestPick.name}</strong> (${bestPick.side === 'YES' ? `${bestPick.strike}+ Ks` : `under ${bestPick.strike} Ks`}, +${bestEdgeVal.toFixed(1)}¢).`
-    : ''
-
-  const pending = data.day_pending
+  const pnlCls = data.day_pnl >= 0 ? 'good' : 'bad'
+  const sign   = data.day_pnl >= 0 ? '+' : ''
   const settled = data.day_wins + data.day_losses
-  const statusLine = isToday && pending > 0
-    ? `${pending} bet${pending !== 1 ? 's' : ''} in progress.`
-    : settled > 0
-      ? `${data.day_wins}W · ${data.day_losses}L today.`
-      : ''
-
-  const watchLine = topWatches.length
-    ? `<div class="day-summary-watch">🎯 Watch: ${topWatches.join(' · ')}</div>`
-    : ''
 
   el.innerHTML = `
-    <div class="day-summary-verdict ${verdictCls}">${verdict}${bestLine}</div>
-    <div class="day-summary-body">
-      ${data.day_bets} bet${data.day_bets !== 1 ? 's' : ''} across ${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''} ·
-      At risk: <strong>${fmt$(totalRisk)}</strong> · Best case: <strong>+${fmt$(totalPotential)}</strong> after fees.
-      ${statusLine ? `<span class="muted">${statusLine}</span>` : ''}
-    </div>
-    ${watchLine}`
+    <div class="dpb-grid">
+      <div class="dpb-cell">
+        <div class="dpb-label">SETTLED P&L</div>
+        <div class="dpb-val ${pnlCls}">${sign}${fmt$(data.day_pnl)}</div>
+        <div class="dpb-sub">${data.day_wins}W · ${data.day_losses}L · ${settled} done</div>
+      </div>
+      <div class="dpb-cell dpb-cell-mid">
+        <div class="dpb-label">PENDING</div>
+        <div class="dpb-val">${data.day_pending}</div>
+        <div class="dpb-sub">${fmt$(atRisk)} at risk</div>
+      </div>
+      <div class="dpb-cell">
+        <div class="dpb-label">BEST CASE</div>
+        <div class="dpb-val good">+${fmt$(bestCase)}</div>
+        <div class="dpb-sub">if all pending win</div>
+      </div>
+    </div>`
+}
+
+async function loadLiveBets(date) {
+  const data = await fetchJson(`/api/ks/live-bets?date=${date}`).catch(() => null)
+  const section = document.getElementById('live-bets-section')
+  const list    = document.getElementById('live-bets-list')
+  const meta    = document.getElementById('lbs-meta')
+  if (!section || !list) return
+
+  if (!data || !data.pitchers?.length) {
+    section.hidden = true
+    return
+  }
+
+  const t = data.totals
+  const pnlSign = t.pnl >= 0 ? '+' : ''
+  const pnlCls  = t.pnl >= 0 ? 'good' : 'bad'
+  meta.innerHTML = `${t.bets} bet${t.bets !== 1 ? 's' : ''} · ${t.wins}W ${t.losses}L${t.pending > 0 ? ` · ${t.pending} pending` : ''} · <span class="${pnlCls}">${pnlSign}${fmt$(t.pnl)}</span>`
+
+  list.innerHTML = data.pitchers.map(p => {
+    const pnlSign2 = p.pnl >= 0 ? '+' : ''
+    const pnlCls2  = p.pnl >= 0 ? 'good' : 'bad'
+    const rows = p.bets.map(bet => {
+      const label  = bet.side === 'YES' ? `YES ${bet.strike}+` : `NO ${bet.strike}+`
+      const ctx    = bet.live_inning ? `${bet.live_inning} · ${bet.live_ks_at_bet ?? '?'}Ks` : ''
+      const stCls  = bet.result === 'win' ? 'good' : bet.result === 'loss' ? 'bad' : 'muted'
+      const stText = bet.result === 'win' ? 'WIN' : bet.result === 'loss' ? 'LOSS' : 'pending'
+      const pnlT   = bet.pnl != null ? `${bet.pnl >= 0 ? '+' : ''}${fmt$(bet.pnl)}` : '—'
+      const pnlC   = bet.pnl != null ? (bet.pnl >= 0 ? 'good' : 'bad') : 'muted'
+      return `<div class="lbs-row">
+        <span class="lbs-bet">${label}</span>
+        <span class="lbs-ctx muted">${ctx}</span>
+        <span class="lbs-size muted">${fmt$(bet.bet_size)}</span>
+        <span class="lbs-status ${stCls}">${stText}</span>
+        <span class="lbs-pnl ${pnlC}">${pnlT}</span>
+      </div>`
+    }).join('')
+
+    return `<div class="lbs-pitcher">
+      <div class="lbs-pitcher-name">${p.pitcher_name} <span class="muted">${p.wins}W ${p.losses}L${p.pending > 0 ? ` ${p.pending}⏳` : ''}</span> <span class="${pnlCls2}">${pnlSign2}${fmt$(p.pnl)}</span></div>
+      ${rows}
+    </div>`
+  }).join('')
+
+  section.hidden = false
 }
 
 function buildPitcherCard(p) {
@@ -767,6 +992,9 @@ async function pollLive(date) {
     })
     cards.forEach(c => list.appendChild(c))
   }
+
+  // Refresh live bets section on every live poll
+  try { await loadLiveBets(date) } catch {}
 
   // If everything is final and all bets have settled results, stop polling
   if (data.pitchers.length && data.pitchers.every(p => p.is_final)) {

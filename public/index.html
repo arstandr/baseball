@@ -29,6 +29,7 @@
           <button class="hard-refresh-btn" title="Hard refresh" onclick="location.reload(true)">↺</button>
         </div>
         <span id="deploy-time" class="deploy-time"></span>
+        <span id="last-updated" class="deploy-time"></span>
         <a href="/auth/logout" class="logout" onclick="return confirm('Sign out?')">Sign out</a>
       </div>
     </div>
@@ -88,6 +89,13 @@
           <div class="empty-title">No bets logged for this date</div>
           <div class="empty-sub">Run the 9 AM edge script to generate picks.</div>
         </div>
+      </div>
+      <div id="live-bets-section" class="live-bets-section" hidden>
+        <div class="lbs-header">
+          <span class="lbs-title">IN-GAME WAGERS</span>
+          <span class="lbs-meta" id="lbs-meta"></span>
+        </div>
+        <div id="live-bets-list" class="lbs-list"></div>
       </div>
     </section>
 
