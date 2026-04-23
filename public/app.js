@@ -51,7 +51,8 @@ async function refreshCloserStatus() {
   }
 
   const hb  = data.heartbeat
-  const ago = hb.updated_at ? Math.floor((Date.now() - new Date(hb.updated_at + 'Z').getTime()) / 60000) : null
+  const tsStr = hb.updated_at ? (hb.updated_at.endsWith('Z') ? hb.updated_at : hb.updated_at + 'Z') : null
+  const ago = tsStr ? Math.floor((Date.now() - new Date(tsStr).getTime()) / 60000) : null
   const fresh = ago != null && ago < 5
 
   dot.className = `closer-dot ${fresh ? 'online' : 'stale'}`
@@ -67,7 +68,8 @@ async function refreshCloserStatus() {
 
   if (data.last_update?.msg) {
     const u = data.last_update
-    const uAgo = u.updated_at ? Math.floor((Date.now() - new Date(u.updated_at + 'Z').getTime()) / 60000) : null
+    const uTs  = u.updated_at ? (u.updated_at.endsWith('Z') ? u.updated_at : u.updated_at + 'Z') : null
+    const uAgo = uTs ? Math.floor((Date.now() - new Date(uTs).getTime()) / 60000) : null
     metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : ''}: ${u.msg.slice(0, 40)}`)
   }
 
