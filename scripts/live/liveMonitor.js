@@ -304,6 +304,84 @@ async function sendDailyReport() {
   }, await getAllWebhooks(db))
 }
 
+// ── T-90 resting order review: flip-to-NO or cancel no-edge ──────────────────
+//
+// Called for each Preview game when first pitch is ≤90 min away.
+// For unfilled maker orders:
+//   - If YES price rose ≥7¢ past model_prob → NO side now has edge → flip
+//   - If edge on original side dropped below threshold → cancel, skip
+//   - Otherwise → leave it resting until T-45
+// Guards with _t90Games so it only runs once per game.
+
+const _t90Games = new Set()
+
+async function manageRestingOrders(game) {
+  if (_t90Games.has(game.id)) return
+  _t90Games.add(game.id)
+
+  const restingBets = await db.all(
+    `SELECT * FROM ks_bets
+      WHERE bet_date = ? AND order_status = 'resting' AND result IS NULL
+        AND (pitcher_id = ? OR pitcher_id = ?)`,
+    [TODAY, game.pitcher_home_id, game.pitcher_away_id],
+  )
+  if (!restingBets.length) return
+
+  console.log(`\n[live] T-90 review: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
+
+  for (const bet of restingBets) {
+    if (!bet.ticker) continue
+    try {
+      const mkt = await getMarketPrice(bet.ticker)
+      if (!mkt) continue
+
+      const modelProb   = bet.model_prob ?? 0.5
+      // Current mid for each side (fractions 0-1)
+      const yesMid  = mkt.mid != null ? mkt.mid / 100 : null
+      if (yesMid == null) continue
+      const noMid   = 1 - yesMid
+
+      const edgeYES = modelProb - yesMid
+      const edgeNO  = (1 - modelProb) - noMid
+
+      // Original side edge still viable?
+      const originalEdge = bet.side === 'YES' ? edgeYES : edgeNO
+      if (originalEdge >= LIVE_EDGE / 2) continue  // still good — let it ride to T-45
+
+      // Edge gone on original side — check if opposite side has edge
+      const flipSide  = bet.side === 'YES' ? 'NO' : 'YES'
+      const flipEdge  = bet.side === 'YES' ? edgeNO : edgeYES
+      const flipPrice = bet.side === 'YES' ? noMid  : yesMid
+
+      if (flipEdge >= LIVE_EDGE) {
+        // Cancel original, place flip-side maker
+        if (bet.order_id) await cancelOrder(bet.order_id)
+        console.log(`  ↔ ${bet.pitcher_name} ${bet.strike}+ flip YES→${flipSide}  original edge=${(originalEdge*100).toFixed(1)}¢  flip edge=${(flipEdge*100).toFixed(1)}¢`)
+
+        const flipAsk     = bet.side === 'YES' ? (mkt.no_ask ?? Math.round(noMid * 100 + 1)) : (mkt.yes_ask ?? Math.round(yesMid * 100 + 1))
+        const makerCents  = Math.max(1, flipAsk - 1)
+        const contracts   = Math.max(1, Math.round(bet.bet_size ?? 100))
+        const result      = await placeOrder(bet.ticker, flipSide.toLowerCase(), contracts, makerCents)
+        const newOrder    = result?.order ?? result
+        const newOrderId  = newOrder?.order_id ?? null
+
+        await db.run(
+          `UPDATE ks_bets SET side=?, order_id=?, order_status='resting', market_mid=?, fill_price=NULL WHERE id=?`,
+          [flipSide, newOrderId, Math.round(flipPrice * 100), bet.id],
+        )
+        console.log(`    → ${flipSide} MAKER ${contracts}c @ ${makerCents}¢  id=${newOrderId}`)
+      } else {
+        // No edge on either side — cancel and skip
+        if (bet.order_id) await cancelOrder(bet.order_id)
+        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
+        console.log(`  ✗ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — no edge on either side at T-90, cancelled  (YES edge=${(edgeYES*100).toFixed(1)}¢ NO edge=${(edgeNO*100).toFixed(1)}¢)`)
+      }
+    } catch (err) {
+      console.error(`  [T-90] error for ${bet.pitcher_name}: ${err.message}`)
+    }
+  }
+}
+
 // ── T-45 pre-game order management ───────────────────────────────────────────
 //
 // Called for each Preview game when first pitch is ≤45 min away.
@@ -500,9 +578,13 @@ async function main() {
         const state = lsRes.data.abstractGameState
 
         if (state === 'Preview') {
-          // T-45: check resting maker orders for this game
           if (LIVE && game.game_time) {
             const minsToGame = (new Date(game.game_time) - Date.now()) / 60000
+            // T-90: flip-to-NO / cancel no-edge resting orders
+            if (minsToGame <= 90 && minsToGame > 45) {
+              await manageRestingOrders(game)
+            }
+            // T-45: fill check → taker fallback
             if (minsToGame <= 45 && minsToGame > 0) {
               await managePreGameOrders(game)
             }

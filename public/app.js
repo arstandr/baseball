@@ -775,7 +775,7 @@ async function renderDaySummary(date, data) {
       }
     } else {
       for (const p of data.pitchers) {
-        for (const b of p.bets) {
+        for (const b of (p.bets ?? [])) {
           if (b.result) continue
           const mid  = Number(b.market_mid ?? 50)
           const face = Number(b.bet_size   ?? 0)
@@ -813,7 +813,7 @@ async function renderDaySummary(date, data) {
     if (bestcaseCard && bestcaseEl) {
       const hasOpenPositions = livePositions?.length > 0
       const projectedEnd = data.day_pnl + bestCase
-      if (data.day_pending > 0 || hasOpenPositions || bestCase > 0) {
+      if (atRisk > 0 || hasOpenPositions || bestCase > 0) {
         bestcaseCard.style.display = 'flex'
         const sign = projectedEnd >= 0 ? '+' : ''
         bestcaseEl.textContent = sign + fmt$(projectedEnd)
