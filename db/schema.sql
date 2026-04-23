@@ -746,3 +746,12 @@ CREATE TABLE IF NOT EXISTS nba_opp_3pt_defense (
   opp_fg3_pct REAL,
   PRIMARY KEY (team_id, stat_date)
 );
+
+-- ========================================================================
+-- agent_heartbeat: status pings from The Closer Windows agent
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS agent_heartbeat (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TEXT
+);

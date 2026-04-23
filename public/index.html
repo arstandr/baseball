@@ -53,7 +53,7 @@
         <div class="sh-stat-sub">Started with <b id="sh-start">$—</b></div>
       </div>
       <div class="sh-stat">
-        <div class="sh-stat-label">TOTAL PROFIT / LOSS</div>
+        <div class="sh-stat-label">TODAY'S P&amp;L</div>
         <div class="sh-stat-value" id="sh-total-pnl">—</div>
         <div class="sh-stat-sub" id="sh-total-roi"></div>
       </div>
@@ -124,6 +124,22 @@
 
     <!-- ══════════════ TRENDS VIEW ══════════════ -->
     <section class="view" id="view-trends" hidden>
+
+      <!-- Period selector -->
+      <div class="trends-period-bar">
+        <button class="period-btn active" data-period="all">All Time</button>
+        <button class="period-btn" data-period="month">This Month</button>
+        <button class="period-btn" data-period="week">This Week</button>
+        <button class="period-btn" data-period="since_start">Since Apr 23</button>
+        <button class="period-btn" data-period="custom">Custom</button>
+        <div class="period-custom-range" id="period-custom-range" style="display:none">
+          <input type="date" id="period-from" />
+          <span>–</span>
+          <input type="date" id="period-to" />
+          <button class="filter-btn" id="period-apply">Go</button>
+        </div>
+      </div>
+
       <div class="grid-1">
         <div class="panel">
           <div class="panel-head">

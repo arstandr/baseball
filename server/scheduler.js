@@ -85,23 +85,20 @@ export async function startScheduler() {
     if (!existing?.n) {
       console.log('[scheduler] startup catch-up: MLB morning run')
       mlbRun('MLB morning run (catch-up)')
-      setTimeout(() => startLiveMonitor(date), 90_000)
     } else {
       console.log(`[scheduler] startup: ${existing.n} bets already logged for ${date} — skipping morning catch-up`)
-      setTimeout(() => startLiveMonitor(date), 5_000)
     }
   }
+  // NOTE: liveMonitor is managed by The Closer (Windows agent) — not started here
   // NBA morning run disabled
   if (hm >= 15 * 60 + 30) {  // past 3:30pm — lineup refresh missed?
     console.log('[scheduler] startup catch-up: MLB lineup refresh')
     mlbRun('MLB lineup refresh (catch-up)', '--lineups')
   }
 
-  // 9:00 AM ET — MLB morning run, then spawn live monitor
+  // 9:00 AM ET — MLB morning run (liveMonitor handled by The Closer)
   cron.schedule('0 9 * * *', () => {
-    const date = etDate()
     mlbRun('MLB morning run')
-    setTimeout(() => startLiveMonitor(date), 90_000)
   }, { timezone: 'America/New_York' })
 
   // NBA morning run disabled

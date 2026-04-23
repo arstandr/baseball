@@ -9,6 +9,7 @@
 import { spawn, execSync, exec } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
 import 'dotenv/config'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -78,7 +79,7 @@ async function startMonitor() {
   _date = date
   _running = true
 
-  console.log(`\n[closer] ▶ Starting liveMonitor for ${date}`)
+  console.log(`\n[closer] Starting liveMonitor for ${date}`)
   await writeHeartbeat('running', { date })
 
   const child = spawn(
@@ -98,7 +99,7 @@ async function startMonitor() {
 
 function stopMonitor() {
   if (!_child) return
-  console.log('[closer] stopping liveMonitor…')
+  console.log('[closer] stopping liveMonitor...')
   _child.kill('SIGTERM')
   _child   = null
   _running = false
@@ -117,8 +118,8 @@ async function checkForUpdates() {
     if (remote === local) return  // no update
 
     const msg = git(`log --oneline -1 ${remote}`)
-    console.log(`\n[closer] 🔄 New code detected: ${msg}`)
-    console.log('[closer] Pulling + restarting…')
+    console.log(`\n[closer] New code detected: ${msg}`)
+    console.log('[closer] Pulling + restarting...')
 
     stopMonitor()
     execSync('git pull origin main --quiet', { cwd: ROOT })
@@ -128,12 +129,8 @@ async function checkForUpdates() {
     await writeUpdate(remote.slice(0, 7), msg)
     await writeHeartbeat('restarting', { reason: 'code update', commit: remote.slice(0, 7) })
 
-    // Re-launch self via new code
-    console.log('[closer] ✅ Update applied — relaunching…')
-    const child = spawn(process.execPath, ['scripts/closer/launcher.js'], {
-      cwd: ROOT, stdio: 'inherit', detached: true,
-    })
-    child.unref()
+    // Exit 0 -- the bat file loops on clean exit to relaunch with new code
+    console.log('[closer] Update applied -- restarting...')
     process.exit(0)
   } catch (err) {
     console.error('[closer] update check failed:', err.message)
@@ -142,23 +139,36 @@ async function checkForUpdates() {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
-async function main() {
-  console.log('╔════════════════════════════════════╗')
-  console.log('║         THE CLOSER  ⚾              ║')
-  console.log('║   Money Tree 2.0 — Live Monitor    ║')
-  console.log('╚════════════════════════════════════╝')
+function repairBatFile() {
+  try {
+    const bat = path.join(ROOT, 'start-closer.bat')
+    const correct = `@echo off\r\n:loop\r\ntitle The Closer - Money Tree 2.0\r\ncd /d "${ROOT}"\r\necho.\r\necho  THE CLOSER - Money Tree 2.0\r\necho.\r\nnode scripts/closer/launcher.js\r\nif %ERRORLEVEL% == 0 goto loop\r\necho.\r\necho  The Closer stopped unexpectedly.\r\npause\r\n`
+    const current = fs.existsSync(bat) ? fs.readFileSync(bat, 'ascii') : ''
+    if (!current.includes(':loop')) {
+      fs.writeFileSync(bat, correct, 'ascii')
+      console.log('[closer] bat file updated with restart loop')
+    }
+  } catch {}
+}
 
-  // Repo is public — strip any embedded token from remote so pulls never need auth
+async function main() {
+  console.log('THE CLOSER - Money Tree 2.0')
+  console.log('============================')
+
+  repairBatFile()
+
+  // Repo is public -- strip any embedded token from remote so pulls never need auth
   try {
     const remoteUrl = git('remote get-url origin')
-    if (remoteUrl.includes('@github.com')) {
+    if (remoteUrl.includes('@github.com') && remoteUrl.includes(':')) {
       execSync('git remote set-url origin https://github.com/arstandr/baseball.git', { cwd: ROOT })
       console.log('[closer] remote URL updated to public HTTPS (no token needed)')
     }
   } catch {}
 
   _currentHash = git('rev-parse HEAD')
-  console.log(`[closer] version: ${_currentHash.slice(0, 7)}`)
+  const commitDate = git('log -1 --format=%cd --date=format:"%b %d %Y %I:%M %p"')
+  console.log(`[closer] last updated: ${commitDate}`)
 
   await writeHeartbeat('idle')
 
@@ -170,12 +180,12 @@ async function main() {
   // Check for updates every 2 minutes
   setInterval(checkForUpdates, 2 * 60_000)
 
-  // Game hours check every 5 minutes — start/stop monitor as needed
+  // Game hours check every 5 minutes -- start/stop monitor as needed
   async function tick() {
     if (isGameHours() && !_child) {
       startMonitor()
     } else if (!isGameHours() && _child) {
-      console.log('[closer] outside game hours — stopping monitor')
+      console.log('[closer] outside game hours -- stopping monitor')
       stopMonitor()
     }
   }
