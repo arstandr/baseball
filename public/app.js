@@ -735,7 +735,7 @@ async function loadDay(date) {
     renderSimpleBetList(sorted, date, marketPrices)
   } catch (err) { console.error('[renderSimpleBetList]', err) }
 
-  try { renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
+  try { await renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
   try { await loadLiveBets(date)     } catch (err) { console.error('[loadLiveBets]', err) }
 
   buildLiveBanner(data.pitchers)
@@ -745,7 +745,7 @@ async function loadDay(date) {
   if (data.day_pending > 0) startLivePolling(date)
 }
 
-function renderDaySummary(date, data) {
+async function renderDaySummary(date, data) {
   // Update the big status banner in the hero
   const verdictEl   = document.getElementById('sh-verdict')
   const recordEl    = document.getElementById('sh-record')
@@ -767,8 +767,8 @@ function renderDaySummary(date, data) {
     // Use live Kalshi positions if available, otherwise fall back to DB bet sizes
     if (livePositions?.length) {
       for (const pos of livePositions) {
-        // contracts * $1 payout * (1 - fee) - cost already paid
-        bestCase += pos.contracts * (1 - KALSHI_FEE) - pos.cost
+        // Profit if wins: (contracts - cost) * (1-fee)  [cost = contracts × fill_price]
+        bestCase += (pos.contracts - pos.cost) * (1 - KALSHI_FEE)
         atRisk   += pos.cost
       }
     } else {
@@ -1283,6 +1283,9 @@ async function pollLive(date) {
 
   // Refresh live bets section on every live poll
   try { await loadLiveBets(date) } catch {}
+
+  // Refresh best case from live Kalshi positions on every poll
+  try { await renderDaySummary(date, data) } catch {}
 
   // If everything is final and all bets have settled results, stop polling
   if (data.pitchers.length && data.pitchers.every(p => p.is_final)) {
