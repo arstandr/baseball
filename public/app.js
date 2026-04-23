@@ -96,6 +96,7 @@ function applyView(view, refresh = true) {
 // ──────────────────────────────────────────────────────────────────────────
 async function refreshAll() {
   await refreshHero()
+  await refreshBettorCards()
   if (state.view === 'today')    await refreshTodayView()
   if (state.view === 'trends')   await refreshTrendsView()
   if (state.view === 'testing')  await refreshTestingView()
@@ -168,6 +169,40 @@ async function refreshHero() {
     `
     liveEl.style.display = 'flex'
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// PER-BETTOR CARDS
+// ──────────────────────────────────────────────────────────────────────────
+async function refreshBettorCards() {
+  const bettors = await fetchJson('/api/ks/bettors').catch(() => [])
+  const wrap = document.getElementById('bettor-cards')
+  if (!wrap || !bettors.length) return
+
+  wrap.style.display = 'grid'
+  wrap.innerHTML = bettors.map(b => {
+    const pnlCls  = b.total_pnl >= 0 ? 'good' : 'bad'
+    const todayCls = b.today_pnl >= 0 ? 'good' : 'bad'
+    const pnlSign  = b.total_pnl >= 0 ? '+' : ''
+    const todaySign = b.today_pnl >= 0 ? '+' : ''
+    const roi = b.start_bankroll > 0
+      ? ((b.total_pnl / b.start_bankroll) * 100).toFixed(1)
+      : '0.0'
+    return `
+      <div class="bettor-card">
+        <div class="bettor-name">${b.name}</div>
+        <div class="bettor-bankroll ${pnlCls}">${fmt$(b.bankroll, true)}</div>
+        <div class="bettor-meta">Start: ${fmt$(b.start_bankroll, true)} · ROI: <b class="${pnlCls}">${pnlSign}${roi}%</b></div>
+        <div class="bettor-stats">
+          <div class="bettor-stat"><span>Today P&L</span><b class="${todayCls}">${todaySign}${fmt$(b.today_pnl)}</b></div>
+          <div class="bettor-stat"><span>All-time P&L</span><b class="${pnlCls}">${pnlSign}${fmt$(b.total_pnl)}</b></div>
+          <div class="bettor-stat"><span>Today Wagered</span><b>${fmt$(b.today_wagered)}</b></div>
+          <div class="bettor-stat"><span>Total Wagered</span><b>${fmt$(b.total_wagered)}</b></div>
+          <div class="bettor-stat"><span>Record</span><b>${b.wins}W-${b.losses}L</b></div>
+          <div class="bettor-stat"><span>Pending</span><b>${b.pending}</b></div>
+        </div>
+      </div>`
+  }).join('')
 }
 
 // ──────────────────────────────────────────────────────────────────────────

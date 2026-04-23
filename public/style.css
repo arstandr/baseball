@@ -299,6 +299,18 @@ a:hover { text-decoration: underline; }
 .hero-live-bankroll { font-weight: 700; font-size: 15px; }
 .hero-live-pnl { font-family: var(--mono); font-weight: 600; }
 .hero-live-record { color: var(--text-dim); font-size: 12px; margin-left: auto; }
+
+/* Per-bettor bankroll cards */
+.bettor-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 0 16px 16px; max-width: 1200px; margin: 0 auto; }
+.bettor-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.bettor-name { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+.bettor-bankroll { font-family: var(--mono); font-size: 28px; font-weight: 700; }
+.bettor-meta { font-size: 12px; color: var(--text-dim); margin: 4px 0 12px; }
+.bettor-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.bettor-stat { display: flex; flex-direction: column; }
+.bettor-stat span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); }
+.bettor-stat b { font-family: var(--mono); font-size: 14px; margin-top: 2px; }
+
 .delta { display: flex; flex-direction: column; align-items: flex-end; }
 .delta span { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
 .delta b { font-family: var(--mono); font-size: 18px; margin-top: 4px; }

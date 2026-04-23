@@ -1032,6 +1032,49 @@ router.get('/ks/summary', wrap(async (req, res) => {
 }))
 
 // ------------------------------------------------------------------
+// GET /api/ks/bettors
+// Per-user bankroll, P&L, wagered — all active live bettors.
+// ------------------------------------------------------------------
+router.get('/ks/bettors', wrap(async (req, res) => {
+  const today = todayISO()
+  const bettors = await db.all(
+    `SELECT id, name, starting_bankroll, daily_risk_pct FROM users WHERE active_bettor = 1 AND paper = 0 ORDER BY id ASC`
+  )
+
+  const result = await Promise.all(bettors.map(async u => {
+    const row = await db.one(`
+      SELECT
+        ROUND(SUM(CASE WHEN result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END), 2)           AS total_pnl,
+        ROUND(SUM(CASE WHEN result IS NOT NULL THEN COALESCE(capital_at_risk,0) ELSE 0 END),2) AS total_wagered,
+        ROUND(SUM(CASE WHEN bet_date=? AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END),2) AS today_pnl,
+        ROUND(SUM(CASE WHEN bet_date=? AND result IS NOT NULL THEN COALESCE(capital_at_risk,0) ELSE 0 END),2) AS today_wagered,
+        SUM(CASE WHEN result='win'  AND live_bet=0 THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN result='loss' AND live_bet=0 THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN result IS NULL AND live_bet=0 THEN 1 ELSE 0 END) AS pending
+      FROM ks_bets WHERE user_id=? AND live_bet=0
+    `, [today, today, u.id])
+
+    const totalPnl   = Number(row?.total_pnl   || 0)
+    const bankroll   = Number(u.starting_bankroll || 1000) + totalPnl
+    return {
+      id:              u.id,
+      name:            u.name,
+      start_bankroll:  Number(u.starting_bankroll || 1000),
+      bankroll:        roundTo(bankroll, 2),
+      total_pnl:       roundTo(totalPnl, 2),
+      total_wagered:   roundTo(Number(row?.total_wagered   || 0), 2),
+      today_pnl:       roundTo(Number(row?.today_pnl       || 0), 2),
+      today_wagered:   roundTo(Number(row?.today_wagered   || 0), 2),
+      wins:            Number(row?.wins    || 0),
+      losses:          Number(row?.losses  || 0),
+      pending:         Number(row?.pending || 0),
+      daily_risk_pct:  Number(u.daily_risk_pct || 0.3),
+    }
+  }))
+
+  res.json(result)
+}))
+
 // GET /api/ks/dates
 // Distinct bet_dates that have pre-game bets, most recent first.
 // ------------------------------------------------------------------
