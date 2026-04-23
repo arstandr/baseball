@@ -205,43 +205,45 @@ async function refreshAll() {
 }
 
 async function refreshHero() {
-  const s = await fetchJson('/api/ks/summary').catch(() => null)
+  const [s, bettors] = await Promise.all([
+    fetchJson('/api/ks/summary').catch(() => null),
+    fetchJson('/api/ks/bettors').catch(() => []),
+  ])
   if (!s) return
+
+  // Use Adam's live (Kalshi) account as the source of truth for hero numbers.
+  // The live bettor is identified by having a kalshi_balance (real account).
+  // Fall back to summary data if no live bettor found.
+  const liveBettor = (bettors || []).find(b => b.kalshi_balance != null)
+
+  const heroBalance  = liveBettor?.bankroll       ?? s.kalshi_balance ?? s.bankroll
+  const heroStart    = liveBettor?.start_bankroll  ?? s.start_bankroll
+  const heroTotalPnl = liveBettor?.total_pnl       ?? s.total_pnl
 
   // ── New status hero ──────────────────────────────────────────────────────
   const bankrollEl = document.getElementById('sh-bankroll')
   if (bankrollEl) {
-    bankrollEl.textContent = fmt$(s.bankroll, true)
+    bankrollEl.textContent = fmt$(heroBalance, true)
     bankrollEl.className = 'sh-stat-value'
   }
-  setText('sh-start', fmt$(s.start_bankroll, true))
+  setText('sh-start', fmt$(heroStart, true))
 
   const totalPnlEl = document.getElementById('sh-total-pnl')
   if (totalPnlEl) {
-    const sign = s.total_pnl >= 0 ? '+' : ''
-    totalPnlEl.textContent = sign + fmt$(s.total_pnl)
-    totalPnlEl.className   = `sh-stat-value ${s.total_pnl >= 0 ? 'good' : 'bad'}`
+    const sign = heroTotalPnl >= 0 ? '+' : ''
+    totalPnlEl.textContent = sign + fmt$(heroTotalPnl)
+    totalPnlEl.className   = `sh-stat-value ${heroTotalPnl >= 0 ? 'good' : 'bad'}`
   }
   const roiEl = document.getElementById('sh-total-roi')
   if (roiEl) {
-    const roi = s.start_bankroll > 0 ? (s.total_pnl / s.start_bankroll * 100).toFixed(1) : 0
+    const roi = heroStart > 0 ? (heroTotalPnl / heroStart * 100).toFixed(1) : 0
     const roiSign = roi >= 0 ? '+' : ''
     roiEl.textContent = `${roiSign}${roi}% overall`
   }
 
-  // Real money (Kalshi) section
+  // Hide the redundant "Real money account" secondary stat — Kalshi balance is now the primary hero number
   const liveStatEl = document.getElementById('sh-live-stat')
-  const kalshiEl   = document.getElementById('sh-kalshi')
-  const livePnlEl  = document.getElementById('sh-live-pnl')
-  if (liveStatEl && (s.kalshi_balance != null || s.live_wins > 0 || s.live_losses > 0)) {
-    liveStatEl.style.display = 'flex'
-    if (kalshiEl) kalshiEl.textContent = s.kalshi_balance != null ? fmt$(s.kalshi_balance, true) : '—'
-    if (livePnlEl && s.live_pnl != null) {
-      const lsign = s.live_pnl >= 0 ? '+' : ''
-      livePnlEl.textContent = `${lsign}${fmt$(s.live_pnl)} · ${s.live_wins}W ${s.live_losses}L`
-      livePnlEl.className   = `sh-stat-sub ${s.live_pnl >= 0 ? 'good' : 'bad'}`
-    }
-  }
+  if (liveStatEl) liveStatEl.style.display = 'none'
 
   // Note: sh-verdict and sh-record are updated by renderDaySummary (has day-specific data)
 }

@@ -1086,7 +1086,8 @@ router.get('/ks/summary', wrap(async (req, res) => {
 router.get('/ks/bettors', wrap(async (req, res) => {
   const today = todayISO()
   const bettors = await db.all(
-    `SELECT id, name, starting_bankroll, daily_risk_pct, paper, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor = 1 AND (paper = 0 OR paper_temp = 1) ORDER BY id ASC`
+    // id=1 is the legacy shadow paper account (Adam); exclude it but include all others (Isaiah, Adam-Live, etc.)
+    `SELECT id, name, starting_bankroll, daily_risk_pct, paper, paper_temp, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor = 1 AND id != 1 ORDER BY id ASC`
   )
 
   const result = await Promise.all(bettors.map(async u => {

@@ -247,9 +247,28 @@ the formula legitimately suggests large fractions.
 
 ## Risk Management
 
+### Protection Rules (implemented Apr 23, 2026 — Opus analysis)
+
+Five rules derived from backtesting the Apr 22 -$641 loss. Implemented in
+`scripts/live/ksBets.js` (Rules A/B/C/D) and `scripts/live/liveMonitor.js`
+(Rule E). Simulation: Apr 22 -$641 → +$5.58 under all 5 rules.
+
+| Rule | Description | Location |
+|------|-------------|----------|
+| **A** | Ban NO bets where `market_mid ≥ 65 AND model_prob ≤ 0.75` — market already prices the event as likely | `ksBets.js` filter |
+| **B** | Per-pitcher capital-at-risk cap at **2% of bankroll** (~$20/$1k) — prevents $300-500 concentrations on one pitcher | `ksBets.js` post-sizing |
+| **C** | Skip `strike=3` markets — structurally mispriced by K-first models | `ksBets.js` filter |
+| **D** | Require YES `model_prob ≥ 0.30` — 0.25 was too loose, 0-for-14 at model_prob < 0.25 historically | `ksBets.js` filter |
+| **E** | Auto-halt live trading after **-15% daily drawdown** (net across all bets) | `liveMonitor.js` main loop |
+
+Rule B trade-off: at 2% it significantly limits upside on winning days (+$3,681 → +$1,479 on Apr 21). Consider raising to 5% if Rules A/C/D alone provide adequate protection after 50+ bets of sample.
+
 ### Daily Loss Limit
-Not currently automated — monitor manually. Rule: if daily P&L reaches -10%
-of bankroll, stop betting for the day and review model outputs.
+Automated — `DAILY_LOSS_LIMIT` env var (default $500). Tracked in `_dailyLoss`
+variable in `liveMonitor.js`. Live trading stops immediately when hit.
+
+Rule E extends this: -15% net drawdown halt also stops new bets. Whichever
+triggers first wins.
 
 ### Correlated Kelly (Pitcher-Level Cap)
 When multiple K-prop thresholds have edge for the same pitcher, total
