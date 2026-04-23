@@ -18,7 +18,7 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { getAuthHeaders, placeOrder, getMarketPrice } from '../../lib/kalshi.js'
+import { getAuthHeaders, placeOrder, cancelOrder, getOrder, getMarketPrice } from '../../lib/kalshi.js'
 import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
 import { notifyLiveBet, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
@@ -304,6 +304,83 @@ async function sendDailyReport() {
   }, await getAllWebhooks(db))
 }
 
+// ── T-45 pre-game order management ───────────────────────────────────────────
+//
+// Called for each Preview game when first pitch is ≤45 min away.
+// Checks all resting maker orders for that game:
+//   - Already filled → update DB status, done
+//   - Still resting  → cancel, re-price at current market, place taker if edge holds
+// This runs at most once per game (guarded by a Set in the caller scope).
+
+const _managedGames = new Set()
+
+async function managePreGameOrders(game) {
+  if (_managedGames.has(game.id)) return
+  _managedGames.add(game.id)
+
+  const restingBets = await db.all(
+    `SELECT * FROM ks_bets
+      WHERE bet_date = ? AND order_status = 'resting' AND result IS NULL
+        AND (pitcher_id = ? OR pitcher_id = ?)`,
+    [TODAY, game.pitcher_home_id, game.pitcher_away_id],
+  )
+  if (!restingBets.length) return
+
+  console.log(`\n[live] T-45 order check: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
+
+  for (const bet of restingBets) {
+    if (!bet.order_id || !bet.ticker) continue
+    try {
+      const order = await getOrder(bet.order_id)
+      const filled = order?.status === 'filled' || Number(order?.remaining_count ?? order?.count) === 0
+
+      if (filled) {
+        await db.run(`UPDATE ks_bets SET order_status='filled' WHERE id=?`, [bet.id])
+        console.log(`  ✓ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — filled at maker price`)
+        continue
+      }
+
+      // Not filled — cancel and re-evaluate at current market price
+      await cancelOrder(bet.order_id)
+      console.log(`  ✗ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — not filled, cancelling maker order`)
+
+      const mkt = await getMarketPrice(bet.ticker)
+      if (!mkt) {
+        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
+        console.log(`    → no market data, skipping`)
+        continue
+      }
+
+      const currentAsk = bet.side === 'YES' ? mkt.ask : (1 - mkt.bid)   // fraction 0-1
+      const modelProb  = bet.model_prob ?? 0.5
+      const currentEdge = modelProb - currentAsk
+
+      if (currentEdge < (LIVE_EDGE / 2)) {
+        // Edge evaporated (use half threshold since we're close to game time)
+        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
+        console.log(`    → edge gone (${(currentEdge*100).toFixed(1)}¢ at ${(currentAsk*100).toFixed(0)}¢ ask), skipping`)
+        continue
+      }
+
+      // Edge still good — take the market as a taker order
+      const takerCents = Math.min(99, Math.round(currentAsk * 100) + 1)
+      const contracts  = Math.max(1, Math.round(bet.bet_size ?? 100))
+      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents)
+      const order2     = result?.order ?? result
+      const newOrderId = order2?.order_id ?? null
+      const newStatus  = order2?.status ?? 'placed'
+
+      await db.run(
+        `UPDATE ks_bets SET order_id=?, fill_price=?, order_status=?, market_mid=? WHERE id=?`,
+        [newOrderId, takerCents, newStatus, Math.round(currentAsk * 100), bet.id],
+      )
+      console.log(`    → TAKER fallback placed ${contracts}c @ ${takerCents}¢  edge=${(currentEdge*100).toFixed(1)}¢  id=${newOrderId}`)
+    } catch (err) {
+      console.error(`  [T-45] error for ${bet.pitcher_name}: ${err.message}`)
+    }
+  }
+}
+
 // ── Main monitor loop ─────────────────────────────────────────────────────────
 
 async function main() {
@@ -422,7 +499,16 @@ async function main() {
         ])
         const state = lsRes.data.abstractGameState
 
-        if (state === 'Preview') continue    // not started
+        if (state === 'Preview') {
+          // T-45: check resting maker orders for this game
+          if (LIVE && game.game_time) {
+            const minsToGame = (new Date(game.game_time) - Date.now()) / 60000
+            if (minsToGame <= 45 && minsToGame > 0) {
+              await managePreGameOrders(game)
+            }
+          }
+          continue
+        }
 
         // ── Game just went Final — settle + Discord ───────────────────────────
         if (state === 'Final') {

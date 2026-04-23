@@ -16,7 +16,7 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { toKalshiAbbr, getAuthHeaders, placeOrder, getBalance as getKalshiBalance } from '../../lib/kalshi.js'
+import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, getOrder, getBalance as getKalshiBalance } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -363,16 +363,19 @@ async function logEdges() {
           const askCents   = e.side === 'YES'
             ? Math.min(99, Math.round(mid + halfSpread))
             : Math.min(99, Math.round(100 - mid + halfSpread))
+          // Post 1¢ below ask = maker order (75% fee discount vs taker)
+          // This rests on the book; liveMonitor cancels + takes market at T-45min if unfilled
+          const makerCents = Math.max(1, askCents - 1)
           const contracts  = Math.max(1, Math.round(e._face))
 
-          const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, askCents, creds)
+          const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, makerCents, creds)
           const order  = result?.order ?? result
 
           const orderId     = order?.order_id    ?? null
-          const fillPrice   = order?.yes_price   ?? order?.no_price ?? askCents
+          const fillPrice   = order?.yes_price   ?? order?.no_price ?? makerCents
           const filledConts = order?.count       ?? contracts
           const placedAt    = order?.created_time ?? new Date().toISOString()
-          const status      = order?.status      ?? 'placed'
+          const status      = order?.status      ?? 'resting'
 
           await db.run(
             `UPDATE ks_bets SET order_id=?, fill_price=?, filled_at=?, filled_contracts=?, order_status=?, paper=0
@@ -381,7 +384,7 @@ async function logEdges() {
             [orderId, fillPrice, placedAt, filledConts, status, TODAY, e.pitcher, e.strike, e.side, bettor.id, bettor.id],
           )
           ordersPlaced++
-          console.log(`  [kalshi] PLACED ${e.side} ${e.strike}+ ${e.pitcher.padEnd(24)} ${contracts}c @ ${askCents}¢  id=${orderId}`)
+          console.log(`  [kalshi] MAKER  ${e.side} ${e.strike}+ ${e.pitcher.padEnd(24)} ${contracts}c @ ${makerCents}¢ (ask ${askCents}¢)  id=${orderId}`)
         } catch (err) {
           ordersFailed++
           console.error(`  [kalshi] FAILED  ${e.side} ${e.strike}+ ${e.pitcher}: ${err.message}`)
