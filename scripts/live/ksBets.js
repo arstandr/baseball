@@ -16,7 +16,7 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { toKalshiAbbr, getAuthHeaders, placeOrder } from '../../lib/kalshi.js'
+import { toKalshiAbbr, getAuthHeaders, placeOrder, getBalance as getKalshiBalance } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -218,17 +218,34 @@ async function logEdges() {
       await new Promise(r => setTimeout(r, STAGGER_MS))
     }
 
-    // Bankroll = starting + all settled P&L for this user
-    const settledRow = await db.one(
-      `SELECT SUM(pnl) as total FROM ks_bets
-       WHERE result IS NOT NULL AND bet_date < ?
-         AND (user_id = ? OR (user_id IS NULL AND ? IS NULL))`,
-      [TODAY, bettor.id, bettor.id],
-    )
-    const bankroll    = (bettor.starting_bankroll ?? STARTING_BANKROLL) + Number(settledRow?.total || 0)
-    const riskPct     = bettor.daily_risk_pct ?? DAILY_RISK_PCT
+    const riskPct = bettor.daily_risk_pct ?? DAILY_RISK_PCT
+    const isLive  = bettor.paper === 0
+
+    // For live accounts, pull actual Kalshi balance as the bankroll source of truth.
+    // This guarantees we never size bets beyond what's actually in the account.
+    let bankroll
+    if (isLive) {
+      try {
+        const creds = bettor.kalshi_key_id
+          ? { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
+          : {}
+        const kb = await getKalshiBalance(creds)
+        bankroll = kb.balance_usd
+        console.log(`[ks-bets] ${bettor.name} · Kalshi balance: $${bankroll.toFixed(2)}`)
+      } catch (err) {
+        console.error(`[ks-bets] ${bettor.name} · Kalshi balance fetch failed: ${err.message} — skipping bets`)
+        continue
+      }
+    } else {
+      // Paper/shadow accounts use computed bankroll (no real money involved)
+      const settledRow = await db.one(
+        `SELECT SUM(pnl) as total FROM ks_bets WHERE result IS NOT NULL AND bet_date < ? AND user_id = ?`,
+        [TODAY, bettor.id],
+      )
+      bankroll = (bettor.starting_bankroll ?? STARTING_BANKROLL) + Number(settledRow?.total || 0)
+    }
+
     const dailyBudget = bankroll * riskPct
-    const isLive      = bettor.paper === 0
 
     // Size each bet proportionally, then enforce hard budget cap by taking
     // highest-edge bets first and stopping once the budget is spent.
