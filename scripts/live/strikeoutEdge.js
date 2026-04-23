@@ -782,13 +782,15 @@ async function main() {
       const { kpct: oppKpct, source: kpctSource } =
         await fetchOpponentKpct(oppTeam, TODAY, meta.hand, game.id, lineupsCache)
       const adjFactor = oppKpct / LEAGUE_K_PCT
-      // Only apply opp adj when the mismatch is extreme (|adj-1|>0.15).
-      // Backtest: adj adds noise on moderate cases, genuine signal on extremes.
-      // Only apply opp adj when the mismatch is extreme (|adj-1|>0.28).
-      // Backtest (2025 + 2024 OOS): 0.28 threshold is the calibrated optimum.
-      // At 0.15 (original): adj added noise, Brier 0.1664.
-      // At 0.28: adj selectivity helps, Brier 0.1649 (2025), confirmed in 2024 OOS.
-      const effectiveAdj = Math.abs(adjFactor - 1.0) > 0.28 ? adjFactor : 1.0
+      // Official lineup K% (from game_lineups) = real signal, apply continuously with soft cap.
+      // Team-average fallback = noisy, keep 0.28 extreme-only gate (calibrated 2024-2025 OOS).
+      let effectiveAdj
+      if (kpctSource.startsWith('lineup')) {
+        // Soft cap ±15% to prevent outlier single-game lineup distortions
+        effectiveAdj = Math.max(0.85, Math.min(1.15, adjFactor))
+      } else {
+        effectiveAdj = Math.abs(adjFactor - 1.0) > 0.28 ? adjFactor : 1.0
+      }
 
       // Park factor (improvement 1)
       const parkFactor = getParkFactor(game.team_home)
@@ -803,7 +805,7 @@ async function main() {
 
       const lambda    = lambdaBase * effectiveAdj * parkFactor * weatherMult * umpFactor
 
-      const adjStr = ` | opp=${(oppKpct*100).toFixed(1)}% [${kpctSource}] ×${adjFactor.toFixed(2)}${effectiveAdj === 1.0 ? '(ignored<28%)' : ''}`
+      const adjStr = ` | opp=${(oppKpct*100).toFixed(1)}% [${kpctSource}] ×${adjFactor.toFixed(2)}→${effectiveAdj.toFixed(2)}`
       const parkStr = ` | park×${parkFactor.toFixed(2)}(${game.team_home})`
       const wxStr   = weatherMult !== 1.0 ? ` | wx:${weatherNote}` : ''
       const umpStr  = umpName ? ` | ump=${umpName}(×${umpFactor.toFixed(2)})` : ' | ump=TBD'
@@ -937,7 +939,7 @@ async function main() {
           side:        e.side,
           edge:        e.edge,
         }))
-        const kellyResults = correlatedKellyDivide(kellyInputs)
+        const kellyResults = correlatedKellyDivide(kellyInputs, true)  // morning bets post as maker orders
 
         for (let i = 0; i < pitcherEdgesThisGame.length; i++) {
           const e = pitcherEdgesThisGame[i]

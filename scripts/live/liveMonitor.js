@@ -183,7 +183,8 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
   if (LIVE) {
     // Real order — Kalshi expects contracts (integer) and price (cents)
     const price = side === 'YES' ? Math.round(marketMid) : Math.round(100 - marketMid)
-    const contracts = Math.max(1, Math.round(betSize))  // 1 contract = $1 face value
+    // contracts = face value / fill price per contract (betSize is dollars of notional, not contract count)
+    const contracts = Math.max(1, Math.round(betSize / (price / 100)))
     try {
       await placeOrder(ticker, side.toLowerCase(), contracts, price)
       console.log(`  [LIVE ORDER] ${pitcherName} ${strike}+ ${side} ${contracts}c @ ${price}¢`)
@@ -255,7 +256,8 @@ async function settleAndNotifyGame(game, boxData) {
     const hit = actualKs >= bet.strike
     const won = bet.side === 'YES' ? hit : !hit
     const p   = bet.market_mid != null ? bet.market_mid / 100 : bet.model_prob
-    const pnl = won ? bet.bet_size * (1 - p) : -bet.bet_size * p
+    const KALSHI_FEE = 0.07
+    const pnl = won ? bet.bet_size * (1 - p) * (1 - KALSHI_FEE * p) : -bet.bet_size * p
 
     await db.run(
       `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=?`,
@@ -360,7 +362,7 @@ async function manageRestingOrders(game) {
 
         const flipAsk     = bet.side === 'YES' ? (mkt.no_ask ?? Math.round(noMid * 100 + 1)) : (mkt.yes_ask ?? Math.round(yesMid * 100 + 1))
         const makerCents  = Math.max(1, flipAsk - 1)
-        const contracts   = Math.max(1, Math.round(bet.bet_size ?? 100))
+        const contracts   = Math.max(1, Math.round((bet.bet_size ?? 100) / flipPrice))
         const result      = await placeOrder(bet.ticker, flipSide.toLowerCase(), contracts, makerCents)
         const newOrder    = result?.order ?? result
         const newOrderId  = newOrder?.order_id ?? null
