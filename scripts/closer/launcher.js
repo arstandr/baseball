@@ -128,11 +128,8 @@ async function checkForUpdates() {
     await writeUpdate(remote.slice(0, 7), msg)
     await writeHeartbeat('restarting', { reason: 'code update', commit: remote.slice(0, 7) })
 
-    console.log('[closer] Update applied -- relaunching...')
-    const child = spawn(process.execPath, ['scripts/closer/launcher.js'], {
-      cwd: ROOT, stdio: 'inherit', detached: true,
-    })
-    child.unref()
+    // Exit 0 -- the bat file loops on clean exit to relaunch with new code
+    console.log('[closer] Update applied -- restarting...')
     process.exit(0)
   } catch (err) {
     console.error('[closer] update check failed:', err.message)
