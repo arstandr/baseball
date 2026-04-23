@@ -62,14 +62,16 @@ export function createApp() {
 
   // Static assets that aren't behind auth (css/js shipped to the browser).
   // The login page's /style.css and friends must be reachable without a session.
-  app.use('/style.css', express.static(path.join(PUBLIC_DIR, 'style.css')))
-  app.use('/app.js', express.static(path.join(PUBLIC_DIR, 'app.js')))
+  const noCache = { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate') }
+  app.use('/style.css', express.static(path.join(PUBLIC_DIR, 'style.css'), noCache))
+  app.use('/app.js',    express.static(path.join(PUBLIC_DIR, 'app.js'),    noCache))
 
   // Gated API.
   app.use('/api', requireAuth, apiRouter)
 
   // Gated dashboard HTML.
   app.get('/', requireAuth, (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'))
   })
 
