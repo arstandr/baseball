@@ -1383,17 +1383,36 @@ router.get('/ks/recent-starts/:pitcher_id', wrap(async (req, res) => {
 // ------------------------------------------------------------------
 // GET /api/ks/bankroll
 // Running bankroll series (one point per day, pre-game bets only).
+// Supports ?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=
 // ------------------------------------------------------------------
 router.get('/ks/bankroll', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['result IS NOT NULL', 'live_bet = 0', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
+  const where = clauses.join(' AND ')
+
+  // Always fetch all rows up to 'from' to compute correct starting bankroll
+  let startingBalance = STARTING_BANKROLL
+  if (from) {
+    const prior = await db.all(
+      `SELECT SUM(COALESCE(pnl,0)) AS prior_pnl FROM ks_bets WHERE result IS NOT NULL AND live_bet=0 AND paper=0 AND bet_date < ?`,
+      [from]
+    )
+    startingBalance = STARTING_BANKROLL + Number(prior[0]?.prior_pnl || 0)
+  }
+
   const rows = await db.all(
     `SELECT bet_date, SUM(COALESCE(pnl, 0)) AS day_pnl, COUNT(*) AS bets,
             SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
             SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses
-     FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0
+     FROM ks_bets WHERE ${where}
      GROUP BY bet_date ORDER BY bet_date ASC`,
+    args
   )
-  let running = STARTING_BANKROLL
+  let running = startingBalance
   const series = rows.map(r => {
     const pnl = Number(r.day_pnl || 0)
     running += pnl
@@ -1413,6 +1432,12 @@ router.get('/ks/bankroll', wrap(async (req, res) => {
 // GET /api/ks/monthly
 // ------------------------------------------------------------------
 router.get('/ks/monthly', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
   const rows = await db.all(
     `SELECT substr(bet_date,1,7) AS ym,
             COUNT(*)                                             AS bets,
@@ -1421,8 +1446,9 @@ router.get('/ks/monthly', wrap(async (req, res) => {
             SUM(COALESCE(pnl,0))                                AS pnl,
             SUM(COALESCE(capital_at_risk, bet_size))            AS wagered,
             AVG(CASE WHEN result IS NOT NULL THEN edge END)     AS avg_edge
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0
+     FROM ks_bets WHERE ${clauses.join(' AND ')}
      GROUP BY ym ORDER BY ym ASC`,
+    args
   )
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
   let running = STARTING_BANKROLL
@@ -1451,9 +1477,16 @@ router.get('/ks/monthly', wrap(async (req, res) => {
 // GET /api/ks/weekly
 // ------------------------------------------------------------------
 router.get('/ks/weekly', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
   const rows = await db.all(
     `SELECT bet_date, COALESCE(pnl,0) AS pnl, result, bet_size
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0 ORDER BY bet_date ASC`,
+     FROM ks_bets WHERE ${clauses.join(' AND ')} ORDER BY bet_date ASC`,
+    args
   )
   if (!rows.length) return res.json([])
 
@@ -1656,12 +1689,20 @@ router.delete('/users/:name', wrap(async (req, res) => {
 
 // ------------------------------------------------------------------
 // GET /api/ks/stats — full performance statistics
+// Supports ?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=
 // ------------------------------------------------------------------
 router.get('/ks/stats', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
   const rows = await db.all(
     `SELECT bet_date, result, pnl, bet_size, edge, model_prob, side
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0
+     FROM ks_bets WHERE ${clauses.join(' AND ')}
      ORDER BY bet_date ASC, id ASC`,
+    args
   )
   if (!rows.length) {
     return res.json({
@@ -2059,6 +2100,19 @@ router.get('/ks/testing', wrap(async (req, res) => {
   }
 
   res.json({ calibration, lambda_accuracy, thresholds, model_notes })
+}))
+
+// GET /api/agent/status — The Closer heartbeat
+router.get('/agent/status', wrap(async (req, res) => {
+  const rows = await db.all(`SELECT key, value, updated_at FROM agent_heartbeat WHERE key IN ('closer','closer_last_update')`)
+  const byKey = {}
+  for (const r of rows) {
+    try { byKey[r.key] = { ...JSON.parse(r.value), updated_at: r.updated_at } } catch { byKey[r.key] = { updated_at: r.updated_at } }
+  }
+  res.json({
+    heartbeat:   byKey['closer']             || null,
+    last_update: byKey['closer_last_update'] || null,
+  })
 }))
 
 export default router
