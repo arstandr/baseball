@@ -25,46 +25,23 @@ import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { toKalshiAbbr, getAuthHeaders } from '../../lib/kalshi.js'
+import { NB_R, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
+import { parseArgs } from '../../lib/cli-args.js'
 
-const args         = process.argv.slice(2)
-const dateArg      = args.includes('--date')      ? args[args.indexOf('--date')      + 1] : null
-const TODAY        = dateArg || new Date().toISOString().slice(0, 10)
-const POLL_SEC     = args.includes('--interval')  ? Number(args[args.indexOf('--interval')  + 1]) : 120
-const MIN_EDGE     = args.includes('--min-edge')  ? Number(args[args.indexOf('--min-edge')  + 1]) : 0.06
+const opts     = parseArgs({
+  date:     { default: new Date().toISOString().slice(0, 10) },
+  interval: { type: 'number', default: 120 },
+  minEdge:  { flag: 'min-edge', type: 'number', default: 0.06 },
+})
+const TODAY    = opts.date
+const POLL_SEC = opts.interval
+const MIN_EDGE = opts.minEdge
 
 const MLB_BASE    = 'https://statsapi.mlb.com/api/v1'
 const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
-const NB_R         = 30
-const TTO_PENALTY  = 0.85   // K rate multiplier once into 3rd time through order (~inning 6+)
+const TTO_PENALTY   = 0.85   // K rate multiplier once into 3rd time through order (~inning 6+)
 const TTO_BF_THRESH = 18    // batters faced threshold for TTO3
-
-// ── NB distribution (same as strikeoutEdge.js) ───────────────────────────────
-
-function nbCDF(mu, r, k) {
-  if (mu <= 0) return k >= 0 ? 1 : 0
-  const p_success = r / (r + mu)
-  const q = 1 - p_success
-  let term = Math.pow(p_success, r)
-  let sum = term
-  for (let i = 1; i <= Math.floor(k); i++) {
-    term *= (i - 1 + r) / i * q
-    sum += term
-    if (sum >= 1 - 1e-10) return 1
-  }
-  return Math.min(1, sum)
-}
-
-function pAtLeast(mu, n) {
-  return Math.max(0, 1 - nbCDF(mu, NB_R, n - 1))
-}
-
-function ipToDecimal(ip) {
-  const n = Number(ip)
-  const whole = Math.floor(n)
-  const frac = Math.round((n % 1) * 10)
-  return whole + frac / 3
-}
 
 // ── MLB live data ─────────────────────────────────────────────────────────────
 
@@ -331,20 +308,25 @@ async function pollOnce(games, priors) {
         // Log as paper bet (live_bet=1). UNIQUE constraint prevents re-logging
         // same pitcher/strike/side across multiple polls.
         try {
+          const mid100  = marketMid * 100
+          const hs      = (mkt.spread ?? 4) / 200
+          const fill    = side_str === 'YES' ? marketMid + hs : (1 - marketMid) + hs
+          const capRisk = Math.round(100 * fill * 100) / 100  // 100 contracts × fill
           await db.run(
             `INSERT OR IGNORE INTO ks_bets
                (bet_date, logged_at, pitcher_name, pitcher_id, game, team, strike, side,
-                model_prob, market_mid, edge, lambda, ticker, bet_size, paper, live_bet)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,100,1,1)`,
+                model_prob, market_mid, edge, lambda, ticker, bet_size, capital_at_risk, spread, paper, live_bet)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,100,?,?,1,1)`,
             [
               TODAY, new Date().toISOString(),
               starter.name, starter.id,
               label,
               side === 'home' ? game.team_home : game.team_away,
               mkt.strike, side_str,
-              modelProb, marketMid * 100,
+              modelProb, mid100,
               bestEdge, live.lambda_remaining,
               mkt.ticker,
+              capRisk, mkt.spread ?? 4,
             ],
           )
         } catch { /* non-fatal — UNIQUE conflict means already logged */ }

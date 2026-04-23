@@ -43,13 +43,13 @@ async function gatherData() {
 
   // Today's bets (all, including unsettled)
   const todayBets = await db.all(
-    `SELECT * FROM ks_bets WHERE bet_date = ? ORDER BY edge DESC`,
+    `SELECT * FROM ks_bets WHERE bet_date = ? AND live_bet = 0 ORDER BY edge DESC`,
     [TODAY],
   )
 
   // Last 30 days settled — for rolling stats
   const rollingBets = await db.all(
-    `SELECT * FROM ks_bets WHERE result IS NOT NULL AND bet_date >= date(?, '-30 days') ORDER BY bet_date DESC`,
+    `SELECT * FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days') ORDER BY bet_date DESC`,
     [TODAY],
   )
 
@@ -62,7 +62,7 @@ async function gatherData() {
             AVG(edge) as avg_edge,
             AVG(CASE WHEN result IS NOT NULL THEN ABS(actual_ks - strike) END) as avg_lambda_err
      FROM ks_bets
-     WHERE result IS NOT NULL AND bet_date >= date(?, '-30 days')
+     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
      GROUP BY pitcher_name
      HAVING bets >= 2
      ORDER BY pnl DESC`,
@@ -77,7 +77,7 @@ async function gatherData() {
             SUM(pnl) as pnl,
             AVG(edge) as avg_edge
      FROM ks_bets
-     WHERE result IS NOT NULL AND bet_date >= date(?, '-30 days')
+     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
      GROUP BY side`,
     [TODAY],
   )
@@ -96,7 +96,7 @@ async function gatherData() {
        SUM(pnl) as pnl,
        AVG(edge) as avg_edge
      FROM ks_bets
-     WHERE result IS NOT NULL AND bet_date >= date(?, '-30 days')
+     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
      GROUP BY bucket
      ORDER BY avg_edge`,
     [TODAY],
@@ -114,18 +114,38 @@ async function gatherData() {
        SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
        SUM(pnl) as pnl
      FROM ks_bets
-     WHERE result IS NOT NULL AND bet_date >= date(?, '-30 days')
+     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
      GROUP BY conf_level`,
     [TODAY],
   )
 
-  return { todayBets, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats }
+  // Side × edge bucket cross-tab — catches "YES at 5-6¢ is 0-for-14" patterns
+  const sideEdgeBuckets = await db.all(
+    `SELECT
+       side,
+       CASE
+         WHEN edge < 0.06 THEN '5-6¢'
+         WHEN edge < 0.08 THEN '6-8¢'
+         WHEN edge < 0.10 THEN '8-10¢'
+         ELSE '10¢+'
+       END as bucket,
+       COUNT(*) as bets,
+       SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
+       SUM(pnl) as pnl
+     FROM ks_bets
+     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
+     GROUP BY side, bucket
+     ORDER BY side, avg(edge)`,
+    [TODAY],
+  )
+
+  return { todayBets, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats, sideEdgeBuckets }
 }
 
 // ── Claude analysis ───────────────────────────────────────────────────────────
 
 async function analyzeWithClaude(data) {
-  const { todayBets, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats } = data
+  const { todayBets, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats, sideEdgeBuckets } = data
 
   const todaySettled = todayBets.filter(b => b.result != null)
   const todayWins    = todaySettled.filter(b => b.result === 'win')
@@ -159,6 +179,9 @@ ${confStats.map(c => `- ${c.conf_level}: ${c.wins}W/${c.bets - c.wins}L (${((c.w
 
 ## SIDE PERFORMANCE (30 days)
 ${sideStats.map(s => `- ${s.side}: ${s.wins}W/${s.bets - s.wins}L (${((s.wins/s.bets)*100).toFixed(0)}% WR)  avg edge ${(s.avg_edge*100).toFixed(1)}¢  ${pnlSign(s.pnl)}`).join('\n')}
+
+## YES vs NO BY EDGE BUCKET (30 days)
+${sideEdgeBuckets.map(r => `- ${r.side} ${r.bucket}: ${r.wins}W/${r.bets - r.wins}L (${((r.wins/r.bets)*100).toFixed(0)}% WR)  ${pnlSign(r.pnl)}`).join('\n')}
 
 ## TOP PITCHERS BY P&L (30 days, 2+ bets)
 ${pitcherStats.slice(0, 8).map(p => `- ${p.pitcher_name}: ${p.wins}W/${p.bets - p.wins}L  ${pnlSign(p.pnl)}  avg edge ${(p.avg_edge*100).toFixed(1)}¢`).join('\n')}

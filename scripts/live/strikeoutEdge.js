@@ -57,12 +57,20 @@ import { fetchGameWeather } from '../../lib/weather.js'
 import { fetchUmpiresForGames } from './fetchUmpire.js'
 import { getUmpireFactor } from '../../lib/umpireFactors.js'
 import { correlatedKellyDivide } from '../../lib/kelly.js'
+import {
+  NB_R, LEAGUE_K9, LEAGUE_AVG_IP, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, LEAGUE_WHIFF_PCT,
+  nbCDF, pAtLeast, ipToDecimal,
+} from '../../lib/strikeout-model.js'
+import { parseArgs } from '../../lib/cli-args.js'
 
-const args = process.argv.slice(2)
-const dateArg  = args.includes('--date')     ? args[args.indexOf('--date')     + 1] : null
-const TODAY    = dateArg || new Date().toISOString().slice(0, 10)
-const MIN_EDGE = args.includes('--min-edge') ? Number(args[args.indexOf('--min-edge') + 1]) : 0.05
-const JSON_OUT = args.includes('--json')   // emit [EDGES_JSON]...[/EDGES_JSON] block for ksBets.js
+const opts     = parseArgs({
+  date:    { default: new Date().toISOString().slice(0, 10) },
+  minEdge: { flag: 'min-edge', type: 'number', default: 0.08 },
+  json:    { type: 'boolean' },
+})
+const TODAY    = opts.date
+const MIN_EDGE = opts.minEdge
+const JSON_OUT = opts.json  // emit [EDGES_JSON]...[/EDGES_JSON] block for ksBets.js
 
 // ── Edge threshold constants ─────────────────────────────────────────────────
 // Spread-adjusted: require edge > spread/2 + MIN_EDGE_FLOOR
@@ -72,21 +80,17 @@ const JSON_OUT = args.includes('--json')   // emit [EDGES_JSON]...[/EDGES_JSON] 
 // sitting in the noise band of the bid/ask.
 const MIN_EDGE_FLOOR = 0.04   // absolute floor (4¢) regardless of spread
 
+// ── YES/NO asymmetric filters (calibrated from Apr 20-21 live data) ──────────
+// YES bets at model_prob < 0.25 went 0-for-14 across 180 bets — market prices
+// low-prob YES correctly; we were betting into efficient pricing.
+// NO side wins at 74% vs YES at 35% — require stricter entry on YES.
+const YES_MIN_PROB = 0.25    // YES bets require model_prob ≥ 25%
+const YES_MIN_EDGE = 0.12    // YES bets require edge ≥ 12¢
+const NO_MIN_EDGE  = 0.08    // NO bets require edge ≥ 8¢ (vs old global 5¢)
+
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
 const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
-const LEAGUE_K9       = 8.8   // MLB avg K/9 for starters
-const LEAGUE_AVG_IP   = 5.2   // MLB avg IP/start
-const LEAGUE_K_PCT    = 0.22  // MLB avg batter K% vs starters
-const LEAGUE_PA_PER_IP = 4.44  // League avg PA/IP for starters
-const LEAGUE_WHIFF_PCT = 0.25  // League avg Savant Whiff% (swings&misses/swings) for starters
-                                // NB: Savant Whiff% is per-swing; FanGraphs SwStr% is per-pitch
-                                // K% ≈ Whiff% × (LEAGUE_K_PCT / LEAGUE_WHIFF_PCT) ≈ Whiff% × 0.88
-const NB_R            = 30   // Negative binomial dispersion (Var = μ + μ²/r)
-                             // Calibrated from 4,255 starts (2023-2025): actual var/Poisson var = 1.17
-                             // → implied r = mean_λ / (var_ratio - 1) ≈ 30. Re-run calibration yearly.
 
 // ── Venue coordinates (for weather fetch) ────────────────────────────────────
 // Lat/lng for each home team's stadium. Used to fetch OpenWeather forecast.
@@ -140,41 +144,6 @@ const TEAM_ABBR_TO_MLB_ID = {
   CHW: 145, MIA: 146, NYY: 147, MIL: 158,
 }
 
-// ── IP helpers ────────────────────────────────────────────────────────────────
-
-function ipToDecimal(ip) {
-  const n = Number(ip)
-  const whole = Math.floor(n)
-  const frac = Math.round((n % 1) * 10)
-  return whole + frac / 3
-}
-
-// ── Negative Binomial distribution ───────────────────────────────────────────
-
-/**
- * Negative Binomial CDF — P(K ≤ k) with mean μ and dispersion r.
- * Uses the stable PMF recursion: P(K=i) = P(K=i-1) × (i-1+r)/i × μ/(μ+r)
- * When r → ∞ this converges to Poisson(μ).
- */
-function nbCDF(mu, r, k) {
-  if (mu <= 0) return k >= 0 ? 1 : 0
-  const p_success = r / (r + mu)       // P(one "success") in NB parameterisation
-  const q = 1 - p_success              // μ / (μ + r)
-
-  let term = Math.pow(p_success, r)    // P(K=0) = p_success^r
-  let sum = term
-  for (let i = 1; i <= Math.floor(k); i++) {
-    term *= (i - 1 + r) / i * q
-    sum += term
-    if (sum >= 1 - 1e-10) return 1
-  }
-  return Math.min(1, sum)
-}
-
-/** P(K ≥ n) under NB(μ, r) */
-function pAtLeast(mu, n) {
-  return Math.max(0, 1 - nbCDF(mu, NB_R, n - 1))
-}
 
 // ── Savant / pitcher_statcast lookup ─────────────────────────────────────────
 
@@ -203,29 +172,27 @@ async function loadStatcastData(season) {
   return _statcastCache
 }
 
-// ── Career K% loader (historical_pitcher_stats 2023-2025) ────────────────────
+// ── Career K% loader (pitcher_statcast 2023-2025) ────────────────────────────
+// Reads from pitcher_statcast (same table as career velo) — no separate table needed.
+// k9 derived as: k_pct × (pa / ip) × 9   (K/9 = K% × BF/IP × 9)
+// avg_ip left null — falls back to pitcher_recent_starts or LEAGUE_AVG_IP at runtime.
+// Weight: 2025=0.50, 2024=0.30, 2023=0.20
 
 let _careerCache = null  // Map<pitcher_id, { k_pct, k9, avg_ip, seasons }>
 
 async function loadCareerData() {
   if (_careerCache) return _careerCache
 
-  // Season-average K% per pitcher (AVG of rolling L5 across the season ≈ true season K%)
-  // Weight: 2025=0.50, 2024=0.30, 2023=0.20
   const SEASON_WEIGHTS = { 2025: 0.50, 2024: 0.30, 2023: 0.20 }
 
   const rows = await db.all(
-    `SELECT pitcher_id, season,
-            AVG(k_pct_l5) as k_pct,
-            AVG(k9_l5) as k9,
-            AVG(avg_innings_l5) as avg_ip,
-            COUNT(*) as n
-       FROM historical_pitcher_stats
-      WHERE season >= 2023
-      GROUP BY pitcher_id, season`,
+    `SELECT player_id AS pitcher_id, season, k_pct, ip, pa,
+            CASE WHEN ip > 0 AND pa > 0 THEN k_pct * (CAST(pa AS REAL) / ip) * 9 ELSE NULL END AS k9
+       FROM pitcher_statcast
+      WHERE season BETWEEN 2023 AND 2025
+        AND k_pct IS NOT NULL AND ip IS NOT NULL`,
   )
 
-  // Aggregate into per-pitcher weighted career stats
   const byPitcher = new Map()
   for (const r of rows) {
     const id = String(r.pitcher_id)
@@ -235,24 +202,23 @@ async function loadCareerData() {
 
   _careerCache = new Map()
   for (const [id, seasons] of byPitcher) {
-    let totalW = 0, wK9 = 0, wKpct = 0, wIp = 0
+    let totalW = 0, wK9 = 0, wKpct = 0
     const usedSeasons = []
     for (const s of seasons) {
       const w = SEASON_WEIGHTS[s.season]
-      if (!w) continue
+      if (!w || s.k_pct == null) continue
       totalW  += w
-      wK9     += w * s.k9
       wKpct   += w * s.k_pct
-      wIp     += w * s.avg_ip
+      if (s.k9 != null) wK9 += w * s.k9
       usedSeasons.push(s.season)
     }
     if (totalW > 0) {
       _careerCache.set(id, {
         k_pct:   wKpct / totalW,
-        k9:      wK9   / totalW,
-        avg_ip:  wIp   / totalW,
+        k9:      totalW > 0 && wK9 > 0 ? wK9 / totalW : null,
+        avg_ip:  null,   // falls back to pitcher_recent_starts or LEAGUE_AVG_IP
         seasons: usedSeasons,
-        weight:  totalW,   // sum of weights (< 1.0 if missing some seasons)
+        weight:  totalW,
       })
     }
   }
@@ -916,8 +882,12 @@ async function main() {
         // Skip markets with too little volume — price isn't real
         const tooThin = mkt.volume != null && mkt.volume < 10
 
-        const hasEdge       = !isLocked && !noCapKills && !tooThin && edge.bestEdge >= edgeThreshold
-        const hasRawEdge    = !isLocked && !hasEdge && (noCapKills || tooThin || edge.bestEdge >= MIN_EDGE)
+        // ── YES/NO asymmetric quality filter ─────────────────────────────────
+        const sideMinEdge   = edge.side === 'YES' ? YES_MIN_EDGE : NO_MIN_EDGE
+        const yesFiltered   = edge.side === 'YES' && modelProb < YES_MIN_PROB
+        const hasEdge       = !isLocked && !noCapKills && !tooThin && !yesFiltered
+                              && edge.bestEdge >= Math.max(edgeThreshold, sideMinEdge)
+        const hasRawEdge    = !isLocked && !hasEdge && (noCapKills || tooThin || yesFiltered || edge.bestEdge >= MIN_EDGE)
 
         console.log(
           `    ${mkt.strike}+ Ks: model=${(modelProb*100).toFixed(1)}%` +
@@ -926,7 +896,7 @@ async function main() {
           ` | edge(${edge.side})=${(edge.bestEdge*100).toFixed(1)}¢` +
           ` | thr=${(edgeThreshold*100).toFixed(1)}¢` +
           ` | vol=${mkt.volume != null ? Math.round(mkt.volume) : 'n/a'}` +
-          (isLocked ? ' [locked]' : hasEdge ? ' ← EDGE' : noCapKills ? ' [NO-cap>80¢]' : tooThin ? ' [thin<10]' : hasRawEdge ? ' [spread-kills-edge]' : '')
+          (isLocked ? ' [locked]' : hasEdge ? ' ← EDGE' : noCapKills ? ' [NO-cap>80¢]' : tooThin ? ' [thin<10]' : yesFiltered ? ' [YES-prob<25%]' : hasRawEdge ? ' [spread-kills-edge]' : '')
         )
 
         if (hasEdge) {

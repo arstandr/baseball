@@ -108,6 +108,10 @@ echo "── 6. Log edges to ks_bets ──"
 node scripts/live/ksBets.js log --date "$DATE"
 
 echo ""
+echo "── 7. Snapshot Kalshi F5 opening prices ──"
+node scripts/live/collectF5Lines.js --date "$DATE" || true
+
+echo ""
 echo "════════════════════════════════════════"
 echo " Morning run done."
 echo ""

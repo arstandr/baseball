@@ -45,7 +45,7 @@ function attachUserToReq(req, res, next) {
   const payload = verifyToken(token)
   if (payload?.name) {
     req.session = req.session || {}
-    req.session.user = { name: payload.name }
+    req.session.user = { id: payload.id ?? null, name: payload.name }
   } else {
     req.session = req.session || {}
     req.session.user = null
@@ -105,12 +105,13 @@ export function registerAuthRoutes(app) {
     }
     try {
       const user = await db.one(
-        `SELECT name FROM users WHERE name = ? AND pin = ? COLLATE NOCASE`,
+        `SELECT id, name FROM users WHERE name = ? AND pin = ? COLLATE NOCASE`,
         [String(username).trim(), String(pin).trim()],
       )
       if (!user) return res.status(401).json({ error: 'Invalid username or PIN' })
 
       const token = signToken({
+        id:   user.id,
         name: user.name,
         exp:  Date.now() + COOKIE_MAX_AGE,
       })

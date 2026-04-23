@@ -275,6 +275,74 @@ managing their starter's workload.
 
 ---
 
+## Code Structure — Shared Libraries
+
+As of April 21, 2026 all shared logic is extracted into `lib/`. Scripts must
+import from there; no duplication allowed.
+
+| Module | What it provides |
+|--------|-----------------|
+| `lib/strikeout-model.js` | `NB_R`, `LEAGUE_*` constants, `nbCDF`, `pAtLeast`, `ipToDecimal` |
+| `lib/cli-args.js` | `parseArgs(schema)` — unified CLI flag parser (type-safe, camelCase) |
+| `lib/utils.js` | `safeJson`, `todayISO`, `roundTo`, `winRate`, `fmtShort` |
+| `lib/analytics.js` | `computeModeSummary`, `computeCalibration`, `computeBankrollRollup`, `runningBankroll` |
+| `lib/mlb-live.js` | `mlbFetch` (25s TTL cache), `extractStarterFromBoxscore` |
+| `lib/db.js` | Turso/libSQL client |
+| `lib/kalshi.js` | `getAuthHeaders`, `toKalshiAbbr` |
+| `lib/kelly.js` | `correlatedKellyDivide` |
+| `lib/parkFactors.js` | Park K-rate multipliers |
+| `lib/umpireFactors.js` | HP umpire K% multipliers |
+| `lib/weather.js` | Game-day weather multipliers |
+
+`server/api.js` was slimmed from ~1,933 → ~1,735 lines by removing the six
+local definitions now provided by the lib modules.
+
+---
+
+## Live Calibration — Apr 20, 2026 (73 bets settled)
+
+First real-money day with the full system. Summary of findings:
+
+| Segment | W/L | WR | P&L |
+|---------|-----|----|-----|
+| All bets | 37/36 | 51% | +$879 |
+| Medium confidence only | 29/23 | 56% | +$900 |
+| Edge ≥ 0.15 | 15/5 | 75% | +$782 |
+| Edge ≥ 0.10 | 21/12 | 64% | +$904 |
+| NO side | 19/7 | 73% | +$606 |
+| YES side | 18/29 | 38% | +$274 |
+| Edge 0.05–0.10 | 16/24 | 40% | -$24 |
+
+**Key findings from first 73 bets:**
+
+1. **YES bets at low model_prob are the drag** — YES bets with model_prob
+   10–20% went 0-for-9 (0% actual). The model is overestimating low-end
+   YES probability, likely because the Kalshi market already prices very-low-K
+   outcomes efficiently and the spread/vig absorbs our edge.
+
+2. **Edge ≥ 0.15 is the sweet spot** — 75% WR, $782 P&L from only 20 bets.
+   The 0.05–0.10 bucket is consistently unprofitable; these bets sit inside
+   or near the half-spread vig band.
+
+3. **NO side significantly outperforms YES** — 73% vs 38%. The model
+   systematically underestimates when K totals fall short of threshold, meaning
+   NO edges are more reliable than YES edges at the same raw edge size.
+
+4. **Low-confidence bets hurt ROI** — dropping low-confidence to medium-only
+   eliminates 21 bets with 38% WR. Given the small sample, this directional
+   signal is worth watching.
+
+5. **Brier score 0.281** (73 predictions) — higher than the 0.183 OOS target,
+   but small-sample variance is large. Revisit after 500+ bets.
+
+**Recommended adjustments (provisional — n=73):**
+- Raise minimum edge from `0.05` to `0.10` in `strikeoutEdge.js`
+- Consider separate YES/NO edge floors: YES requires ≥ 0.15, NO requires ≥ 0.10
+- Do not auto-bet YES when model_prob < 0.25 (0-for-14 at these prob levels)
+- Medium-confidence gate is already implemented; confirm it's being applied consistently
+
+---
+
 ## Improvement Roadmap
 
 ### Near-Term (Next Season)

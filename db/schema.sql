@@ -629,8 +629,119 @@ CREATE INDEX IF NOT EXISTS idx_mcl_date ON model_config_log(run_date);
 -- Seeded from ENV on first start; manageable via web admin or addUser.js.
 -- ========================================================================
 CREATE TABLE IF NOT EXISTS users (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  pin        TEXT NOT NULL,
-  created_at TEXT DEFAULT (datetime('now'))
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  name               TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  pin                TEXT NOT NULL,
+  created_at         TEXT DEFAULT (datetime('now')),
+  -- Betting profile (populated when user joins the betting system)
+  active_bettor      INTEGER DEFAULT 0,     -- 1 = participates in daily bets
+  starting_bankroll  REAL    DEFAULT 5000,  -- their starting paper/real bankroll ($)
+  daily_risk_pct     REAL    DEFAULT 0.20,  -- fraction of bankroll to risk per day
+  paper              INTEGER DEFAULT 1,     -- 1 = paper only, 0 = live trading
+  kalshi_key_id      TEXT,                  -- Kalshi API key ID (RSA auth)
+  kalshi_private_key TEXT,                  -- Kalshi RSA private key (PEM format)
+  discord_webhook    TEXT                   -- personal Discord webhook for EOD reports
+);
+
+-- Add betting profile columns to users (safe no-ops if columns already exist)
+ALTER TABLE users ADD COLUMN active_bettor      INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN starting_bankroll  REAL    DEFAULT 5000;
+ALTER TABLE users ADD COLUMN daily_risk_pct     REAL    DEFAULT 0.20;
+ALTER TABLE users ADD COLUMN paper              INTEGER DEFAULT 1;
+ALTER TABLE users ADD COLUMN kalshi_key_id      TEXT;
+ALTER TABLE users ADD COLUMN kalshi_private_key TEXT;
+ALTER TABLE users ADD COLUMN discord_webhook    TEXT;
+
+-- Add user_id to ks_bets (safe no-op if column already exists)
+ALTER TABLE ks_bets ADD COLUMN user_id INTEGER REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS idx_ks_bets_user ON ks_bets(user_id);
+
+-- Add model tag + OI to ks_bets
+ALTER TABLE ks_bets ADD COLUMN model TEXT DEFAULT 'mlb_strikeouts';
+ALTER TABLE ks_bets ADD COLUMN open_interest INTEGER;
+CREATE INDEX IF NOT EXISTS idx_ks_bets_model ON ks_bets(model);
+
+-- ========================================================================
+-- nba_games: one row per NBA game (today's slate)
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS nba_games (
+  id          TEXT PRIMARY KEY,   -- e.g. '26APR25DENMIN'
+  game_date   TEXT NOT NULL,
+  game_time   TEXT,               -- HH:MM ET
+  team_away   TEXT NOT NULL,      -- e.g. 'DEN'
+  team_home   TEXT NOT NULL,      -- e.g. 'MIN'
+  kalshi_event TEXT,              -- e.g. 'KXNBATOTAL-26APR25DENMIN'
+  season      TEXT DEFAULT '2025-26',
+  status      TEXT DEFAULT 'scheduled',
+  actual_total INTEGER            -- filled at settlement
+);
+CREATE INDEX IF NOT EXISTS idx_nba_games_date ON nba_games(game_date);
+
+-- ========================================================================
+-- nba_team_stats: rolling team ratings (OffRtg, DefRtg, Pace)
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS nba_team_stats (
+  team_id     TEXT NOT NULL,
+  stat_date   TEXT NOT NULL,
+  window      TEXT NOT NULL,      -- 'season' | 'last10'
+  season_type TEXT DEFAULT 'Playoffs',
+  off_rtg     REAL,
+  def_rtg     REAL,
+  pace        REAL,
+  pts_pg      REAL,
+  opp_pts_pg  REAL,
+  PRIMARY KEY (team_id, stat_date, window)
+);
+CREATE INDEX IF NOT EXISTS idx_nba_team_stats ON nba_team_stats(team_id, stat_date);
+
+-- ========================================================================
+-- nba_ref_assignments: referee → foul adjustment per game
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS nba_ref_assignments (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  game_date             TEXT NOT NULL,
+  game_id               TEXT NOT NULL,
+  away_team             TEXT NOT NULL,
+  home_team             TEXT NOT NULL,
+  ref_id                TEXT NOT NULL,
+  ref_name              TEXT,
+  career_fouls_per_game REAL,
+  career_fta_per_game   REAL,
+  career_pts_per_game   REAL,
+  foul_adj              REAL DEFAULT 0,
+  fetched_at            TEXT DEFAULT (datetime('now')),
+  UNIQUE(game_date, game_id, ref_id)
+);
+CREATE INDEX IF NOT EXISTS idx_nba_refs_date ON nba_ref_assignments(game_date);
+
+-- ========================================================================
+-- nba_player_3pt_stats: player 3PT shooting stats (season + last5)
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS nba_player_3pt_stats (
+  player_id   TEXT NOT NULL,
+  player_name TEXT NOT NULL,
+  stat_date   TEXT NOT NULL,
+  window      TEXT NOT NULL,
+  season_type TEXT DEFAULT 'Playoffs',
+  team_id     TEXT,
+  gp          INTEGER,
+  minutes_pg  REAL,
+  fg3a_pg     REAL,
+  fg3m_pg     REAL,
+  fg3_pct     REAL,
+  PRIMARY KEY (player_id, stat_date, window)
+);
+CREATE INDEX IF NOT EXISTS idx_nba_3pt_player ON nba_player_3pt_stats(player_id, stat_date);
+
+-- ========================================================================
+-- nba_opp_3pt_defense: how many 3s each team allows per game
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS nba_opp_3pt_defense (
+  team_id     TEXT NOT NULL,
+  stat_date   TEXT NOT NULL,
+  season_type TEXT DEFAULT 'Playoffs',
+  opp_fg3a_pg REAL,
+  opp_fg3m_pg REAL,
+  opp_fg3_pct REAL,
+  PRIMARY KEY (team_id, stat_date)
 );

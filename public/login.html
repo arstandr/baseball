@@ -108,9 +108,17 @@
       font-size: 11px;
       letter-spacing: 0.5px;
     }
+    .refresh-btn {
+      position: fixed; top: 14px; right: 14px;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+      color: #8b949e; border-radius: 8px; padding: 6px 12px;
+      font-size: 13px; cursor: pointer; transition: background 0.15s;
+    }
+    .refresh-btn:hover { background: rgba(255,255,255,0.1); color: #c9d1d9; }
   </style>
 </head>
 <body>
+  <button class="refresh-btn" onclick="location.reload(true)">↺ Refresh</button>
   <div class="card">
     <div class="logo">Money Tree 2.0</div>
     <div class="tagline">Strikeout Intelligence</div>

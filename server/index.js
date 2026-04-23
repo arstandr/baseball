@@ -19,6 +19,7 @@ import 'dotenv/config'
 import { sessionMiddleware, registerAuthRoutes, requireAuth, seedUsersFromEnv } from './auth.js'
 import * as db from '../lib/db.js'
 import apiRouter from './api.js'
+import { startScheduler } from './scheduler.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -90,6 +91,7 @@ export function startServer() {
   return app.listen(port, async () => {
     await db.migrate()
     await seedUsersFromEnv()
+    startScheduler()
     console.log(`[mlbie] dashboard listening on http://localhost:${port}`)
   })
 }

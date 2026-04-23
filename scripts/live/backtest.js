@@ -41,62 +41,41 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
+import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
 
-const args      = process.argv.slice(2)
-const SEASON    = args.includes('--season')    ? Number(args[args.indexOf('--season')    + 1]) : 2025
-const MIN_STARTS = args.includes('--min-starts') ? Number(args[args.indexOf('--min-starts') + 1]) : 5
-const VERBOSE   = args.includes('--verbose')
+import { parseArgs } from '../../lib/cli-args.js'
 
 // ── Tuning parameters (override via CLI for parameter search) ────────────────
-// --bb-threshold  : BB% breakeven (default 0.09; lower = more pitchers penalized)
+// --bb-threshold  : BB% breakeven (default 1.0 = disabled; rolling game log BB% too noisy)
 // --bb-slope      : BB% penalty slope (default 1.5; higher = steeper penalty)
 // --shrink7       : P(7+) shrinkage multiplier (default 0.97)
 // --shrink8       : P(8+) shrinkage multiplier (default 0.95)
 // --shrink9       : P(9+) shrinkage multiplier (default 0.93)
-// --adj-threshold : Opp adj selectivity threshold (default 0.15)
-// BB_THRESHOLD: default 1.0 = effectively disabled (rolling game log BB% too noisy)
-// BB% penalty is only applied in strikeoutEdge.js using Savant season BB% (reliable)
-const BB_THRESHOLD  = args.includes('--bb-threshold')  ? Number(args[args.indexOf('--bb-threshold')  + 1]) : 1.0
-const BB_SLOPE      = args.includes('--bb-slope')      ? Number(args[args.indexOf('--bb-slope')      + 1]) : 1.5
-// Shrinkage: calibrated from 2025 backtest, validated on 2024 OOS
-const SHRINK7       = args.includes('--shrink7')       ? Number(args[args.indexOf('--shrink7')       + 1]) : 0.97
-const SHRINK8       = args.includes('--shrink8')       ? Number(args[args.indexOf('--shrink8')       + 1]) : 0.95
-const SHRINK9       = args.includes('--shrink9')       ? Number(args[args.indexOf('--shrink9')       + 1]) : 0.93
-// ADJ_THRESHOLD: only apply opp adj when |adj-1| > 0.28 (calibrated optimum)
-const ADJ_THRESHOLD = args.includes('--adj-threshold') ? Number(args[args.indexOf('--adj-threshold') + 1]) : 0.28
+// --adj-threshold : Opp adj selectivity threshold (calibrated optimum = 0.28)
+const opts = parseArgs({
+  season:       { type: 'number', default: 2025 },
+  minStarts:    { flag: 'min-starts',    type: 'number',  default: 5 },
+  verbose:      { type: 'boolean' },
+  bbThreshold:  { flag: 'bb-threshold',  type: 'number',  default: 1.0 },
+  bbSlope:      { flag: 'bb-slope',      type: 'number',  default: 1.5 },
+  shrink7:      { flag: 'shrink7',       type: 'number',  default: 0.97 },
+  shrink8:      { flag: 'shrink8',       type: 'number',  default: 0.95 },
+  shrink9:      { flag: 'shrink9',       type: 'number',  default: 0.93 },
+  adjThreshold: { flag: 'adj-threshold', type: 'number',  default: 0.28 },
+  bankroll:     { type: 'number', default: 5000 },
+})
+const SEASON        = opts.season
+const MIN_STARTS    = opts.minStarts
+const VERBOSE       = opts.verbose
+const BB_THRESHOLD  = opts.bbThreshold
+const BB_SLOPE      = opts.bbSlope
+const SHRINK7       = opts.shrink7
+const SHRINK8       = opts.shrink8
+const SHRINK9       = opts.shrink9
+const ADJ_THRESHOLD = opts.adjThreshold
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
 
-// ── Constants (must match strikeoutEdge.js) ───────────────────────────────────
-
-const LEAGUE_K_PCT     = 0.22
-const LEAGUE_PA_PER_IP = 4.44
-const NB_R             = 30
-
-// ── NB distribution ───────────────────────────────────────────────────────────
-
-function nbCDF(mu, r, k) {
-  if (mu <= 0) return k >= 0 ? 1 : 0
-  const p_success = r / (r + mu)
-  const q = 1 - p_success
-  let term = Math.pow(p_success, r)
-  let sum = term
-  for (let i = 1; i <= Math.floor(k); i++) {
-    term *= (i - 1 + r) / i * q
-    sum += term
-    if (sum >= 1 - 1e-10) return 1
-  }
-  return Math.min(1, sum)
-}
-
-function pAtLeast(mu, n) {
-  return Math.max(0, 1 - nbCDF(mu, NB_R, n - 1))
-}
-
-function ipToDecimal(ip) {
-  const n = Number(ip)
-  return Math.floor(n) + Math.round((n % 1) * 10) / 3
-}
 
 // ── Career loader (2023-2024 only — no 2025 to avoid look-ahead) ─────────────
 
@@ -504,7 +483,7 @@ async function main() {
 
   // ── Bankroll Simulation ────────────────────────────────────────────────────
 
-  const STARTING_BANKROLL = args.includes('--bankroll') ? Number(args[args.indexOf('--bankroll') + 1]) : 5000
+  const STARTING_BANKROLL = opts.bankroll ?? 5000
   const KELLY_FRACTION    = 0.25   // fractional Kelly multiplier
   const KELLY_CAP         = 0.05   // max fraction of bankroll per bet
   const MIN_BET           = 25     // floor per bet in dollars
