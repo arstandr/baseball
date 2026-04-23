@@ -9,6 +9,7 @@ const state = {
   lastRefresh:    null,
   currentUser:    null,
   currentUserId:  null,
+  liveBettorId:   null,   // ID of the live (non-paper) bettor; drives all data fetches
   liveTimer:      null,
   countdownTimer: null,
 }
@@ -205,16 +206,15 @@ async function refreshAll() {
 }
 
 async function refreshHero() {
-  const [s, bettors] = await Promise.all([
-    fetchJson('/api/ks/summary').catch(() => null),
-    fetchJson('/api/ks/bettors').catch(() => []),
-  ])
-  if (!s) return
-
-  // Use the live (non-paper) bettor as hero source of truth.
-  // paper=false means real orders are being placed (Adam-Live id=284).
-  // Isaiah is paper=true (dry mode) so he won't be picked here.
+  // Fetch bettors first to get liveBettorId, then fetch summary scoped to that user.
+  // This avoids a chicken-and-egg where the first summary call has no user filter.
+  const bettors = await fetchJson('/api/ks/bettors').catch(() => [])
   const liveBettor = (bettors || []).find(b => !b.paper)
+  if (liveBettor) state.liveBettorId = liveBettor.id  // cache so all data fetches use the right user
+
+  const uidParam = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+  const s = await fetchJson(`/api/ks/summary${uidParam}`).catch(() => null)
+  if (!s) return
 
   const heroBalance  = liveBettor?.bankroll       ?? s.kalshi_balance ?? s.bankroll
   const heroStart    = liveBettor?.start_bankroll  ?? s.start_bankroll
@@ -472,7 +472,8 @@ async function refreshTodayView() {
 }
 
 async function refreshDates() {
-  const datesWithBets = await fetchJson('/api/ks/dates').catch(() => [])
+  const uidParam = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+  const datesWithBets = await fetchJson(`/api/ks/dates${uidParam}`).catch(() => [])
   const today = new Date().toISOString().slice(0, 10)
   const dates = datesWithBets.includes(today) ? datesWithBets : [today, ...datesWithBets]
   if (!state.selectedDate || !dates.includes(state.selectedDate)) {
@@ -498,7 +499,8 @@ async function refreshDates() {
 
 async function loadDay(date) {
   stopLivePolling()
-  const data = await fetchJson(`/api/ks/daily?date=${date}`).catch(err => { console.error('[loadDay] fetch failed:', err); return null })
+  const uidParam = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
+  const data = await fetchJson(`/api/ks/daily?date=${date}${uidParam}`).catch(err => { console.error('[loadDay] fetch failed:', err); return null })
   const list  = document.getElementById('pitcher-list')
   const empty = document.getElementById('empty-today')
   const hdr   = document.getElementById('day-header')
