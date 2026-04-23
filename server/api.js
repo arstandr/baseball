@@ -97,9 +97,11 @@ function fmtShort(d) {
   return `${m[d.getUTCMonth()]} ${d.getUTCDate()}`
 }
 
-// Returns SQL fragment + args to scope ks_bets to the logged-in user.
+// Returns SQL fragment + args to scope ks_bets to a user.
+// Honors ?user_id= override (for bettor drawer — viewing another user's bets).
 function userFilter(req) {
-  const uid = req.session?.user?.id ?? null
+  const override = req.query?.user_id ? Number(req.query.user_id) : null
+  const uid = override || (req.session?.user?.id ?? null)
   if (uid == null) return { clause: '', args: [] }
   return { clause: `AND user_id = ?`, args: [uid] }
 }

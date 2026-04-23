@@ -302,13 +302,14 @@ async function refreshBettorCards() {
 
 async function buildBettorDrawer(drawer, b) {
   const today = new Date().toISOString().slice(0, 10)
-  const [liveBetsData] = await Promise.all([
-    fetchJson(`/api/ks/live-bets?date=${today}`).catch(() => ({ pitchers: [], totals: { bets: 0 } })),
+  const uid = b.id
+  const [dailyData, liveBetsData] = await Promise.all([
+    fetchJson(`/api/ks/daily?date=${today}&user_id=${uid}`).catch(() => ({ pitchers: [] })),
+    fetchJson(`/api/ks/live-bets?date=${today}&user_id=${uid}`).catch(() => ({ pitchers: [], totals: { bets: 0 } })),
   ])
 
-  // Pre-game bets from already-loaded daily data
   const KALSHI_FEE = 0.07
-  const allBets = _dailyPitchers.flatMap(p => p.bets.map(bet => ({ ...bet, pitcher_name: p.pitcher_name })))
+  const allBets = (dailyData.pitchers || []).flatMap(p => p.bets.map(bet => ({ ...bet, pitcher_name: p.pitcher_name })))
   const wins    = allBets.filter(x => x.result === 'win').length
   const losses  = allBets.filter(x => x.result === 'loss').length
   const pending = allBets.filter(x => !x.result).length
@@ -691,13 +692,13 @@ function buildPitcherCard(p) {
   const avgEdgeCents = p.bets.reduce((sum, b) => sum + (b.edge != null ? Number(b.edge) * 100 : 0), 0) / p.bets.length
 
   const signalItems = [
-    lambdaStr  ? `<div class="pc-sig"><span>Exp. Ks</span><b>${lambdaStr}</b></div>` : '',
-    k9Str      ? `<div class="pc-sig"><span>K/9</span><b>${k9Str}</b></div>` : '',
-    whiffStr   ? `<div class="pc-sig"><span>Whiff%</span><b>${whiffStr}</b></div>` : '',
-    `<div class="pc-sig"><span>Avg edge</span><b class="good">+${avgEdgeCents.toFixed(1)}¢</b></div>`,
-    `<div class="pc-sig"><span>Park</span><b>${parkStr}</b></div>`,
-    `<div class="pc-sig"><span>Umpire</span><b>${umpStr}</b></div>`,
-    veloStr    ? `<div class="pc-sig"><span>Velo trend</span><b>${veloStr}</b></div>` : '',
+    lambdaStr  ? `<div class="pc-sig"><span>Expected Ks</span><b>${lambdaStr}</b></div>` : '',
+    k9Str      ? `<div class="pc-sig"><span>Ks per 9 inn.</span><b>${k9Str}</b></div>` : '',
+    whiffStr   ? `<div class="pc-sig"><span>Swing &amp; Miss</span><b>${whiffStr}</b></div>` : '',
+    `<div class="pc-sig"><span>Our Edge</span><b class="good">+${avgEdgeCents.toFixed(1)}¢</b></div>`,
+    `<div class="pc-sig"><span>Ballpark</span><b>${parkStr}</b></div>`,
+    `<div class="pc-sig"><span>Home Plate Ump</span><b>${umpStr}</b></div>`,
+    veloStr    ? `<div class="pc-sig"><span>Fastball Trend</span><b>${veloStr}</b></div>` : '',
     `<div class="pc-sig"><span>Weather</span><b>${wxStr}</b></div>`,
   ].filter(Boolean).join('')
 
@@ -743,8 +744,8 @@ function buildPitcherCard(p) {
     const winCents   = mid != null ? (b.side === 'YES' ? (100 - mid) - halfSpread : mid - halfSpread) : null
     const wager  = fillCents != null && face != null ? fmt$(face * fillCents / 100) : '—'
     const potWin = winCents  != null && face != null ? fmt$(face * winCents / 100 * (1 - KALSHI_FEE)) : '—'
-    const edgeStr = b.edge != null ? `+${(b.edge * 100).toFixed(1)}¢` : ''
-    const midStr  = b.market_mid != null ? `${b.market_mid}¢ mid` : ''
+    const edgeStr = b.edge != null ? `Edge: +${(b.edge * 100).toFixed(1)}¢` : ''
+    const midStr  = b.market_mid != null ? `Market: ${b.market_mid}¢` : ''
 
     const direction = b.side === 'YES'
       ? `<strong>${b.strike}+</strong> Ks YES`
@@ -769,19 +770,23 @@ function buildPitcherCard(p) {
     // Order confirmation block — shown when a real order has been placed
     let orderConfirm = ''
     if (b.order_id) {
-      const shortId = b.order_id.length > 16 ? '…' + b.order_id.slice(-12) : b.order_id
-      const fillDisp = b.fill_price != null ? `${Math.round(b.fill_price)}¢/c` : ''
-      const contsDisp = b.filled_contracts != null ? `${b.filled_contracts}c` : ''
+      const contracts = b.filled_contracts ?? b.bet_size
+      const price = b.fill_price != null ? Math.round(b.fill_price) : b.market_mid != null ? Math.round(b.market_mid) : null
+      const cost = contracts != null && price != null ? fmt$(contracts * price / 100) : null
       const timeDisp = b.filled_at ? fmtTs(b.filled_at) : ''
       const statusCls = b.order_status === 'filled' ? 'good' : b.order_status === 'canceled' ? 'bad' : ''
+      const detail = [
+        contracts != null ? `${contracts} contracts` : null,
+        price != null ? `@ ${price}¢ each` : null,
+        cost ? `= ${cost}` : null,
+      ].filter(Boolean).join(' ')
       orderConfirm = `<div class="pc-order-confirm">
-        <span class="pc-order-chip ${statusCls}">✓ LIVE BET</span>
-        <span class="pc-order-detail">${[fillDisp, contsDisp].filter(Boolean).join(' · ')}</span>
-        <span class="pc-order-id" title="${esc(b.order_id)}">#${shortId}</span>
+        <span class="pc-order-chip ${statusCls}">✓ Real Bet Placed</span>
+        <span class="pc-order-detail">${detail}</span>
         ${timeDisp ? `<span class="pc-order-time">${timeDisp}</span>` : ''}
       </div>`
     } else if (b.paper === 0) {
-      orderConfirm = `<div class="pc-order-confirm"><span class="pc-order-chip">Placed</span></div>`
+      orderConfirm = `<div class="pc-order-confirm"><span class="pc-order-chip">Real Bet Placed</span></div>`
     }
 
     // Live money badge — shown when real money is on this bet (separate user)
@@ -798,9 +803,14 @@ function buildPitcherCard(p) {
       } else if (lv.result === 'loss') {
         livePnlHtml = `<span class="pc-live-pnl loss">${fmt$(lv.pnl)}</span>`
       }
+      const liveDetail = [
+        contracts != null ? `${contracts} contracts` : null,
+        price ? `@ ${price} each` : null,
+        spent ? `= ${spent}` : null,
+      ].filter(Boolean).join(' ')
       liveBadge = `<div class="pc-live-badge">
-        <span class="pc-live-chip">💵 LIVE</span>
-        <span class="pc-live-detail">${[`${contracts}c`, price, spent].filter(Boolean).join(' · ')}</span>
+        <span class="pc-live-chip">💵 Real Money</span>
+        <span class="pc-live-detail">${liveDetail}</span>
         ${livePnlHtml}
       </div>`
     }
