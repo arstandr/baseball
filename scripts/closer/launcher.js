@@ -148,6 +148,15 @@ async function main() {
   console.log('║   Money Tree 2.0 — Live Monitor    ║')
   console.log('╚════════════════════════════════════╝')
 
+  // Repo is public — strip any embedded token from remote so pulls never need auth
+  try {
+    const remoteUrl = git('remote get-url origin')
+    if (remoteUrl.includes('@github.com')) {
+      execSync('git remote set-url origin https://github.com/arstandr/baseball.git', { cwd: ROOT })
+      console.log('[closer] remote URL updated to public HTTPS (no token needed)')
+    }
+  } catch {}
+
   _currentHash = git('rev-parse HEAD')
   console.log(`[closer] version: ${_currentHash.slice(0, 7)}`)
 
