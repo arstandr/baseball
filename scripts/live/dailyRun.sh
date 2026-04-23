@@ -22,10 +22,12 @@
 set -e
 
 LINEUPS_MODE=false
+MIDDAY_MODE=false
 DATE=""
 SETTLE_MODE=false
 for arg in "$@"; do
   if [ "$arg" = "--lineups" ]; then LINEUPS_MODE=true
+  elif [ "$arg" = "--midday" ]; then MIDDAY_MODE=true
   elif [ "$arg" = "--settle" ]; then SETTLE_MODE=true
   elif [[ "$arg" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then DATE="$arg"
   fi
@@ -51,6 +53,46 @@ if [ "$SETTLE_MODE" = true ]; then
   echo ""
   echo "════════════════════════════════════════"
   echo " EOD done."
+  echo "════════════════════════════════════════"
+  exit 0
+fi
+
+if [ "$MIDDAY_MODE" = true ]; then
+  echo "════════════════════════════════════════"
+  echo " MLBIE Midday Re-scan — $DATE"
+  echo "════════════════════════════════════════"
+
+  echo ""
+  echo "── Fill rate on morning orders ──"
+  node -e "
+    import('../../lib/db.js').then(async db => {
+      const rows = await db.all(
+        \`SELECT order_status, COUNT(*) as n FROM ks_bets
+          WHERE bet_date=? AND live_bet=0 AND order_status IS NOT NULL
+          GROUP BY order_status\`,
+        ['$DATE']
+      )
+      const total = rows.reduce((s, r) => s + Number(r.n), 0)
+      rows.forEach(r => console.log(\`  \${r.order_status}: \${r.n}/\${total} (\${(r.n/total*100).toFixed(0)}%)\`))
+      process.exit(0)
+    }).catch(e => { console.error(e.message); process.exit(1) })
+  "
+
+  echo ""
+  echo "── Refresh recent starts (updated pitch counts) ──"
+  node scripts/live/fetchPitcherRecentStarts.js --date "$DATE"
+
+  echo ""
+  echo "── Re-run edge finder with current market prices ──"
+  node scripts/live/strikeoutEdge.js --date "$DATE" --json
+
+  echo ""
+  echo "── Log any new edges (dedup skips existing orders) ──"
+  node scripts/live/ksBets.js log --date "$DATE"
+
+  echo ""
+  echo "════════════════════════════════════════"
+  echo " Midday re-scan done."
   echo "════════════════════════════════════════"
   exit 0
 fi
@@ -90,6 +132,19 @@ node scripts/live/fetchSchedule.js --date "$DATE" --days 2
 echo ""
 echo "── 2. Pitcher Statcast (Baseball Savant) ──"
 node scripts/live/fetchPitcherStatcast.js
+# Backfill prior seasons if missing (runs fast, idempotent — skips if data already exists)
+PRIOR_YEAR=$(( $(date +%Y) - 1 ))
+PRIOR_COUNT=$(node -e "
+  import('../../lib/db.js').then(db =>
+    db.one('SELECT COUNT(*) as n FROM pitcher_statcast WHERE season = ?', [$PRIOR_YEAR])
+      .then(r => { console.log(r?.n || 0); process.exit(0) })
+  ).catch(() => { console.log(0); process.exit(0) })
+" 2>/dev/null || echo 0)
+if [ "$PRIOR_COUNT" -lt 100 ] 2>/dev/null; then
+  echo "[statcast] backfilling prior seasons..."
+  node scripts/live/fetchPitcherStatcast.js --season $(( PRIOR_YEAR - 1 )) || true
+  node scripts/live/fetchPitcherStatcast.js --season $PRIOR_YEAR || true
+fi
 
 echo ""
 echo "── 3. Team K% splits (live 2026) ──"

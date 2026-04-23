@@ -91,6 +91,10 @@ export async function startScheduler() {
   }
   // NOTE: liveMonitor is managed by The Closer (Windows agent) — not started here
   // NBA morning run disabled
+  if (hm >= 12 * 60 + 30 && hm < 15 * 60 + 30) {  // between 12:30pm and 3:30pm — midday pass missed?
+    console.log('[scheduler] startup catch-up: MLB midday re-scan')
+    mlbRun('MLB midday re-scan (catch-up)', '--midday')
+  }
   if (hm >= 15 * 60 + 30) {  // past 3:30pm — lineup refresh missed?
     console.log('[scheduler] startup catch-up: MLB lineup refresh')
     mlbRun('MLB lineup refresh (catch-up)', '--lineups')
@@ -102,6 +106,9 @@ export async function startScheduler() {
   }, { timezone: 'America/New_York' })
 
   // NBA morning run disabled
+
+  // 12:30 PM ET — midday re-scan: fresh market prices, fill rate check, new edges
+  cron.schedule('30 12 * * *', () => mlbRun('MLB midday re-scan', '--midday'), { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh
   cron.schedule('30 15 * * *', () => mlbRun('MLB lineup refresh', '--lineups'), { timezone: 'America/New_York' })
@@ -117,5 +124,5 @@ export async function startScheduler() {
     mlbRun('MLB settle + EOD', '--settle')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 9:00am MLB+monitor | 9:30am NBA | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
+  console.log('[scheduler] daily jobs (ET): 9:00am morning run | 12:30pm midday re-scan | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
 }
