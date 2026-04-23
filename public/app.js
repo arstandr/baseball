@@ -211,10 +211,10 @@ async function refreshHero() {
   ])
   if (!s) return
 
-  // Use Adam's live (Kalshi) account as the source of truth for hero numbers.
-  // The live bettor is identified by having a kalshi_balance (real account).
-  // Fall back to summary data if no live bettor found.
-  const liveBettor = (bettors || []).find(b => b.kalshi_balance != null)
+  // Use the live (non-paper) bettor as hero source of truth.
+  // paper=false means real orders are being placed (Adam-Live id=284).
+  // Isaiah is paper=true (dry mode) so he won't be picked here.
+  const liveBettor = (bettors || []).find(b => !b.paper)
 
   const heroBalance  = liveBettor?.bankroll       ?? s.kalshi_balance ?? s.bankroll
   const heroStart    = liveBettor?.start_bankroll  ?? s.start_bankroll
