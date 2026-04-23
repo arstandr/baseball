@@ -1,127 +1,189 @@
 # install-windows.ps1 — The Closer: One-Click Windows Installer
-# Run as Administrator in PowerShell:
-#   Right-click PowerShell → "Run as Administrator"
-#   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-#   .\install-windows.ps1
+# ─────────────────────────────────────────────────────────────
+# HOW TO RUN:
+#   1. Open PowerShell as Administrator (right-click → Run as Administrator)
+#   2. Paste and run this line first:
+#        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+#   3. Then run:
+#        .\install-windows.ps1
 
-$REPO_URL  = "https://github.com/arstandr/baseball.git"
+$REPO_URL    = "https://github.com/arstandr/baseball.git"
 $INSTALL_DIR = "$env:USERPROFILE\MoneyTree"
-$NODE_VERSION = "20"
+$TEMP        = "$env:TEMP\closer-install"
 
+function Write-Step($msg) { Write-Host "`n── $msg" -ForegroundColor Cyan }
+function Write-OK($msg)   { Write-Host "  ✓ $msg" -ForegroundColor Green }
+function Write-Warn($msg) { Write-Host "  ⚠ $msg" -ForegroundColor Yellow }
+function Write-Fail($msg) { Write-Host "  ✗ $msg" -ForegroundColor Red }
+
+Clear-Host
 Write-Host ""
-Write-Host "╔════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║         THE CLOSER  ⚾              ║" -ForegroundColor Green
-Write-Host "║   Money Tree 2.0 — Live Monitor    ║" -ForegroundColor Green
-Write-Host "╚════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "  ╔════════════════════════════════════╗" -ForegroundColor Green
+Write-Host "  ║         THE CLOSER  ⚾              ║" -ForegroundColor Green
+Write-Host "  ║   Money Tree 2.0 — Live Monitor    ║" -ForegroundColor Green
+Write-Host "  ╚════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 
-# ── 1. Install Node.js ────────────────────────────────────────────────────────
-Write-Host "── Checking Node.js…" -ForegroundColor Cyan
-$nodeInstalled = $null
-try { $nodeInstalled = node --version 2>$null } catch {}
+New-Item -ItemType Directory -Force -Path $TEMP | Out-Null
 
-if (-not $nodeInstalled) {
-    Write-Host "  Installing Node.js v$NODE_VERSION via winget…" -ForegroundColor Yellow
-    winget install OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
-    Write-Host "  Node.js installed." -ForegroundColor Green
-} else {
-    Write-Host "  Node.js already installed: $nodeInstalled" -ForegroundColor Green
+# ── 1. Node.js ────────────────────────────────────────────────────────────────
+Write-Step "Checking Node.js..."
+
+$nodeOk = $false
+try {
+    $v = & node --version 2>$null
+    if ($v -match "v\d+") { $nodeOk = $true; Write-OK "Node.js already installed: $v" }
+} catch {}
+
+if (-not $nodeOk) {
+    Write-Warn "Node.js not found — downloading installer..."
+    $nodeMsi = "$TEMP\node-installer.msi"
+    $nodeUrl = "https://nodejs.org/dist/v20.19.0/node-v20.19.0-x64.msi"
+    Write-Host "  Downloading from $nodeUrl" -ForegroundColor Gray
+    try {
+        Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeMsi -UseBasicParsing
+        Write-Host "  Running installer (this takes ~30 seconds)..." -ForegroundColor Gray
+        Start-Process msiexec.exe -ArgumentList "/i `"$nodeMsi`" /quiet /norestart" -Wait
+        # Refresh PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("PATH","User")
+        $v = & node --version 2>$null
+        if ($v) { Write-OK "Node.js installed: $v" }
+        else     { Write-Fail "Node.js install failed — please install manually from nodejs.org"; exit 1 }
+    } catch {
+        Write-Fail "Download failed: $_"
+        Write-Host "  Please download Node.js manually from: https://nodejs.org/en/download" -ForegroundColor Yellow
+        exit 1
+    }
 }
 
-# ── 2. Install Git ────────────────────────────────────────────────────────────
-Write-Host "── Checking Git…" -ForegroundColor Cyan
-$gitInstalled = $null
-try { $gitInstalled = git --version 2>$null } catch {}
+# ── 2. Git ────────────────────────────────────────────────────────────────────
+Write-Step "Checking Git..."
 
-if (-not $gitInstalled) {
-    Write-Host "  Installing Git via winget…" -ForegroundColor Yellow
-    winget install Git.Git --silent --accept-package-agreements --accept-source-agreements
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
-    Write-Host "  Git installed." -ForegroundColor Green
-} else {
-    Write-Host "  Git already installed: $gitInstalled" -ForegroundColor Green
+$gitOk = $false
+try {
+    $v = & git --version 2>$null
+    if ($v -match "git version") { $gitOk = $true; Write-OK "Git already installed: $v" }
+} catch {}
+
+if (-not $gitOk) {
+    Write-Warn "Git not found — downloading installer..."
+    $gitExe = "$TEMP\git-installer.exe"
+    $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/Git-2.44.0-64-bit.exe"
+    Write-Host "  Downloading from GitHub..." -ForegroundColor Gray
+    try {
+        Invoke-WebRequest -Uri $gitUrl -OutFile $gitExe -UseBasicParsing
+        Write-Host "  Running installer (silent)..." -ForegroundColor Gray
+        Start-Process $gitExe -ArgumentList "/VERYSILENT /NORESTART /NOCANCEL /SP-" -Wait
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("PATH","User") + ";" +
+                    "C:\Program Files\Git\cmd"
+        $v = & git --version 2>$null
+        if ($v) { Write-OK "Git installed: $v" }
+        else     { Write-Fail "Git install failed — please install manually from git-scm.com"; exit 1 }
+    } catch {
+        Write-Fail "Download failed: $_"
+        Write-Host "  Please download Git manually from: https://git-scm.com/download/win" -ForegroundColor Yellow
+        exit 1
+    }
 }
 
-# ── 3. Clone or update repo ───────────────────────────────────────────────────
-Write-Host "── Setting up repo at $INSTALL_DIR…" -ForegroundColor Cyan
+# ── 3. Clone / update repo ────────────────────────────────────────────────────
+Write-Step "Setting up Money Tree repo at $INSTALL_DIR..."
+
 if (Test-Path "$INSTALL_DIR\.git") {
-    Write-Host "  Repo exists — pulling latest…" -ForegroundColor Yellow
-    Set-Location $INSTALL_DIR
-    git pull origin main
+    Write-Warn "Repo already exists — pulling latest code..."
+    Push-Location $INSTALL_DIR
+    & git pull origin main
+    Pop-Location
 } else {
-    Write-Host "  Cloning repo…" -ForegroundColor Yellow
-    git clone $REPO_URL $INSTALL_DIR
-    Set-Location $INSTALL_DIR
+    Write-Host "  Cloning repo..." -ForegroundColor Gray
+    & git clone $REPO_URL $INSTALL_DIR
+    if ($LASTEXITCODE -ne 0) { Write-Fail "Clone failed. Check your internet connection."; exit 1 }
 }
-Write-Host "  Repo ready." -ForegroundColor Green
+Write-OK "Repo ready at $INSTALL_DIR"
 
-# ── 4. Install npm dependencies ───────────────────────────────────────────────
-Write-Host "── Installing dependencies…" -ForegroundColor Cyan
-npm install --quiet
-Write-Host "  Dependencies installed." -ForegroundColor Green
+# ── 4. Copy .env ──────────────────────────────────────────────────────────────
+Write-Step "Setting up credentials..."
 
-# ── 5. Create .env if it doesn't exist ───────────────────────────────────────
-Write-Host "── Checking .env…" -ForegroundColor Cyan
-if (-not (Test-Path ".env")) {
-    Write-Host "  Creating .env — you'll need to fill in your credentials." -ForegroundColor Yellow
+$envSrc = Join-Path $PSScriptRoot ".env"
+$envDst = Join-Path $INSTALL_DIR ".env"
+
+if (Test-Path $envSrc) {
+    Copy-Item $envSrc $envDst -Force
+    Write-OK ".env credentials copied"
+} elseif (Test-Path $envDst) {
+    Write-OK ".env already exists in install dir"
+} else {
+    Write-Warn "No .env file found — creating template..."
     @"
-# Money Tree 2.0 — The Closer
-# Copy your credentials from the Mac .env file
-
 TURSO_DATABASE_URL=
 TURSO_AUTH_TOKEN=
-
-# Kalshi credentials for live trading
-KALSHI_KEY_ID=
-KALSHI_PRIVATE_KEY_PATH=
 LIVE_TRADING=true
-"@ | Out-File -FilePath ".env" -Encoding utf8
-    Write-Host "  .env created. Edit it with your credentials before starting." -ForegroundColor Yellow
-    notepad .env
-    Read-Host "  Press Enter when you've saved your .env file"
-} else {
-    Write-Host "  .env already exists." -ForegroundColor Green
+KALSHI_KEY_ID=
+KALSHI_KEY_PATH=
+DISCORD_WEBHOOK_URL=
+"@ | Out-File -FilePath $envDst -Encoding utf8
+    Write-Host "  Opening .env for editing — fill in your credentials then save and close." -ForegroundColor Yellow
+    Start-Process notepad $envDst -Wait
 }
 
-# ── 6. Create startup batch file ─────────────────────────────────────────────
-Write-Host "── Creating launcher…" -ForegroundColor Cyan
-$launchScript = "$INSTALL_DIR\start-closer.bat"
+# ── 5. Install npm packages ───────────────────────────────────────────────────
+Write-Step "Installing Node.js packages (this takes ~1 minute)..."
+
+Push-Location $INSTALL_DIR
+& npm install --omit=dev 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+if ($LASTEXITCODE -ne 0) { Write-Fail "npm install failed"; exit 1 }
+Pop-Location
+Write-OK "Packages installed"
+
+# ── 6. Create start-closer.bat ───────────────────────────────────────────────
+Write-Step "Creating launcher..."
+
+$bat = "$INSTALL_DIR\start-closer.bat"
 @"
 @echo off
 title The Closer - Money Tree 2.0
 cd /d "$INSTALL_DIR"
 echo.
-echo  Starting The Closer...
+echo  ==========================================
+echo   THE CLOSER  -  Money Tree 2.0
+echo  ==========================================
 echo.
 node scripts/closer/launcher.js
-pause
-"@ | Out-File -FilePath $launchScript -Encoding ascii
-Write-Host "  Launcher created: $launchScript" -ForegroundColor Green
+echo.
+echo  The Closer has stopped. Press any key to close.
+pause > nul
+"@ | Out-File -FilePath $bat -Encoding ascii
+Write-OK "Launcher created"
 
-# ── 7. Create desktop shortcut ────────────────────────────────────────────────
-Write-Host "── Creating desktop shortcut…" -ForegroundColor Cyan
-$desktopPath = [System.Environment]::GetFolderPath("Desktop")
-$shortcutPath = "$desktopPath\The Closer.lnk"
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $launchScript
+# ── 7. Desktop shortcut ───────────────────────────────────────────────────────
+Write-Step "Creating desktop shortcut..."
+
+$desktop  = [System.Environment]::GetFolderPath("Desktop")
+$lnkPath  = "$desktop\The Closer.lnk"
+$shell    = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($lnkPath)
+$shortcut.TargetPath       = $bat
 $shortcut.WorkingDirectory = $INSTALL_DIR
-$shortcut.Description = "The Closer - Money Tree 2.0 Live Monitor"
+$shortcut.Description      = "The Closer - Money Tree 2.0 Live Monitor"
 $shortcut.Save()
-Write-Host "  Desktop shortcut created." -ForegroundColor Green
+Write-OK "Desktop shortcut created: 'The Closer'"
 
-# ── 8. Done ───────────────────────────────────────────────────────────────────
+# ── 8. Cleanup ────────────────────────────────────────────────────────────────
+Remove-Item -Recurse -Force $TEMP -ErrorAction SilentlyContinue
+
+# ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "╔════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║         ✅ INSTALL COMPLETE         ║" -ForegroundColor Green
-Write-Host "╚════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "  ╔════════════════════════════════════╗" -ForegroundColor Green
+Write-Host "  ║       ✅  INSTALL COMPLETE          ║" -ForegroundColor Green
+Write-Host "  ╚════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Double-click 'The Closer' on your desktop to start." -ForegroundColor White
-Write-Host "  The agent will auto-update whenever new code is pushed." -ForegroundColor White
+Write-Host "  The site will show a green dot when it's running."   -ForegroundColor White
 Write-Host ""
 
-$launch = Read-Host "Start The Closer now? (y/n)"
-if ($launch -eq "y" -or $launch -eq "Y") {
-    Start-Process $launchScript
+$go = Read-Host "  Start The Closer now? (y/n)"
+if ($go -match "^[Yy]") {
+    Start-Process $bat
 }
