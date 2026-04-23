@@ -810,13 +810,14 @@ async function renderDaySummary(date, data) {
 
     if (bestcaseCard && bestcaseEl) {
       const hasOpenPositions = livePositions?.length > 0
-      if (data.day_pending > 0 || hasOpenPositions) {
+      const projectedEnd = data.day_pnl + bestCase
+      if (data.day_pending > 0 || hasOpenPositions || bestCase > 0) {
         bestcaseCard.style.display = 'flex'
-        const projectedEnd = data.day_pnl + bestCase
         const sign = projectedEnd >= 0 ? '+' : ''
         bestcaseEl.textContent = sign + fmt$(projectedEnd)
         bestcaseEl.className = `sh-stat-value ${projectedEnd >= 0 ? 'good' : 'bad'}`
-      } else {
+      } else if (bestcaseCard.style.display !== 'flex') {
+        // Only hide if it wasn't already showing a real value
         bestcaseCard.style.display = 'none'
       }
     }
