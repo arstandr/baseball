@@ -281,27 +281,8 @@ async function logEdges() {
       budgetLeft -= e._actualRisk
     }
 
-    // Rule B: Per-pitcher capital-at-risk cap — 2% of bankroll (~$20 on $1,000)
-    // Prevents stacking $300-500 on a single pitcher who underperforms.
-    const PER_PITCHER_CAR_PCT = 0.02
-    const pitcherCarSpent = {}
-    const cappedSized = []
-    for (const e of sized) {
-      const cap   = bankroll * PER_PITCHER_CAR_PCT
-      const soFar = pitcherCarSpent[e.pitcher] || 0
-      const car   = e._face * e._fill
-      if (soFar + car > cap + 0.01) {
-        console.log(`  [Rule B] ${e.pitcher} ${e.strike}+ ${e.side} skipped — pitcher CAR cap $${cap.toFixed(0)} (already $${soFar.toFixed(0)} out)`)
-        continue
-      }
-      pitcherCarSpent[e.pitcher] = soFar + car
-      cappedSized.push(e)
-    }
-    if (sized.length - cappedSized.length > 0)
-      console.log(`[ks-bets] Rule B: capped ${sized.length - cappedSized.length} bet(s) over per-pitcher limit`)
-
     console.log(
-      `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · budget $${dailyBudget.toFixed(0)} (${(riskPct*100).toFixed(0)}%) · ${cappedSized.length} bets · ${isLive ? 'LIVE' : 'paper'}`,
+      `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · budget $${dailyBudget.toFixed(0)} (${(riskPct*100).toFixed(0)}%) · ${sized.length} bets · ${isLive ? 'LIVE' : 'paper'}`,
     )
 
     const now = new Date().toISOString()
@@ -310,7 +291,7 @@ async function logEdges() {
       ? { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
       : {}
 
-    for (const e of cappedSized) {
+    for (const e of sized) {
       const existing = await db.one(
         `SELECT order_id FROM ks_bets
          WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0
@@ -397,7 +378,7 @@ async function logEdges() {
       }
     }
 
-    const totalRisk = cappedSized.reduce((s, e) => s + e._face * e._fill, 0)
+    const totalRisk = sized.reduce((s, e) => s + e._face * e._fill, 0)
     console.log(`[ks-bets] ${bettor.name}: logged ${bettorLogged} · orders ${ordersPlaced} placed / ${ordersFailed} failed · risk $${totalRisk.toFixed(0)} of $${bankroll.toFixed(0)} (${(totalRisk/bankroll*100).toFixed(1)}%)`)
   }
 

@@ -256,7 +256,7 @@ Five rules derived from backtesting the Apr 22 -$641 loss. Implemented in
 | Rule | Description | Location |
 |------|-------------|----------|
 | **A** | Ban NO bets where `market_mid ≥ 65 AND model_prob ≤ 0.75` — market already prices the event as likely | `ksBets.js` filter |
-| **B** | Per-pitcher capital-at-risk cap at **2% of bankroll** (~$20/$1k) — prevents $300-500 concentrations on one pitcher | `ksBets.js` post-sizing |
+| **B** | ~~Per-pitcher CAR cap at 2%~~ — **REMOVED Apr 23**. Cuts too much upside (+$879 → $229 on Apr 20). Rules A/C/D/E carry the protection load. | removed |
 | **C** | Skip `strike=3` markets — structurally mispriced by K-first models | `ksBets.js` filter |
 | **D** | Require YES `model_prob ≥ 0.30` — 0.25 was too loose, 0-for-14 at model_prob < 0.25 historically | `ksBets.js` filter |
 | **E** | Auto-halt live trading after **-15% daily drawdown** (net across all bets) | `liveMonitor.js` main loop |
