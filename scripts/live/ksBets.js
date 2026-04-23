@@ -205,7 +205,12 @@ async function logEdges() {
   const yesCapRemoved = deduped.length - withFill.length
   if (yesCapRemoved > 0) console.log(`[ks-bets] Capped ${yesCapRemoved} YES bet(s) (max ${MAX_YES_PER_PITCHER} per pitcher)`)
 
-  const totalEdge = withFill.reduce((s, e) => s + e._edgeVal, 0)
+  // Side multipliers: NOs get 1.25x capital weight (structural edge, validated forward)
+  // YES stays at 1.0x — don't reduce good YES bets, just overweight NOs
+  // Re-evaluate after +300 bets before any further adjustment
+  const NO_SIDE_MULT  = 1.25
+  const YES_SIDE_MULT = 1.00
+  const totalEdge = withFill.reduce((s, e) => s + e._edgeVal * (e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT), 0)
 
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────
   const STAGGER_MS = 45_000   // 45s between users on live orders
@@ -251,7 +256,8 @@ async function logEdges() {
     // highest-edge bets first and stopping once the budget is spent.
     const withFace = withFill
       .map(e => {
-        const riskAlloc = (e._edgeVal / totalEdge) * dailyBudget
+        const sideMult  = e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT
+        const riskAlloc = (e._edgeVal * sideMult / totalEdge) * dailyBudget
         const faceValue = Math.round(riskAlloc / e._fill)
         const face = Math.max(faceValue, MIN_BET_FACE)
         return { ...e, _face: face, _actualRisk: face * e._fill }
