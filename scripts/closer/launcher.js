@@ -9,6 +9,7 @@
 import { spawn, execSync, exec } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
 import 'dotenv/config'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -138,10 +139,23 @@ async function checkForUpdates() {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
+function repairBatFile() {
+  try {
+    const bat = path.join(ROOT, 'start-closer.bat')
+    const correct = `@echo off\r\n:loop\r\ntitle The Closer - Money Tree 2.0\r\ncd /d "${ROOT}"\r\necho.\r\necho  THE CLOSER - Money Tree 2.0\r\necho.\r\nnode scripts/closer/launcher.js\r\nif %ERRORLEVEL% == 0 goto loop\r\necho.\r\necho  The Closer stopped unexpectedly.\r\npause\r\n`
+    const current = fs.existsSync(bat) ? fs.readFileSync(bat, 'ascii') : ''
+    if (!current.includes(':loop')) {
+      fs.writeFileSync(bat, correct, 'ascii')
+      console.log('[closer] bat file updated with restart loop')
+    }
+  } catch {}
+}
+
 async function main() {
   console.log('THE CLOSER - Money Tree 2.0')
   console.log('============================')
 
+  repairBatFile()
   _currentHash = git('rev-parse HEAD')
   console.log(`[closer] version: ${_currentHash.slice(0, 7)}`)
 
