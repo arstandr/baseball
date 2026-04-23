@@ -18,7 +18,7 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { getAuthHeaders, placeOrder, cancelOrder, getOrder, getMarketPrice } from '../../lib/kalshi.js'
+import { getAuthHeaders, placeOrder, cancelOrder, getOrder, getMarketPrice, getSettlements } from '../../lib/kalshi.js'
 import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
 import { notifyLiveBet, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
@@ -255,9 +255,25 @@ async function settleAndNotifyGame(game, boxData) {
 
     const hit = actualKs >= bet.strike
     const won = bet.side === 'YES' ? hit : !hit
-    const p   = bet.market_mid != null ? bet.market_mid / 100 : bet.model_prob
-    const KALSHI_FEE = 0.07
-    const pnl = won ? bet.bet_size * (1 - p) * (1 - KALSHI_FEE * p) : -bet.bet_size * p
+
+    // P&L: try Kalshi's actual settlement figure first (real fill price + real fees)
+    let pnl
+    if (bet.ticker) {
+      try {
+        const liveCreds = await db.one(`SELECT kalshi_key_id, kalshi_private_key FROM users WHERE id = ?`, [bet.user_id])
+        if (liveCreds?.kalshi_key_id) {
+          const creds = { keyId: liveCreds.kalshi_key_id, privateKey: liveCreds.kalshi_private_key }
+          const settlements = await getSettlements({ ticker: bet.ticker }, creds)
+          const s = settlements?.[0]
+          if (s?.profit_loss != null) pnl = s.profit_loss / 100
+        }
+      } catch { /* fall through to math */ }
+    }
+    if (pnl == null) {
+      const p = bet.market_mid != null ? bet.market_mid / 100 : bet.model_prob
+      const KALSHI_FEE = 0.07
+      pnl = won ? bet.bet_size * (1 - p) * (1 - KALSHI_FEE * p) : -bet.bet_size * p
+    }
 
     await db.run(
       `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=?`,
@@ -415,8 +431,12 @@ async function managePreGameOrders(game) {
       const filled = order?.status === 'filled' || Number(order?.remaining_count ?? order?.count) === 0
 
       if (filled) {
-        await db.run(`UPDATE ks_bets SET order_status='filled' WHERE id=?`, [bet.id])
-        console.log(`  ✓ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — filled at maker price`)
+        const actualFill = order?.yes_price ?? order?.no_price ?? null
+        await db.run(
+          `UPDATE ks_bets SET order_status='filled', fill_price=COALESCE(?, fill_price) WHERE id=?`,
+          [actualFill, bet.id],
+        )
+        console.log(`  ✓ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — filled @ ${actualFill ?? '?'}¢ (maker)`)
         continue
       }
 

@@ -16,7 +16,7 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, getOrder, getBalance as getKalshiBalance } from '../../lib/kalshi.js'
+import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, getOrder, getBalance as getKalshiBalance, getSettlements, getFills } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -508,6 +508,24 @@ async function settleBets() {
 
   console.log(`[ks-bets] Settling ${open.length} open bets for ${TODAY}`)
 
+  // Pre-load user credentials for Kalshi settlement lookups
+  const userRows = await db.all(`SELECT id, kalshi_key_id, kalshi_private_key FROM users WHERE kalshi_key_id IS NOT NULL`)
+  const userCreds = new Map(userRows.map(u => [u.id, { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key }]))
+
+  // Pre-fetch Kalshi settlements for each user keyed by ticker
+  // settlements[userId][ticker] = profit_loss_cents
+  const kalshiSettlements = new Map()
+  for (const [userId, creds] of userCreds) {
+    try {
+      const settlements = await getSettlements({ limit: 200 }, creds)
+      const byTicker = new Map(settlements.map(s => [s.ticker, s]))
+      kalshiSettlements.set(userId, byTicker)
+      console.log(`[ks-bets] Loaded ${settlements.length} Kalshi settlements for user ${userId}`)
+    } catch (err) {
+      console.warn(`[ks-bets] Could not fetch Kalshi settlements for user ${userId}: ${err.message}`)
+    }
+  }
+
   // Check for postponed games — void those bets rather than leaving them open forever
   const postponed = await db.all(
     `SELECT pitcher_home_id, pitcher_away_id FROM games WHERE date = ? AND status = 'postponed'`,
@@ -563,17 +581,24 @@ async function settleBets() {
 
     const won = bet.side === 'YES' ? hit : !hit
 
-    // Correct P&L: use actual fill price (ask), not mid
-    // YES ask = mid + spread/2;  NO ask = (100 - mid) + spread/2  (both in cents)
-    const spread     = bet.spread ?? 4   // default 4¢ if spread wasn't captured
-    const halfSpread = spread / 2 / 100
-    const mid        = bet.market_mid != null ? bet.market_mid / 100 : (bet.model_prob ?? 0.5)
-    const fillFraction = bet.side === 'YES' ? mid + halfSpread : (1 - mid) + halfSpread
-    const KALSHI_FEE = 0.07
-    // Correct Kalshi fee: 0.07 × fill × (1-fill) per contract → net win = (1-fill)(1 - 0.07×fill)
-    const pnl = won
-      ? bet.bet_size * (1 - fillFraction) * (1 - KALSHI_FEE * fillFraction)
-      : -bet.bet_size * fillFraction
+    // P&L: use Kalshi's actual settlement figure when available (includes real fill + fees)
+    // Fall back to math using entry mid price
+    let pnl
+    const userSettlements = kalshiSettlements.get(bet.user_id)
+    const kalshiRecord    = bet.ticker ? userSettlements?.get(bet.ticker) : null
+    if (kalshiRecord?.profit_loss != null) {
+      pnl = kalshiRecord.profit_loss / 100  // Kalshi returns cents
+      console.log(`  [kalshi-pnl] ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: $${pnl.toFixed(2)} (from Kalshi)`)
+    } else {
+      const spread     = bet.spread ?? 4
+      const halfSpread = spread / 2 / 100
+      const mid        = bet.market_mid != null ? bet.market_mid / 100 : (bet.model_prob ?? 0.5)
+      const fillFraction = bet.side === 'YES' ? mid + halfSpread : (1 - mid) + halfSpread
+      const KALSHI_FEE = 0.07
+      pnl = won
+        ? bet.bet_size * (1 - fillFraction) * (1 - KALSHI_FEE * fillFraction)
+        : -bet.bet_size * fillFraction
+    }
 
     await db.run(
       `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=?`,
