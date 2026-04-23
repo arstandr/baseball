@@ -1383,17 +1383,36 @@ router.get('/ks/recent-starts/:pitcher_id', wrap(async (req, res) => {
 // ------------------------------------------------------------------
 // GET /api/ks/bankroll
 // Running bankroll series (one point per day, pre-game bets only).
+// Supports ?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=
 // ------------------------------------------------------------------
 router.get('/ks/bankroll', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['result IS NOT NULL', 'live_bet = 0', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
+  const where = clauses.join(' AND ')
+
+  // Always fetch all rows up to 'from' to compute correct starting bankroll
+  let startingBalance = STARTING_BANKROLL
+  if (from) {
+    const prior = await db.all(
+      `SELECT SUM(COALESCE(pnl,0)) AS prior_pnl FROM ks_bets WHERE result IS NOT NULL AND live_bet=0 AND paper=0 AND bet_date < ?`,
+      [from]
+    )
+    startingBalance = STARTING_BANKROLL + Number(prior[0]?.prior_pnl || 0)
+  }
+
   const rows = await db.all(
     `SELECT bet_date, SUM(COALESCE(pnl, 0)) AS day_pnl, COUNT(*) AS bets,
             SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
             SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses
-     FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0
+     FROM ks_bets WHERE ${where}
      GROUP BY bet_date ORDER BY bet_date ASC`,
+    args
   )
-  let running = STARTING_BANKROLL
+  let running = startingBalance
   const series = rows.map(r => {
     const pnl = Number(r.day_pnl || 0)
     running += pnl
@@ -1413,6 +1432,12 @@ router.get('/ks/bankroll', wrap(async (req, res) => {
 // GET /api/ks/monthly
 // ------------------------------------------------------------------
 router.get('/ks/monthly', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
   const rows = await db.all(
     `SELECT substr(bet_date,1,7) AS ym,
             COUNT(*)                                             AS bets,
@@ -1421,8 +1446,9 @@ router.get('/ks/monthly', wrap(async (req, res) => {
             SUM(COALESCE(pnl,0))                                AS pnl,
             SUM(COALESCE(capital_at_risk, bet_size))            AS wagered,
             AVG(CASE WHEN result IS NOT NULL THEN edge END)     AS avg_edge
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0
+     FROM ks_bets WHERE ${clauses.join(' AND ')}
      GROUP BY ym ORDER BY ym ASC`,
+    args
   )
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
   let running = STARTING_BANKROLL
@@ -1451,9 +1477,16 @@ router.get('/ks/monthly', wrap(async (req, res) => {
 // GET /api/ks/weekly
 // ------------------------------------------------------------------
 router.get('/ks/weekly', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
   const rows = await db.all(
     `SELECT bet_date, COALESCE(pnl,0) AS pnl, result, bet_size
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0 ORDER BY bet_date ASC`,
+     FROM ks_bets WHERE ${clauses.join(' AND ')} ORDER BY bet_date ASC`,
+    args
   )
   if (!rows.length) return res.json([])
 
@@ -1656,12 +1689,20 @@ router.delete('/users/:name', wrap(async (req, res) => {
 
 // ------------------------------------------------------------------
 // GET /api/ks/stats — full performance statistics
+// Supports ?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=
 // ------------------------------------------------------------------
 router.get('/ks/stats', wrap(async (req, res) => {
+  const { from, to, user_id } = req.query
+  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const args = []
+  if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
+  if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
+  if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
   const rows = await db.all(
     `SELECT bet_date, result, pnl, bet_size, edge, model_prob, side
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0
+     FROM ks_bets WHERE ${clauses.join(' AND ')}
      ORDER BY bet_date ASC, id ASC`,
+    args
   )
   if (!rows.length) {
     return res.json({
@@ -2059,6 +2100,116 @@ router.get('/ks/testing', wrap(async (req, res) => {
   }
 
   res.json({ calibration, lambda_accuracy, thresholds, model_notes })
+}))
+
+// GET /api/ks/kalshi-positions — live positions from Kalshi API
+// Returns actual contracts held so the UI reflects real purchases.
+router.get('/ks/kalshi-positions', wrap(async (req, res) => {
+  const { user_id } = req.query
+  // Look up Kalshi creds for this user
+  let creds = {}
+  if (user_id) {
+    const u = await db.one(`SELECT kalshi_key_id, kalshi_key_content FROM users WHERE id = ?`, [user_id])
+    if (u?.kalshi_key_id) creds = { keyId: u.kalshi_key_id, keyContent: u.kalshi_key_content }
+  }
+  const { default: axios } = await import('axios')
+  const { getAuthHeaders } = await import('../lib/kalshi.js')
+  const BASE = 'https://api.elections.kalshi.com/trade-api/v2'
+  const headers = getAuthHeaders('GET', '/trade-api/v2/portfolio/positions')
+  const r = await axios({ method: 'GET', url: BASE + '/portfolio/positions', params: { count_filter: 'position', limit: 100 }, headers, timeout: 10000 })
+  const positions = r.data?.market_positions || []
+  res.json(positions.map(p => ({
+    ticker:    p.ticker,
+    contracts: Math.round(Math.abs(Number(p.position_fp || 0))),
+    side:      Number(p.position_fp) >= 0 ? 'YES' : 'NO',
+    cost:      Number(p.market_exposure_dollars || 0),
+    pnl:       Number(p.realized_pnl_dollars || 0),
+  })))
+}))
+
+// GET /api/ks/market-prices?tickers=T1,T2,... — current Kalshi bid/ask for open positions
+router.get('/ks/market-prices', wrap(async (req, res) => {
+  const tickers = (req.query.tickers || '').split(',').map(t => t.trim()).filter(Boolean)
+  if (!tickers.length) return res.json([])
+
+  const { getAuthHeaders } = await import('../lib/kalshi.js')
+  const { default: axios } = await import('axios')
+  const BASE = 'https://api.elections.kalshi.com/trade-api/v2'
+
+  const parseCents = v => {
+    if (v == null) return null
+    const n = typeof v === 'string' ? parseFloat(v) : Number(v)
+    return Number.isFinite(n) ? Math.round(n * 100) : null
+  }
+
+  const results = await Promise.all(tickers.map(async ticker => {
+    try {
+      const path = `/trade-api/v2/markets/${ticker}`
+      const headers = getAuthHeaders('GET', path)
+      const r = await axios({ method: 'GET', url: BASE + `/markets/${ticker}`, headers, timeout: 8000 })
+      const m = r.data?.market
+      if (!m) return { ticker, error: 'not found' }
+      const yes_bid = m.yes_bid != null ? m.yes_bid : parseCents(m.yes_bid_dollars)
+      const yes_ask = m.yes_ask != null ? m.yes_ask : parseCents(m.yes_ask_dollars)
+      const mid = (yes_bid != null && yes_ask != null) ? (yes_bid + yes_ask) / 2 : null
+      return { ticker, status: m.status, result: m.result ?? null, yes_bid, yes_ask, mid, expiration_value: m.expiration_value ?? null }
+    } catch (e) {
+      return { ticker, error: e.message }
+    }
+  }))
+
+  res.json(results)
+}))
+
+// POST /api/ks/auto-settle — settle bets whose Kalshi market has finalized
+router.post('/ks/auto-settle', wrap(async (req, res) => {
+  const { user_id } = req.body || {}
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+
+  const clause = user_id ? 'bet_date = ? AND result IS NULL AND user_id = ?' : 'bet_date = ? AND result IS NULL'
+  const args   = user_id ? [today, user_id] : [today]
+  const pending = await db.all(`SELECT * FROM ks_bets WHERE ${clause}`, args)
+
+  if (!pending.length) return res.json({ settled: 0, checked: 0 })
+
+  const { getAuthHeaders } = await import('../lib/kalshi.js')
+  const { default: axios } = await import('axios')
+  const BASE = 'https://api.elections.kalshi.com/trade-api/v2'
+  const KALSHI_FEE = 0.07
+  const now = new Date().toISOString()
+  let settled = 0
+
+  for (const bet of pending) {
+    if (!bet.ticker) continue
+    try {
+      const path = `/trade-api/v2/markets/${bet.ticker}`
+      const headers = getAuthHeaders('GET', path)
+      const r = await axios({ method: 'GET', url: BASE + `/markets/${bet.ticker}`, headers, timeout: 8000 })
+      const m = r.data?.market
+      if (!m || m.status !== 'finalized' || !m.result) continue
+
+      const actualKs = m.expiration_value != null ? Number(m.expiration_value) : null
+      const won = (bet.side === 'YES' && m.result === 'yes') || (bet.side === 'NO' && m.result === 'no')
+
+      const spread      = bet.spread ?? 4
+      const halfSpread  = spread / 2 / 100
+      const mid         = bet.market_mid != null ? bet.market_mid / 100 : (bet.model_prob ?? 0.5)
+      const fillFrac    = bet.side === 'YES' ? mid + halfSpread : (1 - mid) + halfSpread
+      const pnl         = won
+        ? bet.bet_size * (1 - fillFrac) * (1 - KALSHI_FEE)
+        : -bet.bet_size * fillFrac
+
+      await db.run(
+        `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=?`,
+        [actualKs, won ? 'win' : 'loss', now, Math.round(pnl * 100) / 100, bet.id],
+      )
+      settled++
+    } catch (e) {
+      console.error(`[auto-settle] ${bet.ticker}:`, e.message)
+    }
+  }
+
+  res.json({ settled, checked: pending.length })
 }))
 
 // GET /api/agent/status — The Closer heartbeat

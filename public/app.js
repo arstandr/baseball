@@ -35,6 +35,7 @@ async function init() {
   setInterval(updateLastSeen, 15 * 1000)
   refreshCloserStatus()
   setInterval(refreshCloserStatus, 60 * 1000)
+  initTrendsPeriodBar()
 }
 
 async function refreshCloserStatus() {
@@ -50,8 +51,10 @@ async function refreshCloserStatus() {
   }
 
   const hb  = data.heartbeat
-  const ago = hb.updated_at ? Math.floor((Date.now() - new Date(hb.updated_at + 'Z').getTime()) / 60000) : null
-  const fresh = ago != null && ago < 5
+  const tsRaw = hb.ts || hb.updated_at || null
+  const tsStr = tsRaw ? (tsRaw.endsWith('Z') ? tsRaw : tsRaw + 'Z') : null
+  const ago = tsStr && !isNaN(new Date(tsStr)) ? Math.floor((Date.now() - new Date(tsStr).getTime()) / 60000) : null
+  const fresh = ago != null && ago < 10
 
   dot.className = `closer-dot ${fresh ? 'online' : 'stale'}`
 
@@ -66,8 +69,10 @@ async function refreshCloserStatus() {
 
   if (data.last_update?.msg) {
     const u = data.last_update
-    const uAgo = u.updated_at ? Math.floor((Date.now() - new Date(u.updated_at + 'Z').getTime()) / 60000) : null
-    metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : ''}: ${u.msg.slice(0, 40)}`)
+    const uRaw = u.ts || u.updated_at || null
+    const uTs  = uRaw ? (uRaw.endsWith('Z') ? uRaw : uRaw + 'Z') : null
+    const uAgo = uTs && !isNaN(new Date(uTs)) ? Math.floor((Date.now() - new Date(uTs).getTime()) / 60000) : null
+    metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : 'recently'}`)
   }
 
   meta.textContent = metaParts.join(' ')
@@ -261,6 +266,7 @@ async function refreshHero() {
 
   const heroBalance  = liveBettor?.bankroll       ?? s.kalshi_balance ?? s.bankroll
   const heroStart    = liveBettor?.start_bankroll  ?? s.start_bankroll
+  const heroTodayPnl = liveBettor?.today_pnl       ?? s.today_pnl ?? 0
   const heroTotalPnl = liveBettor?.total_pnl       ?? s.total_pnl
 
   // ── New status hero ──────────────────────────────────────────────────────
@@ -273,15 +279,15 @@ async function refreshHero() {
 
   const totalPnlEl = document.getElementById('sh-total-pnl')
   if (totalPnlEl) {
-    const sign = heroTotalPnl >= 0 ? '+' : ''
-    totalPnlEl.textContent = sign + fmt$(heroTotalPnl)
-    totalPnlEl.className   = `sh-stat-value ${heroTotalPnl >= 0 ? 'good' : 'bad'}`
+    const sign = heroTodayPnl >= 0 ? '+' : ''
+    totalPnlEl.textContent = heroTodayPnl === 0 ? '$0.00' : sign + fmt$(heroTodayPnl)
+    totalPnlEl.className   = `sh-stat-value ${heroTodayPnl > 0 ? 'good' : heroTodayPnl < 0 ? 'bad' : ''}`
   }
   const roiEl = document.getElementById('sh-total-roi')
   if (roiEl) {
-    const roi = heroStart > 0 ? (heroTotalPnl / heroStart * 100).toFixed(1) : 0
-    const roiSign = roi >= 0 ? '+' : ''
-    roiEl.textContent = `${roiSign}${roi}% overall`
+    const allTimeSign = heroTotalPnl >= 0 ? '+' : ''
+    roiEl.textContent = `${allTimeSign}${fmt$(heroTotalPnl)} all-time`
+    roiEl.className   = heroTotalPnl >= 0 ? 'sh-stat-sub good' : 'sh-stat-sub bad'
   }
 
   // Hide the redundant "Real money account" secondary stat — Kalshi balance is now the primary hero number
@@ -383,7 +389,7 @@ function betOutcomePlain(side, strike, actualKs, result) {
   }
 }
 
-function renderSimpleBetList(pitchers, date) {
+function renderSimpleBetList(pitchers, date, marketPrices = {}) {
   const container = document.getElementById('sc-bet-list')
   if (!container) return
 
@@ -416,16 +422,32 @@ function renderSimpleBetList(pitchers, date) {
     const status = isWin ? 'WON' : isLoss ? 'LOST' : 'IN PROGRESS'
 
     let amountStr = ''
+    let mtmStr = ''
     if (b.result) {
       const sign = (b.pnl ?? 0) >= 0 ? '+' : ''
       amountStr = `${sign}${fmt$(b.pnl ?? 0)}`
     } else {
-      // Best case for pending
-      const mid = Number(b.market_mid ?? 50)
+      // Best case for pending (using entry price)
+      const entryMid = Number(b.market_mid ?? 50)
       const potential = b.side === 'YES'
-        ? (b.bet_size ?? 0) * (100 - mid) / 100 * (1 - KALSHI_FEE)
-        : (b.bet_size ?? 0) * mid / 100 * (1 - KALSHI_FEE)
+        ? (b.bet_size ?? 0) * (100 - entryMid) / 100 * (1 - KALSHI_FEE)
+        : (b.bet_size ?? 0) * entryMid / 100 * (1 - KALSHI_FEE)
       amountStr = `up to +${fmt$(potential)}`
+
+      // Mark-to-market: show current price vs entry
+      const mp = b.ticker ? marketPrices[b.ticker] : null
+      if (mp && mp.mid != null && !mp.error) {
+        const currMid = mp.mid          // current mid in cents
+        const diff    = currMid - entryMid
+        const arrow   = diff > 0.5 ? '↑' : diff < -0.5 ? '↓' : '→'
+        const cls     = diff > 0.5 ? 'mtm-up' : diff < -0.5 ? 'mtm-down' : 'mtm-flat'
+        const finalized = mp.status === 'finalized'
+        if (finalized) {
+          mtmStr = `<span class="sc-mtm ${mp.result === (b.side === 'YES' ? 'yes' : 'no') ? 'mtm-up' : 'mtm-down'}">Market settled</span>`
+        } else {
+          mtmStr = `<span class="sc-mtm ${cls}">${arrow} ${currMid.toFixed(0)}¢ now (entry ${entryMid.toFixed(0)}¢)</span>`
+        }
+      }
     }
 
     const desc    = betDescPlain(b.side, b.strike)
@@ -459,6 +481,7 @@ function renderSimpleBetList(pitchers, date) {
         <div class="sc-bet-what">${desc}</div>
         ${outcome ? `<div class="sc-bet-outcome">${outcome}</div>` : ''}
         ${pendingText ? `<div class="sc-bet-outcome">${pendingText}</div>` : ''}
+        ${mtmStr}
       </div>
       <button class="sc-details-btn" onclick="
         var d=document.getElementById('${detailsId}');
@@ -701,7 +724,16 @@ async function loadDay(date) {
     }
   }
 
-  try { renderSimpleBetList(sorted, date) } catch (err) { console.error('[renderSimpleBetList]', err) }
+  try {
+    // Fetch live Kalshi prices for pending bets
+    const pendingTickers = sorted.flatMap(p => (p.bets || []).filter(b => !b.result && b.ticker).map(b => b.ticker))
+    let marketPrices = {}
+    if (pendingTickers.length) {
+      const mp = await fetchJson(`/api/ks/market-prices?tickers=${[...new Set(pendingTickers)].join(',')}`).catch(() => [])
+      for (const m of (mp || [])) marketPrices[m.ticker] = m
+    }
+    renderSimpleBetList(sorted, date, marketPrices)
+  } catch (err) { console.error('[renderSimpleBetList]', err) }
 
   try { renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
   try { await loadLiveBets(date)     } catch (err) { console.error('[loadLiveBets]', err) }
@@ -723,22 +755,34 @@ function renderDaySummary(date, data) {
   const KALSHI_FEE = 0.07
   let atRisk = 0, bestCase = 0
 
+  // Fetch live Kalshi positions for accurate best case
+  const uid = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+  const livePositions = await fetchJson(`/api/ks/kalshi-positions${uid}`).catch(() => null)
+
   if (!data || !data.pitchers?.length) {
     if (verdictEl) verdictEl.textContent = 'No bets for this day.'
     if (recordEl)  recordEl.textContent = ''
     if (bestcaseCard) bestcaseCard.style.display = 'none'
   } else {
-    // Compute best case from pending bets
-    for (const p of data.pitchers) {
-      for (const b of p.bets) {
-        if (b.result) continue
-        const mid  = Number(b.market_mid ?? 50)
-        const face = Number(b.bet_size   ?? 0)
-        const hs   = (b.spread ?? 4) / 2
-        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
-        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
-        atRisk   += face * fill / 100
-        bestCase += face * win / 100 * (1 - KALSHI_FEE)
+    // Use live Kalshi positions if available, otherwise fall back to DB bet sizes
+    if (livePositions?.length) {
+      for (const pos of livePositions) {
+        // contracts * $1 payout * (1 - fee) - cost already paid
+        bestCase += pos.contracts * (1 - KALSHI_FEE) - pos.cost
+        atRisk   += pos.cost
+      }
+    } else {
+      for (const p of data.pitchers) {
+        for (const b of p.bets) {
+          if (b.result) continue
+          const mid  = Number(b.market_mid ?? 50)
+          const face = Number(b.bet_size   ?? 0)
+          const hs   = (b.spread ?? 4) / 2
+          const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+          const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+          atRisk   += face * fill / 100
+          bestCase += face * win / 100 * (1 - KALSHI_FEE)
+        }
       }
     }
 
@@ -1242,9 +1286,27 @@ async function pollLive(date) {
 
   // If everything is final and all bets have settled results, stop polling
   if (data.pitchers.length && data.pitchers.every(p => p.is_final)) {
-    // Check if bets are still pending in DB — if so keep polling for settlement
+    // Check if bets are still pending in DB — trigger auto-settle, then check again
     const anyPending = await fetchJson(`/api/ks/summary`).then(s => s.pending > 0).catch(() => false)
-    if (!anyPending) stopLivePolling()
+    if (anyPending) {
+      try {
+        const uid = state.currentUserId ?? null
+        const r = await fetch('/api/ks/auto-settle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(uid ? { user_id: uid } : {}),
+        })
+        const settled = await r.json()
+        if (settled.settled > 0) {
+          console.log(`[auto-settle] Settled ${settled.settled} bets via Kalshi API`)
+          // Reload today's view to show new results
+          const todayDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+          await loadDay(todayDate)
+        }
+      } catch (e) { console.warn('[auto-settle] failed:', e.message) }
+    } else {
+      stopLivePolling()
+    }
   }
 }
 
@@ -1555,17 +1617,66 @@ function updatePitcherCardLive(p) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// TRENDS view
+// TRENDS view — period filter
 // ──────────────────────────────────────────────────────────────────────────
+
+const TRENDS_START_DATE = '2026-04-23'  // "Since the beginning"
+
+const trendsState = { period: 'all', from: null, to: null }
+
+function getTrendsDates() {
+  const today = new Date().toLocaleDateString('en-CA')
+  const { period, from, to } = trendsState
+  if (period === 'week') {
+    const d = new Date(); const dow = (d.getDay() + 6) % 7
+    const mon = new Date(d); mon.setDate(d.getDate() - dow)
+    return { from: mon.toLocaleDateString('en-CA'), to: today }
+  }
+  if (period === 'month') {
+    const d = new Date()
+    return { from: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`, to: today }
+  }
+  if (period === 'since_start') return { from: TRENDS_START_DATE, to: today }
+  if (period === 'custom')      return { from, to }
+  return { from: null, to: null }
+}
+
+function buildTrendsParams() {
+  const uid   = state.liveBettorId ? `user_id=${state.liveBettorId}` : ''
+  const dates = getTrendsDates()
+  const parts = [uid, dates.from ? `from=${dates.from}` : '', dates.to ? `to=${dates.to}` : ''].filter(Boolean)
+  return parts.length ? '?' + parts.join('&') : ''
+}
+
+function initTrendsPeriodBar() {
+  document.querySelectorAll('.period-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'))
+      btn.classList.add('active')
+      trendsState.period = btn.dataset.period
+      const customRange = document.getElementById('period-custom-range')
+      if (customRange) customRange.style.display = trendsState.period === 'custom' ? 'flex' : 'none'
+      if (trendsState.period !== 'custom') refreshTrendsView()
+    })
+  })
+  const applyBtn = document.getElementById('period-apply')
+  if (applyBtn) applyBtn.addEventListener('click', () => {
+    trendsState.from = document.getElementById('period-from')?.value || null
+    trendsState.to   = document.getElementById('period-to')?.value   || null
+    refreshTrendsView()
+  })
+}
+
 async function refreshTrendsView() {
-  const uid = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+  const p = buildTrendsParams()
+  const baseP = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
   const [bankroll, monthly, weekly, stats, breakdown, leaderboard] = await Promise.all([
-    fetchJson(`/api/ks/bankroll${uid}`).catch(() => []),
-    fetchJson(`/api/ks/monthly${uid}`).catch(() => []),
-    fetchJson(`/api/ks/weekly${uid}`).catch(() => []),
-    fetchJson(`/api/ks/stats${uid}`).catch(() => null),
-    fetchJson('/api/ks/edge-breakdown').catch(() => null),
-    fetchJson('/api/ks/pitcher-leaderboard').catch(() => null),
+    fetchJson(`/api/ks/bankroll${p}`).catch(() => []),
+    fetchJson(`/api/ks/monthly${p}`).catch(() => []),
+    fetchJson(`/api/ks/weekly${p}`).catch(() => []),
+    fetchJson(`/api/ks/stats${p}`).catch(() => null),
+    fetchJson(`/api/ks/edge-breakdown${baseP}`).catch(() => null),
+    fetchJson(`/api/ks/pitcher-leaderboard${baseP}`).catch(() => null),
   ])
   drawBankrollChart(bankroll)
   drawDailyChart(bankroll)
