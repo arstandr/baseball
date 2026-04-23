@@ -209,7 +209,12 @@ async function refreshHero() {
   // Fetch bettors first to get liveBettorId, then fetch summary scoped to that user.
   // This avoids a chicken-and-egg where the first summary call has no user filter.
   const bettors = await fetchJson('/api/ks/bettors').catch(() => [])
-  const liveBettor = (bettors || []).find(b => !b.paper)
+  // Match hero to the logged-in user by name (e.g. 'adam' matches 'adam-live')
+  const sessionName = (state.currentUser || '').toLowerCase().split(' ')[0]
+  const myBettor = sessionName
+    ? (bettors || []).find(b => b.name?.toLowerCase().includes(sessionName))
+    : null
+  const liveBettor = myBettor || (bettors || []).find(b => !b.paper)
   if (liveBettor) state.liveBettorId = liveBettor.id  // cache so all data fetches use the right user
 
   const uidParam = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
