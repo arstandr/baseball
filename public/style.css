@@ -1349,118 +1349,133 @@ a:hover { text-decoration: underline; }
   margin-bottom: 24px;
 }
 
+/* ── Morning Picks cards ─────────────────────────────────────────────── */
 .sc-bet-card {
   background: var(--card);
   border-radius: 12px;
   border: 1px solid var(--border);
   overflow: hidden;
+  cursor: pointer;
+  user-select: none;
 }
+.sc-bet-card:hover { border-color: var(--border-hover, #334155); }
 .sc-bet-card.sc-win  { border-left: 4px solid #22c55e; }
 .sc-bet-card.sc-loss { border-left: 4px solid #ef4444; }
 .sc-bet-card.sc-wait { border-left: 4px solid #475569; }
 
-.sc-bet-header {
+/* Card header */
+.sc-card-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px 18px 10px;
+  gap: 10px;
+  padding: 12px 14px 8px;
 }
-
-.sc-bet-icon {
-  font-size: 22px;
-  line-height: 1;
-}
-
-.sc-bet-status {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.sc-win  .sc-bet-status { color: #22c55e; }
-.sc-loss .sc-bet-status { color: #ef4444; }
-.sc-wait .sc-bet-status { color: #94a3b8; }
-
-.sc-bet-amount {
-  margin-left: auto;
-  font-size: 20px;
-  font-weight: 700;
-}
-.sc-win  .sc-bet-amount { color: #22c55e; }
-.sc-loss .sc-bet-amount { color: #ef4444; }
-.sc-wait .sc-bet-amount { color: #94a3b8; }
-
-.sc-bet-body {
-  padding: 0 18px 14px;
-}
-
-.sc-bet-date {
-  font-size: 13px;
-  color: var(--text-dim);
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.sc-bet-pitcher {
-  font-size: 18px;
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.sc-bet-what {
-  font-size: 15px;
+.sc-card-icon  { font-size: 20px; line-height: 1; flex-shrink: 0; }
+.sc-card-title { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.sc-card-pitcher { font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-card-matchup { font-size: 12px; color: var(--muted); }
+.sc-card-right { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; flex-shrink: 0; }
+.sc-card-total { font-size: 16px; font-weight: 700; }
+.sc-card-label { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.sc-win  .sc-card-label { color: #22c55e; }
+.sc-loss .sc-card-label { color: #ef4444; }
+.sc-expand-caret {
   color: var(--muted);
-  margin-bottom: 4px;
+  font-size: 16px;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+  margin-left: 2px;
 }
+.sc-details-open .sc-expand-caret { transform: rotate(90deg); }
 
-.sc-bet-outcome {
-  font-size: 15px;
-  font-weight: 600;
+/* Compact bet rows */
+.sc-card-rows { padding: 0 14px 6px; display: flex; flex-direction: column; gap: 3px; }
+.sc-card-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
 }
-.sc-win  .sc-bet-outcome { color: #22c55e; }
-.sc-loss .sc-bet-outcome { color: #ef4444; }
-.sc-wait .sc-bet-outcome { color: #94a3b8; }
+.sc-row-label { font-weight: 700; min-width: 52px; font-family: var(--mono, monospace); }
+.sc-row-fill  { min-width: 72px; font-size: 11px; color: var(--muted); }
+.sc-row-price { flex: 1; font-size: 12px; }
+.sc-row-amt   { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.sc-card-row.sc-row-win  .sc-row-label { color: #22c55e; }
+.sc-card-row.sc-row-loss .sc-row-label { color: #ef4444; }
+.sc-muted { color: var(--muted); }
 
-/* Mark-to-market price indicator */
-.sc-mtm {
-  font-size: 13px;
-  font-weight: 600;
-  margin-top: 2px;
-}
+/* Fill status dots */
+.sc-fill-dot     { font-size: 10px; margin-right: 3px; }
+.sc-fill-resting { color: #d29922; }
+.sc-fill-filled  { color: #22c55e; }
+
+/* Mark-to-market */
+.sc-mtm { font-size: 13px; font-weight: 600; margin-top: 2px; }
 .mtm-up   { color: #22c55e; }
 .mtm-down { color: #ef4444; }
 .mtm-flat { color: #94a3b8; }
 
-/* Details toggle */
-.sc-details-btn {
+/* Progress bar */
+.sc-progress-wrap {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 0 18px 12px;
-  padding: 0;
-  background: none;
-  border: none;
-  color: var(--muted);
-  font-size: 12px;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  gap: 10px;
+  padding: 4px 14px 10px;
 }
-.sc-details-btn:hover { color: var(--fg); }
+.sc-progress-bar {
+  flex: 1;
+  height: 5px;
+  background: var(--card-2, #1e293b);
+  border-radius: 999px;
+  position: relative;
+  overflow: visible;
+}
+.sc-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.4s ease;
+  min-width: 0;
+}
+.sc-bar-grey  { background: #334155; }
+.sc-bar-amber { background: #d29922; }
+.sc-bar-green { background: #22c55e; }
+.sc-progress-tick {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 11px;
+  background: var(--border);
+  border-radius: 1px;
+  transform: translateX(-50%);
+}
+.sc-progress-label { font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; font-family: var(--mono, monospace); }
 
+/* Expandable details */
 .sc-details-body {
-  padding: 0 18px 14px;
-  border-top: 1px solid var(--border);
-  margin-top: 4px;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease;
 }
-
+.sc-details-open .sc-details-body {
+  max-height: 800px;
+  border-top: 1px solid var(--border);
+}
+.sc-detail-section { padding: 8px 14px 4px; }
+.sc-detail-heading {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-bottom: 4px;
+}
 .sc-detail-row {
   display: flex;
   justify-content: space-between;
   font-size: 12px;
   color: var(--muted);
-  padding: 3px 0;
+  padding: 2px 0;
 }
 .sc-detail-row b { color: var(--fg); }
 

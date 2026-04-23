@@ -393,110 +393,174 @@ function renderSimpleBetList(pitchers, date, marketPrices = {}) {
   const container = document.getElementById('sc-bet-list')
   if (!container) return
 
-  // Flatten all bets with pitcher context
-  const allBets = pitchers.flatMap(p =>
-    p.bets.map(b => ({ ...b, pitcher_name: p.pitcher_name, pitcher_id: p.pitcher_id, game_time: p.game_time, game: p.game || b.game }))
-  )
-
+  const activePitchers = (pitchers || []).filter(p => p.bets?.length)
   const picksHead = document.getElementById('sc-picks-head')
 
-  if (!allBets.length) {
+  if (!activePitchers.length) {
     container.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
     if (picksHead) picksHead.hidden = true
     return
   }
-
   if (picksHead) picksHead.hidden = false
-
-  // Sort: losses first, then wins, then pending
-  const sortOrder = b => b.result === 'loss' ? 0 : b.result === 'win' ? 1 : 2
-  const sorted = [...allBets].sort((a, b) => sortOrder(a) - sortOrder(b))
 
   const KALSHI_FEE = 0.07
 
-  container.innerHTML = sorted.map(b => {
-    const isWin  = b.result === 'win'
-    const isLoss = b.result === 'loss'
-    const cls    = isWin ? 'sc-win' : isLoss ? 'sc-loss' : 'sc-wait'
-    const icon   = isWin ? '✅' : isLoss ? '❌' : '⏳'
-    const status = isWin ? 'WON' : isLoss ? 'LOST' : 'IN PROGRESS'
+  container.innerHTML = activePitchers.map(p => {
+    const bets = [...p.bets].sort((a, b) => a.strike - b.strike)
+    const wins    = bets.filter(b => b.result === 'win').length
+    const losses  = bets.filter(b => b.result === 'loss').length
+    const pending = bets.filter(b => !b.result).length
 
-    let amountStr = ''
-    let mtmStr = ''
-    if (b.result) {
-      const sign = (b.pnl ?? 0) >= 0 ? '+' : ''
-      amountStr = `${sign}${fmt$(b.pnl ?? 0)}`
+    // Card-level status
+    let cardCls, icon, label
+    if (pending > 0) {
+      cardCls = 'sc-wait'; icon = '⏳'
+      const parts = []
+      if (wins)    parts.push(`${wins}W`)
+      if (losses)  parts.push(`${losses}L`)
+      parts.push(`${pending} pending`)
+      label = parts.join(' · ')
+    } else if (wins > 0 && losses === 0) {
+      cardCls = 'sc-win';  icon = '✅'; label = wins === 1 ? 'WON' : `ALL ${wins} WON`
+    } else if (losses > 0 && wins === 0) {
+      cardCls = 'sc-loss'; icon = '❌'; label = losses === 1 ? 'LOST' : `ALL ${losses} LOST`
     } else {
-      // Best case for pending (using entry price)
-      const entryMid = Number(b.market_mid ?? 50)
-      const entryFill = b.side === 'YES' ? entryMid : (100 - entryMid)
-      const potential = b.side === 'YES'
-        ? (b.bet_size ?? 0) * (100 - entryMid) / 100 * (1 - KALSHI_FEE * entryFill / 100)
-        : (b.bet_size ?? 0) * entryMid / 100 * (1 - KALSHI_FEE * entryFill / 100)
-      amountStr = `up to +${fmt$(potential)}`
+      cardCls = wins > losses ? 'sc-win' : 'sc-loss'; icon = wins > losses ? '✅' : '❌'
+      label = `${wins}W · ${losses}L`
+    }
 
-      // Mark-to-market: show current price vs entry
-      const mp = b.ticker ? marketPrices[b.ticker] : null
-      if (mp && mp.mid != null && !mp.error) {
-        const currMid = mp.mid          // current mid in cents
-        const diff    = currMid - entryMid
-        const arrow   = diff > 0.5 ? '↑' : diff < -0.5 ? '↓' : '→'
-        const cls     = diff > 0.5 ? 'mtm-up' : diff < -0.5 ? 'mtm-down' : 'mtm-flat'
-        const finalized = mp.status === 'finalized'
-        if (finalized) {
-          mtmStr = `<span class="sc-mtm ${mp.result === (b.side === 'YES' ? 'yes' : 'no') ? 'mtm-up' : 'mtm-down'}">Market settled</span>`
+    // Card total: sum pending potential + settled P&L
+    let totalVal = 0
+    for (const b of bets) {
+      if (b.result) {
+        totalVal += Number(b.pnl || 0)
+      } else {
+        const mid  = Number(b.market_mid ?? 50)
+        const face = Number(b.bet_size   ?? 0)
+        const hs   = (b.spread ?? 4) / 2
+        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+        totalVal += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
+      }
+    }
+    const totalSign = totalVal >= 0 ? '+' : ''
+    const totalStr  = pending > 0 ? `up to ${totalSign}${fmt$(totalVal)}` : `${totalSign}${fmt$(totalVal)}`
+    const totalCls  = totalVal >= 0 ? 'good' : 'bad'
+
+    // Progress bar
+    const actualKs     = bets.map(b => b.actual_ks).find(k => k != null) ?? 0
+    const thresholds   = [...new Set(bets.map(b => b.strike))].sort((a, b) => a - b)
+    const maxThreshold = thresholds[thresholds.length - 1] || 1
+    const fillPct      = Math.min(100, (actualKs / maxThreshold) * 100)
+    const firstUncovered = thresholds.find(t => actualKs < t)
+    const barCls = actualKs === 0 ? 'sc-bar-grey'
+                 : actualKs >= (firstUncovered ?? maxThreshold) ? 'sc-bar-green'
+                 : actualKs >= (firstUncovered ?? maxThreshold) - 2 ? 'sc-bar-amber'
+                 : 'sc-bar-grey'
+    const progressLabel = pending === 0 ? `${actualKs} Ks final`
+                        : firstUncovered ? `${actualKs} Ks · need ${firstUncovered - actualKs} more`
+                        : `${actualKs} Ks · covered ✓`
+
+    const timeStr  = p.game_time ? fmtGameTime(p.game_time) : null
+    const matchup  = [p.game, timeStr].filter(Boolean).join(' · ')
+    const cardId   = `sc-card-${p.pitcher_id}`
+
+    // Compact bet rows
+    const rowsHtml = bets.map(b => {
+      const rowCls = b.result === 'win' ? 'sc-row-win' : b.result === 'loss' ? 'sc-row-loss' : ''
+      const entryMid  = Number(b.market_mid ?? 50)
+      const entryFill = b.side === 'YES' ? entryMid : (100 - entryMid)
+
+      // Fill status dot
+      let fillDot = ''
+      if (b.order_status === 'resting') fillDot = `<span class="sc-fill-dot sc-fill-resting">○</span> resting`
+      else if (b.order_status === 'filled') fillDot = `<span class="sc-fill-dot sc-fill-filled">●</span> filled`
+
+      // MTM or result
+      let priceHtml = ''
+      if (b.result) {
+        priceHtml = b.actual_ks != null ? `${b.actual_ks} Ks` : ''
+      } else {
+        const mp = b.ticker ? marketPrices[b.ticker] : null
+        if (mp && mp.mid != null && !mp.error) {
+          const curr = mp.mid
+          const diff = curr - entryMid
+          const arrow = diff > 0.5 ? '↑' : diff < -0.5 ? '↓' : '→'
+          const mcls  = diff > 0.5 ? 'mtm-up' : diff < -0.5 ? 'mtm-down' : 'mtm-flat'
+          priceHtml = `<span class="${mcls}">${entryMid}¢ → ${curr.toFixed(0)}¢ ${arrow}</span>`
         } else {
-          mtmStr = `<span class="sc-mtm ${cls}">${arrow} ${currMid.toFixed(0)}¢ now (entry ${entryMid.toFixed(0)}¢)</span>`
+          priceHtml = `<span class="sc-muted">${entryMid}¢</span>`
         }
       }
-    }
 
-    const desc    = betDescPlain(b.side, b.strike)
-    const outcome = betOutcomePlain(b.side, b.strike, b.actual_ks, b.result)
-
-    // Pending live status text
-    let pendingText = ''
-    if (!b.result) {
-      if (b.actual_ks != null && b.actual_ks > 0) {
-        pendingText = `Has ${b.actual_ks} strikeout${b.actual_ks !== 1 ? 's' : ''} so far`
+      // Row amount
+      let rowAmt = ''
+      if (b.result) {
+        const s = (b.pnl ?? 0) >= 0 ? '+' : ''
+        rowAmt = `<span class="${b.result === 'win' ? 'good' : 'bad'}">${s}${fmt$(b.pnl ?? 0)}</span>`
       } else {
-        const timeStr = b.game_time ? fmtGameTime(b.game_time) : null
-        pendingText = timeStr ? `${b.game || 'Game'} · ${timeStr}` : 'Game not started yet'
+        const win = b.side === 'YES' ? (100 - entryMid) - (b.spread ?? 4)/2 : entryMid - (b.spread ?? 4)/2
+        const pot = Number(b.bet_size ?? 0) * win / 100 * (1 - KALSHI_FEE * entryFill / 100)
+        rowAmt = `<span class="sc-muted">+${fmt$(pot)}</span>`
       }
-    }
 
-    const edgeStr  = b.edge  != null ? `+${(Number(b.edge) * 100).toFixed(1)}¢` : '—'
-    const probStr  = b.model_prob != null ? `${(b.model_prob * 100).toFixed(0)}%` : '—'
-    const priceStr = b.market_mid != null ? `${b.market_mid}¢` : '—'
-    const wagerStr = b.bet_size   != null ? fmt$(b.bet_size) : '—'
+      return `<div class="sc-card-row ${rowCls}">
+        <span class="sc-row-label">${b.side} ${b.strike}+</span>
+        <span class="sc-row-fill">${fillDot}</span>
+        <span class="sc-row-price">${priceHtml}</span>
+        <span class="sc-row-amt">${rowAmt}</span>
+      </div>`
+    }).join('')
 
-    const detailsId = `sc-det-${b.pitcher_id ?? ''}-${b.strike}-${b.side}`
+    // Expanded detail sections per bet
+    const detailsHtml = bets.map(b => {
+      const edge  = b.edge  != null ? `+${(Number(b.edge)*100).toFixed(1)}¢` : '—'
+      const prob  = b.model_prob != null ? `${(b.model_prob*100).toFixed(0)}%` : '—'
+      const wager = b.bet_size != null ? fmt$(b.bet_size) : '—'
+      const kelly = b.kelly_fraction != null ? `${(b.kelly_fraction*100).toFixed(1)}%` : '—'
+      const mid   = b.market_mid != null ? `${b.market_mid}¢` : '—'
+      const orderRow = b.order_id ? `<div class="sc-detail-row"><span>Order ID</span><b>${b.order_id.slice(0,8)}…</b></div>` : ''
+      return `<div class="sc-detail-section">
+        <div class="sc-detail-heading">${b.side} ${b.strike}+ Ks</div>
+        <div class="sc-detail-row"><span>Wager</span><b>${wager}</b></div>
+        <div class="sc-detail-row"><span>Entry price</span><b>${mid}</b></div>
+        <div class="sc-detail-row"><span>Model probability</span><b>${prob}</b></div>
+        <div class="sc-detail-row"><span>Edge</span><b>${edge}</b></div>
+        <div class="sc-detail-row"><span>Kelly fraction</span><b>${kelly}</b></div>
+        ${orderRow}
+      </div>`
+    }).join('')
 
-    return `<div class="sc-bet-card ${cls}">
-      <div class="sc-bet-header">
-        <span class="sc-bet-icon">${icon}</span>
-        <span class="sc-bet-status">${status}</span>
-        <span class="sc-bet-amount">${amountStr}</span>
+    return `<div class="sc-bet-card ${cardCls}" id="${cardId}" onclick="toggleScDetails('${cardId}')">
+      <div class="sc-card-header">
+        <span class="sc-card-icon">${icon}</span>
+        <div class="sc-card-title">
+          <span class="sc-card-pitcher">${esc(p.pitcher_name)}</span>
+          ${matchup ? `<span class="sc-card-matchup">${esc(matchup)}</span>` : ''}
+        </div>
+        <div class="sc-card-right">
+          <span class="sc-card-total ${totalCls}">${totalStr}</span>
+          <span class="sc-card-label">${label}</span>
+        </div>
+        <span class="sc-expand-caret">›</span>
       </div>
-      <div class="sc-bet-body">
-        <div class="sc-bet-pitcher">${b.pitcher_name}</div>
-        <div class="sc-bet-what">${desc}</div>
-        ${outcome ? `<div class="sc-bet-outcome">${outcome}</div>` : ''}
-        ${pendingText ? `<div class="sc-bet-outcome">${pendingText}</div>` : ''}
-        ${mtmStr}
+      <div class="sc-card-rows">${rowsHtml}</div>
+      <div class="sc-progress-wrap">
+        <div class="sc-progress-bar">
+          <div class="sc-progress-fill ${barCls}" style="width:${fillPct}%"></div>
+          ${thresholds.map(t => `<div class="sc-progress-tick" style="left:${Math.min(99,(t/maxThreshold)*100)}%" title="${t}+ Ks"></div>`).join('')}
+        </div>
+        <span class="sc-progress-label">${progressLabel}</span>
       </div>
-      <button class="sc-details-btn" onclick="
-        var d=document.getElementById('${detailsId}');
-        if(d){d.hidden=!d.hidden;this.textContent=d.hidden?'▸ Details':'▾ Hide details'}
-      ">▸ Details</button>
-      <div id="${detailsId}" class="sc-details-body" hidden>
-        <div class="sc-detail-row"><span>Wager size</span><b>${wagerStr}</b></div>
-        <div class="sc-detail-row"><span>Market price</span><b>${priceStr}</b></div>
-        <div class="sc-detail-row"><span>Our model probability</span><b>${probStr}</b></div>
-        <div class="sc-detail-row"><span>Our edge</span><b>${edgeStr}</b></div>
-      </div>
+      <div class="sc-details-body">${detailsHtml}</div>
     </div>`
   }).join('')
+}
+
+function toggleScDetails(cardId) {
+  const card = document.getElementById(cardId)
+  if (!card) return
+  card.classList.toggle('sc-details-open')
 }
 
 async function buildBettorDrawer(drawer, b) {
@@ -738,6 +802,7 @@ async function loadDay(date) {
   } catch (err) { console.error('[renderSimpleBetList]', err) }
 
   try { await renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
+  try { await refreshBestCase(date) } catch (err) { console.error('[refreshBestCase]', err) }
   try { await loadLiveBets(date)     } catch (err) { console.error('[loadLiveBets]', err) }
 
   buildLiveBanner(data.pitchers)
@@ -747,50 +812,66 @@ async function loadDay(date) {
   if (data.day_pending > 0) startLivePolling(date)
 }
 
-async function renderDaySummary(date, data) {
-  // Update the big status banner in the hero
-  const verdictEl   = document.getElementById('sh-verdict')
-  const recordEl    = document.getElementById('sh-record')
+// Standalone best case card — fetches its own data so it can't be
+// corrupted by whatever data object the caller happens to have.
+async function refreshBestCase(date) {
   const bestcaseCard = document.getElementById('sh-bestcase-card')
   const bestcaseEl  = document.getElementById('sh-bestcase')
+  if (!bestcaseCard || !bestcaseEl) return
 
-  const KALSHI_FEE = 0.07
-  let atRisk = 0, bestCase = 0
+  const KALSHI_FEE  = 0.07
+  const uid         = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+  const uidParam    = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
 
-  // Fetch live Kalshi positions for accurate best case
-  const uid = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
-  const livePositions = await fetchJson(`/api/ks/kalshi-positions${uid}`).catch(() => null)
+  const [livePositions, daily] = await Promise.all([
+    fetchJson(`/api/ks/kalshi-positions${uid}`).catch(() => null),
+    fetchJson(`/api/ks/daily?date=${date}${uidParam}`).catch(() => null),
+  ])
+
+  let bestCase = 0, atRisk = 0
+  const dayPnl = daily?.day_pnl ?? 0
+
+  if (livePositions?.length) {
+    for (const pos of livePositions) {
+      const avgFill = pos.contracts > 0 ? pos.cost / pos.contracts : 0.5
+      bestCase += (pos.contracts - pos.cost) * (1 - KALSHI_FEE * avgFill)
+      atRisk   += pos.cost
+    }
+  } else {
+    for (const p of (daily?.pitchers ?? [])) {
+      for (const b of (p.bets ?? [])) {
+        if (b.result) continue
+        const mid  = Number(b.market_mid ?? 50)
+        const face = Number(b.bet_size   ?? 0)
+        const hs   = (b.spread ?? 4) / 2
+        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+        atRisk   += face * fill / 100
+        bestCase += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
+      }
+    }
+  }
+
+  if (atRisk > 0 || bestCase > 0) {
+    const projected = dayPnl + bestCase
+    bestcaseCard.style.display = 'flex'
+    const sign = projected >= 0 ? '+' : ''
+    bestcaseEl.textContent = sign + fmt$(projected)
+    bestcaseEl.className = `sh-stat-value ${projected >= 0 ? 'good' : 'bad'}`
+  } else {
+    bestcaseCard.style.display = 'none'
+  }
+}
+
+async function renderDaySummary(date, data) {
+  // Update the big status banner in the hero (verdict + record text only)
+  const verdictEl = document.getElementById('sh-verdict')
+  const recordEl  = document.getElementById('sh-record')
 
   if (!data || !data.pitchers?.length) {
     if (verdictEl) verdictEl.textContent = 'No bets for this day.'
     if (recordEl)  recordEl.textContent = ''
-    // Only hide bestcase if it wasn't already showing — pollLive passes empty pitchers
-    // even when pre-game bets exist (live endpoint only includes started/preview games)
-    if (bestcaseCard && bestcaseCard.style.display !== 'flex') bestcaseCard.style.display = 'none'
   } else {
-    // Use live Kalshi positions if available, otherwise fall back to DB bet sizes
-    if (livePositions?.length) {
-      for (const pos of livePositions) {
-        // Profit if wins; fee = 0.07×fillPrice×(1-fillPrice) per contract
-        const avgFill = pos.contracts > 0 ? pos.cost / pos.contracts : 0.5
-        bestCase += (pos.contracts - pos.cost) * (1 - KALSHI_FEE * avgFill)
-        atRisk   += pos.cost
-      }
-    } else {
-      for (const p of data.pitchers) {
-        for (const b of (p.bets ?? [])) {
-          if (b.result) continue
-          const mid  = Number(b.market_mid ?? 50)
-          const face = Number(b.bet_size   ?? 0)
-          const hs   = (b.spread ?? 4) / 2
-          const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
-          const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
-          atRisk   += face * fill / 100
-          bestCase += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
-        }
-      }
-    }
-
     if (verdictEl) {
       const pnl = data.day_pnl
       if (pnl === 0 && data.day_wins === 0 && data.day_losses === 0) {
@@ -811,20 +892,6 @@ async function renderDaySummary(date, data) {
       if (parts.length === 0 && (data.day_wins + data.day_losses + data.day_pending) === 0)
         parts.push('No activity yet')
       recordEl.textContent = parts.join(' · ')
-    }
-
-    if (bestcaseCard && bestcaseEl) {
-      const hasOpenPositions = livePositions?.length > 0
-      const projectedEnd = data.day_pnl + bestCase
-      if (atRisk > 0 || hasOpenPositions || bestCase > 0) {
-        bestcaseCard.style.display = 'flex'
-        const sign = projectedEnd >= 0 ? '+' : ''
-        bestcaseEl.textContent = sign + fmt$(projectedEnd)
-        bestcaseEl.className = `sh-stat-value ${projectedEnd >= 0 ? 'good' : 'bad'}`
-      } else if (bestcaseCard.style.display !== 'flex') {
-        // Only hide if it wasn't already showing a real value
-        bestcaseCard.style.display = 'none'
-      }
     }
   }
 
@@ -1292,7 +1359,7 @@ async function pollLive(date) {
   try { await loadLiveBets(date) } catch {}
 
   // Refresh best case from live Kalshi positions on every poll
-  try { await renderDaySummary(date, data) } catch {}
+  try { await refreshBestCase(date) } catch {}
 
   // If everything is final and all bets have settled results, stop polling
   if (data.pitchers.length && data.pitchers.every(p => p.is_final)) {
