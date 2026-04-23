@@ -429,9 +429,10 @@ function renderSimpleBetList(pitchers, date, marketPrices = {}) {
     } else {
       // Best case for pending (using entry price)
       const entryMid = Number(b.market_mid ?? 50)
+      const entryFill = b.side === 'YES' ? entryMid : (100 - entryMid)
       const potential = b.side === 'YES'
-        ? (b.bet_size ?? 0) * (100 - entryMid) / 100 * (1 - KALSHI_FEE)
-        : (b.bet_size ?? 0) * entryMid / 100 * (1 - KALSHI_FEE)
+        ? (b.bet_size ?? 0) * (100 - entryMid) / 100 * (1 - KALSHI_FEE * entryFill / 100)
+        : (b.bet_size ?? 0) * entryMid / 100 * (1 - KALSHI_FEE * entryFill / 100)
       amountStr = `up to +${fmt$(potential)}`
 
       // Mark-to-market: show current price vs entry
@@ -521,7 +522,7 @@ async function buildBettorDrawer(drawer, b) {
     const fill = bet.side === 'YES' ? mid + hs : (100 - mid) + hs
     const win  = bet.side === 'YES' ? (100 - mid) - hs : mid - hs
     atRisk   += face * fill / 100
-    bestCase += face * win / 100 * (1 - KALSHI_FEE)
+    bestCase += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
   }
 
   const pnlCls  = settledPnl >= 0 ? 'good' : 'bad'
@@ -767,8 +768,9 @@ async function renderDaySummary(date, data) {
     // Use live Kalshi positions if available, otherwise fall back to DB bet sizes
     if (livePositions?.length) {
       for (const pos of livePositions) {
-        // Profit if wins: (contracts - cost) * (1-fee)  [cost = contracts × fill_price]
-        bestCase += (pos.contracts - pos.cost) * (1 - KALSHI_FEE)
+        // Profit if wins; fee = 0.07×fillPrice×(1-fillPrice) per contract
+        const avgFill = pos.contracts > 0 ? pos.cost / pos.contracts : 0.5
+        bestCase += (pos.contracts - pos.cost) * (1 - KALSHI_FEE * avgFill)
         atRisk   += pos.cost
       }
     } else {
@@ -781,7 +783,7 @@ async function renderDaySummary(date, data) {
           const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
           const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
           atRisk   += face * fill / 100
-          bestCase += face * win / 100 * (1 - KALSHI_FEE)
+          bestCase += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
         }
       }
     }
@@ -1023,7 +1025,7 @@ function buildPitcherCard(p) {
     const fillCents  = mid != null ? (b.side === 'YES' ? mid + halfSpread : (100 - mid) + halfSpread) : null
     const winCents   = mid != null ? (b.side === 'YES' ? (100 - mid) - halfSpread : mid - halfSpread) : null
     const wager  = fillCents != null && face != null ? fmt$(face * fillCents / 100) : '—'
-    const potWin = winCents  != null && face != null ? fmt$(face * winCents / 100 * (1 - KALSHI_FEE)) : '—'
+    const potWin = winCents  != null && face != null && fillCents != null ? fmt$(face * winCents / 100 * (1 - KALSHI_FEE * fillCents / 100)) : '—'
     const edgeStr = b.edge != null ? `Edge: +${(b.edge * 100).toFixed(1)}¢` : ''
     const midStr  = b.market_mid != null ? `Market: ${b.market_mid}¢` : ''
 
