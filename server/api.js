@@ -1054,17 +1054,26 @@ router.get('/ks/bettors', wrap(async (req, res) => {
       FROM ks_bets WHERE user_id=? AND live_bet=0
     `, [today, today, u.id])
 
-    const totalPnl   = Number(row?.total_pnl   || 0)
-    const bankroll   = Number(u.starting_bankroll || 1000) + totalPnl
+    // Fetch live Kalshi balance using user's stored credentials (fall back to env vars for Adam-Live)
+    let kalshiBalance = null
+    try {
+      const creds = u.kalshi_key_id
+        ? { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key }
+        : {}
+      const kb = await getKalshiBalance(creds)
+      kalshiBalance = kb.balance_usd
+    } catch { /* non-fatal */ }
+
     return {
       id:              u.id,
       name:            u.name,
       start_bankroll:  Number(u.starting_bankroll || 1000),
-      bankroll:        roundTo(bankroll, 2),
-      total_pnl:       roundTo(totalPnl, 2),
-      total_wagered:   roundTo(Number(row?.total_wagered   || 0), 2),
-      today_pnl:       roundTo(Number(row?.today_pnl       || 0), 2),
-      today_wagered:   roundTo(Number(row?.today_wagered   || 0), 2),
+      bankroll:        kalshiBalance ?? roundTo(Number(u.starting_bankroll || 1000) + Number(row?.total_pnl || 0), 2),
+      kalshi_balance:  kalshiBalance,
+      total_pnl:       roundTo(Number(row?.total_pnl     || 0), 2),
+      total_wagered:   roundTo(Number(row?.total_wagered || 0), 2),
+      today_pnl:       roundTo(Number(row?.today_pnl     || 0), 2),
+      today_wagered:   roundTo(Number(row?.today_wagered || 0), 2),
       wins:            Number(row?.wins    || 0),
       losses:          Number(row?.losses  || 0),
       pending:         Number(row?.pending || 0),

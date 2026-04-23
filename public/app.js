@@ -181,18 +181,20 @@ async function refreshBettorCards() {
 
   wrap.style.display = 'grid'
   wrap.innerHTML = bettors.map(b => {
-    const pnlCls  = b.total_pnl >= 0 ? 'good' : 'bad'
+    const pnlCls   = b.total_pnl >= 0 ? 'good' : 'bad'
     const todayCls = b.today_pnl >= 0 ? 'good' : 'bad'
     const pnlSign  = b.total_pnl >= 0 ? '+' : ''
     const todaySign = b.today_pnl >= 0 ? '+' : ''
+    const isLive   = b.kalshi_balance != null
     const roi = b.start_bankroll > 0
-      ? ((b.total_pnl / b.start_bankroll) * 100).toFixed(1)
+      ? (((b.bankroll - b.start_bankroll) / b.start_bankroll) * 100).toFixed(1)
       : '0.0'
+    const roiSign = Number(roi) >= 0 ? '+' : ''
     return `
       <div class="bettor-card">
         <div class="bettor-name">${b.name}</div>
         <div class="bettor-bankroll ${pnlCls}">${fmt$(b.bankroll, true)}</div>
-        <div class="bettor-meta">Start: ${fmt$(b.start_bankroll, true)} · ROI: <b class="${pnlCls}">${pnlSign}${roi}%</b></div>
+        <div class="bettor-meta">Start: ${fmt$(b.start_bankroll, true)} · ROI: <b class="${pnlCls}">${roiSign}${roi}%</b>${isLive ? ' · <span style="color:#4caf50;font-size:10px">LIVE</span>' : ''}</div>
         <div class="bettor-stats">
           <div class="bettor-stat"><span>Today P&L</span><b class="${todayCls}">${todaySign}${fmt$(b.today_pnl)}</b></div>
           <div class="bettor-stat"><span>All-time P&L</span><b class="${pnlCls}">${pnlSign}${fmt$(b.total_pnl)}</b></div>
