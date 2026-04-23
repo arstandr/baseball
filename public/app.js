@@ -1398,7 +1398,24 @@ async function pollLive(date) {
   // Refresh live bets section on every live poll
   try { await loadLiveBets(date) } catch {}
 
-  // Refresh best case from live Kalshi positions on every poll
+  // Refresh morning picks cards + best case from live Kalshi positions on every poll
+  try {
+    const uid = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+    const uidParam = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
+    const pendingTickers = _dailyPitchers.flatMap(p => (p.bets || []).filter(b => !b.result && b.ticker).map(b => b.ticker))
+    const [mpRaw, posRaw] = await Promise.all([
+      pendingTickers.length
+        ? fetchJson(`/api/ks/market-prices?tickers=${[...new Set(pendingTickers)].join(',')}`).catch(() => [])
+        : Promise.resolve([]),
+      fetchJson(`/api/ks/kalshi-positions${uid}`).catch(() => []),
+    ])
+    const marketPrices = {}
+    for (const m of (mpRaw || [])) marketPrices[m.ticker] = m
+    const positions = {}
+    for (const p of (posRaw || [])) if (p.ticker) positions[p.ticker] = p
+    renderSimpleBetList(_dailyPitchers, date, marketPrices, positions)
+  } catch {}
+
   try { await refreshBestCase(date) } catch {}
 
   // If everything is final and all bets have settled results, stop polling
