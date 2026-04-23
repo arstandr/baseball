@@ -162,14 +162,16 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
   )
   if (existing) return
 
-  // In-game daily cap: check user's live_daily_risk_pct against total live bets today
+  // In-game cap: based on OUTSTANDING exposure (pending bets only), not total wagered.
+  // As afternoon bets settle, the slot opens up for evening games.
+  // Rule E (drawdown halt) still prevents spiraling on bad days.
   const userRow = await db.one(
     `SELECT starting_bankroll, live_daily_risk_pct FROM users WHERE id = ?`, [userId],
   )
   if (userRow) {
     const cap = (userRow.starting_bankroll || 1000) * (userRow.live_daily_risk_pct ?? 0.10)
     const spent = await db.one(
-      `SELECT COALESCE(SUM(bet_size), 0) as total FROM ks_bets WHERE bet_date=? AND live_bet=1 AND user_id=?`,
+      `SELECT COALESCE(SUM(bet_size), 0) as total FROM ks_bets WHERE bet_date=? AND live_bet=1 AND user_id=? AND result IS NULL`,
       [TODAY, userId],
     )
     if ((spent?.total || 0) + betSize > cap) {

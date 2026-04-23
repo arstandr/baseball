@@ -259,6 +259,19 @@ async function logEdges() {
 
     const dailyBudget = bankroll * riskPct
 
+    // Subtract capital already deployed today so re-runs (e.g. lineup refresh)
+    // can't stack bets on top of the morning run and exceed the daily % cap.
+    const alreadySpent = await db.one(
+      `SELECT COALESCE(SUM(capital_at_risk), 0) AS spent
+         FROM ks_bets WHERE bet_date=? AND live_bet=0 AND user_id=?`,
+      [TODAY, bettor.id],
+    )
+    const spentToday = Number(alreadySpent?.spent || 0)
+    if (spentToday >= dailyBudget) {
+      console.log(`[ks-bets] ${bettor.name}: daily budget $${dailyBudget.toFixed(0)} already fully deployed ($${spentToday.toFixed(0)} out) — skipping`)
+      continue
+    }
+
     // Size each bet proportionally, then enforce hard budget cap by taking
     // highest-edge bets first and stopping once the budget is spent.
     const withFace = guardedEdges
@@ -271,7 +284,7 @@ async function logEdges() {
       })
       .sort((a, b) => b._edgeVal - a._edgeVal)  // highest edge first
 
-    let budgetLeft = dailyBudget
+    let budgetLeft = dailyBudget - spentToday
     const sized = []
     for (const e of withFace) {
       if (budgetLeft <= 0) break
