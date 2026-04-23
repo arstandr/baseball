@@ -996,14 +996,16 @@ function updatePitcherCardLive(p) {
     }
 
     if (!isNo) {
-      if (bs.needed === 0)  { badge.textContent = '✓ HIT';  badge.className = 'pc-badge pc-badge--win' }
-      else if (!p.still_in) { badge.textContent = `Pulled — ${bs.ks} Ks`; badge.className = 'pc-badge pc-badge--loss' }
-      else                  { badge.textContent = `Need ${bs.needed} more` }
+      if (bs.needed === 0)       { badge.textContent = '✅ COVERED';          badge.className = 'pc-badge pc-badge--win pc-badge--covered' }
+      else if (!p.still_in)      { badge.textContent = `❌ Out at ${bs.ks}K — needed ${bs.strike}`;  badge.className = 'pc-badge pc-badge--loss' }
+      else if (bs.needed === 1)  { badge.textContent = `🔥 ${bs.ks} Ks — 1 MORE to win!`;           badge.className = 'pc-badge pc-badge--oneaway' }
+      else                       { badge.textContent = `Has ${bs.ks} — needs ${bs.strike} to win`;   badge.className = 'pc-badge' }
     } else {
-      if (bs.ks >= bs.strike)  { badge.textContent = '✗ Over';      badge.className = 'pc-badge pc-badge--loss' }
-      else if (p.is_final)     { badge.textContent = '✓ Safe';      badge.className = 'pc-badge pc-badge--win' }
-      else if (!p.still_in)    { badge.textContent = '✓ Safe (out)'; badge.className = 'pc-badge pc-badge--win' }
-      else                     { badge.textContent = `At ${bs.ks} of ${bs.strike}` }
+      if (bs.ks >= bs.strike)    { badge.textContent = `❌ Hit ${bs.ks}K — needed to stay under ${bs.strike}`; badge.className = 'pc-badge pc-badge--loss' }
+      else if (p.is_final)       { badge.textContent = `✅ Stayed under ${bs.strike} (${bs.ks}K)`;             badge.className = 'pc-badge pc-badge--win pc-badge--covered' }
+      else if (!p.still_in)      { badge.textContent = `✅ Done at ${bs.ks}K — under ${bs.strike}`;            badge.className = 'pc-badge pc-badge--win pc-badge--covered' }
+      else if (bs.ks === bs.strike - 1) { badge.textContent = `⚠️ At ${bs.ks}K — one more and we lose`;       badge.className = 'pc-badge pc-badge--oneaway' }
+      else                       { badge.textContent = `At ${bs.ks}K — needs to stay under ${bs.strike}`;      badge.className = 'pc-badge' }
     }
   }
 

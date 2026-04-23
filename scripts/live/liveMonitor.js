@@ -20,7 +20,7 @@ import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { getAuthHeaders, placeOrder, getMarketPrice } from '../../lib/kalshi.js'
 import { kellySizing, capitalAtRisk } from '../../lib/kelly.js'
-import { notifyLiveBet, notifyCovered, notifyDead, notifyGameResult, notifyDailyReport } from '../../lib/discord.js'
+import { notifyLiveBet, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -317,9 +317,10 @@ async function main() {
 
   // Track which in-game bets we've already placed this session (avoid dups)
   const placed = new Set()
-  // Track cover/dead alerts already sent
+  // Track cover/dead/one-away alerts already sent
   const covered = new Set()
   const dead    = new Set()
+  const oneAway = new Set()
   // Track which games have been settled + Discord'd
   const settledGames = new Set()
 
@@ -385,6 +386,14 @@ async function main() {
 
           for (const bet of openBets) {
             const key = `${bet.id}`
+
+            // One away: YES bet needs exactly 1 more K (still pitching)
+            if (bet.side === 'YES' && isCurrent && currentKs === bet.strike - 1 && !oneAway.has(key) && !covered.has(key)) {
+              oneAway.add(key)
+              const pnl = bet.bet_size * (1 - (bet.market_mid ?? 50) / 100)
+              console.log(`\n[live] 🔥 ONE AWAY ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)`)
+              await notifyOneAway({ pitcherName: ctx.pitcherName, strike: bet.strike, pnl, currentKs, game: ctx.game })
+            }
 
             // Cover: pitcher already has enough Ks
             if (bet.side === 'YES' && currentKs >= bet.strike && !covered.has(key)) {

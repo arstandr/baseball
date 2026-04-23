@@ -621,6 +621,9 @@ a:hover { text-decoration: underline; }
 .pc-badge--win     { background: rgba(63,185,80,0.2);  color: var(--good); }
 .pc-badge--loss    { background: rgba(248,81,73,0.2);  color: var(--bad);  }
 .pc-badge--pending { background: rgba(0,212,170,0.12); color: var(--accent); }
+.pc-badge--covered { background: rgba(63,185,80,0.35); color: var(--good); font-weight: 700; border: 1px solid rgba(63,185,80,0.5); }
+.pc-badge--oneaway { background: rgba(243,156,18,0.25); color: #f39c12; font-weight: 700; animation: pulse-orange 1.2s ease-in-out infinite; }
+@keyframes pulse-orange { 0%,100% { opacity:1; } 50% { opacity:0.6; } }
 
 /* Heat map — last 5 starts vs each threshold */
 .pc-heatmap {
