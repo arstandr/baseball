@@ -2061,4 +2061,17 @@ router.get('/ks/testing', wrap(async (req, res) => {
   res.json({ calibration, lambda_accuracy, thresholds, model_notes })
 }))
 
+// GET /api/agent/status — The Closer heartbeat
+router.get('/agent/status', wrap(async (req, res) => {
+  const rows = await db.all(`SELECT key, value, updated_at FROM agent_heartbeat WHERE key IN ('closer','closer_last_update')`)
+  const byKey = {}
+  for (const r of rows) {
+    try { byKey[r.key] = { ...JSON.parse(r.value), updated_at: r.updated_at } } catch { byKey[r.key] = { updated_at: r.updated_at } }
+  }
+  res.json({
+    heartbeat:   byKey['closer']             || null,
+    last_update: byKey['closer_last_update'] || null,
+  })
+}))
+
 export default router

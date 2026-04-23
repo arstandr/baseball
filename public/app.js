@@ -33,6 +33,44 @@ async function init() {
   await refreshAll()
   setInterval(refreshHero, 3 * 60 * 1000)
   setInterval(updateLastSeen, 15 * 1000)
+  refreshCloserStatus()
+  setInterval(refreshCloserStatus, 60 * 1000)
+}
+
+async function refreshCloserStatus() {
+  const dot   = document.getElementById('closer-dot')
+  const meta  = document.getElementById('closer-meta')
+  if (!dot || !meta) return
+
+  const data = await fetchJson('/api/agent/status').catch(() => null)
+  if (!data?.heartbeat) {
+    dot.className = 'closer-dot'
+    meta.textContent = 'offline'
+    return
+  }
+
+  const hb  = data.heartbeat
+  const ago = hb.updated_at ? Math.floor((Date.now() - new Date(hb.updated_at + 'Z').getTime()) / 60000) : null
+  const fresh = ago != null && ago < 5
+
+  dot.className = `closer-dot ${fresh ? 'online' : 'stale'}`
+
+  let metaParts = []
+  if (fresh) {
+    metaParts.push(hb.status === 'running' ? 'running' : 'idle')
+    if (ago === 0) metaParts.push('just now')
+    else metaParts.push(`${ago}m ago`)
+  } else {
+    metaParts.push(ago != null ? `last seen ${ago}m ago` : 'stale')
+  }
+
+  if (data.last_update?.msg) {
+    const u = data.last_update
+    const uAgo = u.updated_at ? Math.floor((Date.now() - new Date(u.updated_at + 'Z').getTime()) / 60000) : null
+    metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : ''}: ${u.msg.slice(0, 40)}`)
+  }
+
+  meta.textContent = metaParts.join(' ')
 }
 
 function fmtAgo(ts) {
@@ -354,10 +392,15 @@ function renderSimpleBetList(pitchers, date) {
     p.bets.map(b => ({ ...b, pitcher_name: p.pitcher_name, pitcher_id: p.pitcher_id }))
   )
 
+  const picksHead = document.getElementById('sc-picks-head')
+
   if (!allBets.length) {
     container.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
+    if (picksHead) picksHead.hidden = true
     return
   }
+
+  if (picksHead) picksHead.hidden = false
 
   // Sort: losses first, then wins, then pending
   const sortOrder = b => b.result === 'loss' ? 0 : b.result === 'win' ? 1 : 2

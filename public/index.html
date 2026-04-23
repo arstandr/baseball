@@ -22,6 +22,11 @@
       <button class="mode"        data-view="settings" role="tab">Settings</button>
       <button class="mode"        data-view="testing"  role="tab" style="opacity:0.5;font-size:10px">Advanced</button>
     </nav>
+    <div class="closer-status" id="closer-status" title="The Closer — live monitor agent">
+      <span class="closer-dot" id="closer-dot"></span>
+      <span class="closer-label">THE CLOSER</span>
+      <span class="closer-meta" id="closer-meta"></span>
+    </div>
     <div class="user" id="user-chip">
       <div class="user-meta">
         <div class="user-name-row">
@@ -96,7 +101,8 @@
       <div class="day-header" id="day-header" hidden></div>
       <div class="live-banner" id="live-banner" hidden></div>
 
-      <!-- Simple bet list (new) replaces pitcher-list -->
+      <!-- Morning Picks section -->
+      <div class="sc-section-head" id="sc-picks-head" hidden>☀️ MORNING PICKS</div>
       <div id="sc-bet-list" class="sc-bet-list"></div>
 
       <!-- Keep old pitcher-list hidden (existing code writes here, we ignore it) -->
