@@ -395,7 +395,7 @@ function renderSimpleBetList(pitchers, date, marketPrices = {}) {
 
   // Flatten all bets with pitcher context
   const allBets = pitchers.flatMap(p =>
-    p.bets.map(b => ({ ...b, pitcher_name: p.pitcher_name, pitcher_id: p.pitcher_id }))
+    p.bets.map(b => ({ ...b, pitcher_name: p.pitcher_name, pitcher_id: p.pitcher_id, game_time: p.game_time, game: p.game || b.game }))
   )
 
   const picksHead = document.getElementById('sc-picks-head')
@@ -460,7 +460,8 @@ function renderSimpleBetList(pitchers, date, marketPrices = {}) {
       if (b.actual_ks != null && b.actual_ks > 0) {
         pendingText = `Has ${b.actual_ks} strikeout${b.actual_ks !== 1 ? 's' : ''} so far`
       } else {
-        pendingText = 'Game not started yet'
+        const timeStr = b.game_time ? fmtGameTime(b.game_time) : null
+        pendingText = timeStr ? `${b.game || 'Game'} · ${timeStr}` : 'Game not started yet'
       }
     }
 
@@ -763,7 +764,9 @@ async function renderDaySummary(date, data) {
   if (!data || !data.pitchers?.length) {
     if (verdictEl) verdictEl.textContent = 'No bets for this day.'
     if (recordEl)  recordEl.textContent = ''
-    if (bestcaseCard) bestcaseCard.style.display = 'none'
+    // Only hide bestcase if it wasn't already showing — pollLive passes empty pitchers
+    // even when pre-game bets exist (live endpoint only includes started/preview games)
+    if (bestcaseCard && bestcaseCard.style.display !== 'flex') bestcaseCard.style.display = 'none'
   } else {
     // Use live Kalshi positions if available, otherwise fall back to DB bet sizes
     if (livePositions?.length) {
