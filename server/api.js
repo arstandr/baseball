@@ -2115,16 +2115,21 @@ router.get('/ks/kalshi-positions', wrap(async (req, res) => {
   const { default: axios } = await import('axios')
   const { getAuthHeaders } = await import('../lib/kalshi.js')
   const BASE = 'https://api.elections.kalshi.com/trade-api/v2'
-  const headers = getAuthHeaders('GET', '/trade-api/v2/portfolio/positions')
-  const r = await axios({ method: 'GET', url: BASE + '/portfolio/positions', params: { count_filter: 'position', limit: 100 }, headers, timeout: 10000 })
-  const positions = r.data?.market_positions || []
-  res.json(positions.map(p => ({
-    ticker:    p.ticker,
-    contracts: Math.round(Math.abs(Number(p.position_fp || 0))),
-    side:      Number(p.position_fp) >= 0 ? 'YES' : 'NO',
-    cost:      Number(p.market_exposure_dollars || 0),
-    pnl:       Number(p.realized_pnl_dollars || 0),
-  })))
+  try {
+    const headers = getAuthHeaders('GET', '/trade-api/v2/portfolio/positions', {}, creds)
+    const r = await axios({ method: 'GET', url: BASE + '/portfolio/positions', params: { count_filter: 'position', limit: 100 }, headers, timeout: 10000 })
+    const positions = r.data?.market_positions || []
+    res.json(positions.map(p => ({
+      ticker:    p.ticker,
+      contracts: Math.round(Math.abs(Number(p.position_fp || 0))),
+      side:      Number(p.position_fp) >= 0 ? 'YES' : 'NO',
+      cost:      Number(p.market_exposure_dollars || 0),
+      pnl:       Number(p.realized_pnl_dollars || 0),
+    })))
+  } catch (e) {
+    console.error('[kalshi-positions] API error:', e.message)
+    res.json([])
+  }
 }))
 
 // GET /api/ks/market-prices?tickers=T1,T2,... — current Kalshi bid/ask for open positions
