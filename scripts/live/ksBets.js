@@ -17,7 +17,7 @@ import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { toKalshiAbbr, getAuthHeaders, placeOrder, getBalance as getKalshiBalance } from '../../lib/kalshi.js'
-import { notifyEdges, notifyDailyReport } from '../../lib/discord.js'
+import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
 const MODE = process.argv[2] || 'report'
@@ -428,7 +428,7 @@ async function logEdges() {
   // Discord: post morning picks
   if (logged > 0) {
     const discordEdges = edgesJson.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
-    await notifyEdges(discordEdges, TODAY)
+    await notifyEdges(discordEdges, TODAY, await getAllWebhooks(db))
   }
 }
 
@@ -618,7 +618,7 @@ async function settleBets() {
     seasonW:      sp.w       || 0,
     seasonL:      (sp.n || 0) - (sp.w || 0),
     totalWagered: sp.wagered || 0,
-  })
+  }, await getAllWebhooks(db))
 }
 
 // ── REPORT mode ───────────────────────────────────────────────────────────────

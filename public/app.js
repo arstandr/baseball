@@ -1515,11 +1515,12 @@ function updatePitcherCardLive(p) {
 // TRENDS view
 // ──────────────────────────────────────────────────────────────────────────
 async function refreshTrendsView() {
+  const uid = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
   const [bankroll, monthly, weekly, stats, breakdown, leaderboard] = await Promise.all([
-    fetchJson('/api/ks/bankroll').catch(() => []),
-    fetchJson('/api/ks/monthly').catch(() => []),
-    fetchJson('/api/ks/weekly').catch(() => []),
-    fetchJson('/api/ks/stats').catch(() => null),
+    fetchJson(`/api/ks/bankroll${uid}`).catch(() => []),
+    fetchJson(`/api/ks/monthly${uid}`).catch(() => []),
+    fetchJson(`/api/ks/weekly${uid}`).catch(() => []),
+    fetchJson(`/api/ks/stats${uid}`).catch(() => null),
     fetchJson('/api/ks/edge-breakdown').catch(() => null),
     fetchJson('/api/ks/pitcher-leaderboard').catch(() => null),
   ])

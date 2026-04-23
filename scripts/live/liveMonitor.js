@@ -20,7 +20,7 @@ import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { getAuthHeaders, placeOrder, getMarketPrice } from '../../lib/kalshi.js'
 import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
-import { notifyLiveBet, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport } from '../../lib/discord.js'
+import { notifyLiveBet, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -269,7 +269,7 @@ async function settleAndNotifyGame(game, boxData) {
   const gamePnl = settled.reduce((s, b) => s + (b.pnl || 0), 0)
   console.log(`\n[live] ${gameLabel} settled: ${settled.filter(b => b.result === 'win').length}W/${settled.filter(b => b.result === 'loss').length}L  ${gamePnl >= 0 ? '+' : ''}$${gamePnl.toFixed(2)}`)
 
-  await notifyGameResult({ game: gameLabel, bets: settled, gamePnl })
+  await notifyGameResult({ game: gameLabel, bets: settled, gamePnl }, await getAllWebhooks(db))
 }
 
 // ── End-of-day report ─────────────────────────────────────────────────────────
@@ -301,7 +301,7 @@ async function sendDailyReport() {
     seasonW:     sp.w     || 0,
     seasonL:     (sp.n || 0) - (sp.w || 0),
     totalWagered: sp.wagered || 0,
-  })
+  }, await getAllWebhooks(db))
 }
 
 // ── Main monitor loop ─────────────────────────────────────────────────────────
@@ -478,7 +478,7 @@ async function main() {
               oneAway.add(key)
               const pnl = bet.bet_size * (1 - (bet.market_mid ?? 50) / 100)
               console.log(`\n[live] 🔥 ONE AWAY ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)`)
-              await notifyOneAway({ pitcherName: ctx.pitcherName, strike: bet.strike, pnl, currentKs, game: ctx.game })
+              await notifyOneAway({ pitcherName: ctx.pitcherName, strike: bet.strike, pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
             }
 
             // Cover: pitcher already has enough Ks — settle immediately, don't wait for game to end
@@ -491,7 +491,7 @@ async function main() {
                 [currentKs, now, pnl, bet.id],
               )
               console.log(`\n[live] ✅ COVERED + SETTLED ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)  +$${pnl.toFixed(2)}`)
-              await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, game: ctx.game })
+              await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
             }
 
             // Dead: YES bet, starter pulled and can't reach threshold — settle as loss immediately
@@ -504,7 +504,7 @@ async function main() {
                 [currentKs, now, pnl, bet.id],
               )
               console.log(`\n[live] ❌ DEAD + SETTLED ${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)  $${pnl.toFixed(2)}`)
-              await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: 'starter pulled' })
+              await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: 'starter pulled' }, await getAllWebhooks(db))
             }
 
             // Dead: NO bet, pitcher already at or past threshold — settle as loss immediately
@@ -517,7 +517,7 @@ async function main() {
                 [currentKs, now, pnl, bet.id],
               )
               console.log(`\n[live] ❌ DEAD + SETTLED (NO) ${ctx.pitcherName} hit ${currentKs}K (needed under ${bet.strike})  $${pnl.toFixed(2)}`)
-              await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: `hit ${currentKs}K` })
+              await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: `hit ${currentKs}K` }, await getAllWebhooks(db))
             }
           }
 
@@ -658,7 +658,7 @@ async function main() {
               currentIPraw,
               currentPitches,
               paper: !LIVE,
-            })
+            }, await getAllWebhooks(db))
 
             if (LIVE) _dailyLoss  // recheck after live order
           }
