@@ -859,16 +859,28 @@ async function refreshBestCase(date) {
   let bestCase = 0, atRisk = 0
   const dayPnl = daily?.day_pnl ?? 0
 
-  if (livePositions?.length) {
-    for (const pos of livePositions) {
-      const avgFill = pos.contracts > 0 ? pos.cost / pos.contracts : 0.5
-      bestCase += (pos.contracts - pos.cost) * (1 - KALSHI_FEE * avgFill)
-      atRisk   += pos.cost
-    }
-  } else {
-    for (const p of (daily?.pitchers ?? [])) {
-      for (const b of (p.bets ?? [])) {
-        if (b.result) continue
+  // Build ticker set of today's pending bets so we only count relevant positions
+  const pendingTickers = new Set()
+  for (const p of (daily?.pitchers ?? []))
+    for (const b of (p.bets ?? []))
+      if (!b.result && b.ticker) pendingTickers.add(b.ticker)
+
+  // Build position map for today's pending tickers
+  const posMap = {}
+  for (const pos of (livePositions ?? []))
+    if (pos.ticker && pendingTickers.has(pos.ticker)) posMap[pos.ticker] = pos
+
+  for (const p of (daily?.pitchers ?? [])) {
+    for (const b of (p.bets ?? [])) {
+      if (b.result) continue
+      const pos = b.ticker ? posMap[b.ticker] : null
+      if (pos && pos.contracts > 0) {
+        // Real Kalshi data: contracts held, cost = what was paid
+        const avgFill = pos.cost / pos.contracts
+        bestCase += pos.contracts * (1 - avgFill) * (1 - KALSHI_FEE * avgFill)
+        atRisk   += pos.cost
+      } else {
+        // Fallback: estimate from stored bet_size
         const mid  = Number(b.market_mid ?? 50)
         const face = Number(b.bet_size   ?? 0)
         const hs   = (b.spread ?? 4) / 2
