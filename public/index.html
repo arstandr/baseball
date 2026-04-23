@@ -22,6 +22,11 @@
       <button class="mode"        data-view="settings" role="tab">Settings</button>
       <button class="mode"        data-view="testing"  role="tab" style="opacity:0.5;font-size:10px">Advanced</button>
     </nav>
+    <div class="closer-status" id="closer-status" title="The Closer — live monitor agent">
+      <span class="closer-dot" id="closer-dot"></span>
+      <span class="closer-label">THE CLOSER</span>
+      <span class="closer-meta" id="closer-meta"></span>
+    </div>
     <div class="user" id="user-chip">
       <div class="user-meta">
         <div class="user-name-row">
@@ -48,7 +53,7 @@
         <div class="sh-stat-sub">Started with <b id="sh-start">$—</b></div>
       </div>
       <div class="sh-stat">
-        <div class="sh-stat-label">TOTAL PROFIT / LOSS</div>
+        <div class="sh-stat-label">TODAY'S P&amp;L</div>
         <div class="sh-stat-value" id="sh-total-pnl">—</div>
         <div class="sh-stat-sub" id="sh-total-roi"></div>
       </div>
@@ -96,7 +101,8 @@
       <div class="day-header" id="day-header" hidden></div>
       <div class="live-banner" id="live-banner" hidden></div>
 
-      <!-- Simple bet list (new) replaces pitcher-list -->
+      <!-- Morning Picks section -->
+      <div class="sc-section-head" id="sc-picks-head" hidden>☀️ MORNING PICKS</div>
       <div id="sc-bet-list" class="sc-bet-list"></div>
 
       <!-- Keep old pitcher-list hidden (existing code writes here, we ignore it) -->
@@ -118,6 +124,22 @@
 
     <!-- ══════════════ TRENDS VIEW ══════════════ -->
     <section class="view" id="view-trends" hidden>
+
+      <!-- Period selector -->
+      <div class="trends-period-bar">
+        <button class="period-btn active" data-period="all">All Time</button>
+        <button class="period-btn" data-period="month">This Month</button>
+        <button class="period-btn" data-period="week">This Week</button>
+        <button class="period-btn" data-period="since_start">Since Apr 23</button>
+        <button class="period-btn" data-period="custom">Custom</button>
+        <div class="period-custom-range" id="period-custom-range" style="display:none">
+          <input type="date" id="period-from" />
+          <span>–</span>
+          <input type="date" id="period-to" />
+          <button class="filter-btn" id="period-apply">Go</button>
+        </div>
+      </div>
+
       <div class="grid-1">
         <div class="panel">
           <div class="panel-head">
@@ -341,11 +363,12 @@
         <div class="panel">
           <div class="panel-head"><h2>System</h2></div>
           <div class="sys-info" id="sys-info">
-            <div class="sys-row"><span>Starting bankroll</span><b id="sys-bankroll">$5,000</b></div>
+            <div class="sys-row"><span>Starting bankroll (per person)</span><b>$1,000</b></div>
             <div class="sys-row"><span>Minimum edge to place a bet</span><b>5¢</b></div>
             <div class="sys-row"><span>Bet sizing aggressiveness</span><b>Quarter Kelly (25%)</b></div>
             <div class="sys-row"><span>Max bet per game</span><b>5% of bankroll</b></div>
-            <div class="sys-row"><span>Max price on NO bets</span><b>80¢</b></div>
+            <div class="sys-row"><span>Max price on YES bets</span><b>80¢</b></div>
+            <div class="sys-row"><span>Max price on NO bets (live)</span><b>55¢</b></div>
           </div>
           <div class="panel-head" style="margin-top:20px"><h2>Daily Schedule</h2></div>
           <div class="sys-info">
