@@ -51,9 +51,10 @@ async function refreshCloserStatus() {
   }
 
   const hb  = data.heartbeat
-  const tsStr = hb.updated_at ? (hb.updated_at.endsWith('Z') ? hb.updated_at : hb.updated_at + 'Z') : null
-  const ago = tsStr ? Math.floor((Date.now() - new Date(tsStr).getTime()) / 60000) : null
-  const fresh = ago != null && ago < 5
+  const tsRaw = hb.ts || hb.updated_at || null
+  const tsStr = tsRaw ? (tsRaw.endsWith('Z') ? tsRaw : tsRaw + 'Z') : null
+  const ago = tsStr && !isNaN(new Date(tsStr)) ? Math.floor((Date.now() - new Date(tsStr).getTime()) / 60000) : null
+  const fresh = ago != null && ago < 10
 
   dot.className = `closer-dot ${fresh ? 'online' : 'stale'}`
 
@@ -68,9 +69,10 @@ async function refreshCloserStatus() {
 
   if (data.last_update?.msg) {
     const u = data.last_update
-    const uTs  = u.updated_at ? (u.updated_at.endsWith('Z') ? u.updated_at : u.updated_at + 'Z') : null
-    const uAgo = uTs ? Math.floor((Date.now() - new Date(uTs).getTime()) / 60000) : null
-    metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : ''}: ${u.msg.slice(0, 40)}`)
+    const uRaw = u.ts || u.updated_at || null
+    const uTs  = uRaw ? (uRaw.endsWith('Z') ? uRaw : uRaw + 'Z') : null
+    const uAgo = uTs && !isNaN(new Date(uTs)) ? Math.floor((Date.now() - new Date(uTs).getTime()) / 60000) : null
+    metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : 'recently'}`)
   }
 
   meta.textContent = metaParts.join(' ')
@@ -727,22 +729,34 @@ function renderDaySummary(date, data) {
   const KALSHI_FEE = 0.07
   let atRisk = 0, bestCase = 0
 
+  // Fetch live Kalshi positions for accurate best case
+  const uid = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+  const livePositions = await fetchJson(`/api/ks/kalshi-positions${uid}`).catch(() => null)
+
   if (!data || !data.pitchers?.length) {
     if (verdictEl) verdictEl.textContent = 'No bets for this day.'
     if (recordEl)  recordEl.textContent = ''
     if (bestcaseCard) bestcaseCard.style.display = 'none'
   } else {
-    // Compute best case from pending bets
-    for (const p of data.pitchers) {
-      for (const b of p.bets) {
-        if (b.result) continue
-        const mid  = Number(b.market_mid ?? 50)
-        const face = Number(b.bet_size   ?? 0)
-        const hs   = (b.spread ?? 4) / 2
-        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
-        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
-        atRisk   += face * fill / 100
-        bestCase += face * win / 100 * (1 - KALSHI_FEE)
+    // Use live Kalshi positions if available, otherwise fall back to DB bet sizes
+    if (livePositions?.length) {
+      for (const pos of livePositions) {
+        // contracts * $1 payout * (1 - fee) - cost already paid
+        bestCase += pos.contracts * (1 - KALSHI_FEE) - pos.cost
+        atRisk   += pos.cost
+      }
+    } else {
+      for (const p of data.pitchers) {
+        for (const b of p.bets) {
+          if (b.result) continue
+          const mid  = Number(b.market_mid ?? 50)
+          const face = Number(b.bet_size   ?? 0)
+          const hs   = (b.spread ?? 4) / 2
+          const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+          const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+          atRisk   += face * fill / 100
+          bestCase += face * win / 100 * (1 - KALSHI_FEE)
+        }
       }
     }
 
