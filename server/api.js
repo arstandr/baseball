@@ -1421,7 +1421,7 @@ router.get('/ks/monthly', wrap(async (req, res) => {
             SUM(COALESCE(pnl,0))                                AS pnl,
             SUM(COALESCE(capital_at_risk, bet_size))            AS wagered,
             AVG(CASE WHEN result IS NOT NULL THEN edge END)     AS avg_edge
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL
+     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0
      GROUP BY ym ORDER BY ym ASC`,
   )
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
@@ -1453,7 +1453,7 @@ router.get('/ks/monthly', wrap(async (req, res) => {
 router.get('/ks/weekly', wrap(async (req, res) => {
   const rows = await db.all(
     `SELECT bet_date, COALESCE(pnl,0) AS pnl, result, bet_size
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL ORDER BY bet_date ASC`,
+     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0 ORDER BY bet_date ASC`,
   )
   if (!rows.length) return res.json([])
 
@@ -1660,7 +1660,7 @@ router.delete('/users/:name', wrap(async (req, res) => {
 router.get('/ks/stats', wrap(async (req, res) => {
   const rows = await db.all(
     `SELECT bet_date, result, pnl, bet_size, edge, model_prob, side
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL
+     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL AND paper = 0
      ORDER BY bet_date ASC, id ASC`,
   )
   if (!rows.length) {
