@@ -2102,6 +2102,31 @@ router.get('/ks/testing', wrap(async (req, res) => {
   res.json({ calibration, lambda_accuracy, thresholds, model_notes })
 }))
 
+// GET /api/ks/kalshi-positions — live positions from Kalshi API
+// Returns actual contracts held so the UI reflects real purchases.
+router.get('/ks/kalshi-positions', wrap(async (req, res) => {
+  const { user_id } = req.query
+  // Look up Kalshi creds for this user
+  let creds = {}
+  if (user_id) {
+    const u = await db.one(`SELECT kalshi_key_id, kalshi_key_content FROM users WHERE id = ?`, [user_id])
+    if (u?.kalshi_key_id) creds = { keyId: u.kalshi_key_id, keyContent: u.kalshi_key_content }
+  }
+  const { default: axios } = await import('axios')
+  const { getAuthHeaders } = await import('../lib/kalshi.js')
+  const BASE = 'https://api.elections.kalshi.com/trade-api/v2'
+  const headers = getAuthHeaders('GET', '/trade-api/v2/portfolio/positions')
+  const r = await axios({ method: 'GET', url: BASE + '/portfolio/positions', params: { count_filter: 'position', limit: 100 }, headers, timeout: 10000 })
+  const positions = r.data?.market_positions || []
+  res.json(positions.map(p => ({
+    ticker:    p.ticker,
+    contracts: Math.round(Math.abs(Number(p.position_fp || 0))),
+    side:      Number(p.position_fp) >= 0 ? 'YES' : 'NO',
+    cost:      Number(p.market_exposure_dollars || 0),
+    pnl:       Number(p.realized_pnl_dollars || 0),
+  })))
+}))
+
 // GET /api/agent/status — The Closer heartbeat
 router.get('/agent/status', wrap(async (req, res) => {
   const rows = await db.all(`SELECT key, value, updated_at FROM agent_heartbeat WHERE key IN ('closer','closer_last_update')`)
