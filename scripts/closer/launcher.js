@@ -157,7 +157,8 @@ async function main() {
 
   repairBatFile()
   _currentHash = git('rev-parse HEAD')
-  console.log(`[closer] version: ${_currentHash.slice(0, 7)}`)
+  const commitDate = git('log -1 --format=%cd --date=format:"%b %d %Y %I:%M %p"')
+  console.log(`[closer] last updated: ${commitDate}`)
 
   await writeHeartbeat('idle')
 
