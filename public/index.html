@@ -43,24 +43,19 @@
     </div>
     <div class="sh-stats">
       <div class="sh-stat">
-        <div class="sh-stat-label">Your money now</div>
+        <div class="sh-stat-label">YOUR ACCOUNT</div>
         <div class="sh-stat-value" id="sh-bankroll">$—</div>
         <div class="sh-stat-sub">Started with <b id="sh-start">$—</b></div>
       </div>
       <div class="sh-stat">
-        <div class="sh-stat-label">Since you started</div>
+        <div class="sh-stat-label">TOTAL PROFIT / LOSS</div>
         <div class="sh-stat-value" id="sh-total-pnl">—</div>
         <div class="sh-stat-sub" id="sh-total-roi"></div>
       </div>
       <div class="sh-stat" id="sh-bestcase-card" style="display:none">
-        <div class="sh-stat-label">Best case today</div>
+        <div class="sh-stat-label">BEST CASE TODAY</div>
         <div class="sh-stat-value good" id="sh-bestcase">—</div>
         <div class="sh-stat-sub">if all pending bets win</div>
-      </div>
-      <div class="sh-stat sh-stat-live" id="sh-live-stat" style="display:none">
-        <div class="sh-stat-label">Real money account</div>
-        <div class="sh-stat-value" id="sh-kalshi">—</div>
-        <div class="sh-stat-sub" id="sh-live-pnl"></div>
       </div>
     </div>
   </div>
@@ -75,15 +70,43 @@
       <div class="date-row">
         <div class="date-pills" id="date-pills"></div>
       </div>
+
+      <!-- Simple day summary (new) -->
+      <div class="sc-summary" id="sc-summary" hidden>
+        <div class="sc-summary-date" id="sc-summary-date"></div>
+        <div class="sc-scoreboxes">
+          <div class="sc-scorebox sc-scorebox-won">
+            <div class="sc-score-num" id="sc-won-count">0</div>
+            <div class="sc-score-label">✅ WON</div>
+          </div>
+          <div class="sc-scorebox sc-scorebox-lost">
+            <div class="sc-score-num" id="sc-lost-count">0</div>
+            <div class="sc-score-label">❌ LOST</div>
+          </div>
+          <div class="sc-scorebox sc-scorebox-wait">
+            <div class="sc-score-num" id="sc-wait-count">0</div>
+            <div class="sc-score-label">⏳ WAITING</div>
+          </div>
+        </div>
+        <div class="sc-day-total" id="sc-day-total"></div>
+      </div>
+
+      <!-- Keep existing elements that app.js writes to -->
       <div id="day-summary" class="day-summary" hidden></div>
       <div class="day-header" id="day-header" hidden></div>
       <div class="live-banner" id="live-banner" hidden></div>
-      <div class="pitcher-list" id="pitcher-list">
+
+      <!-- Simple bet list (new) replaces pitcher-list -->
+      <div id="sc-bet-list" class="sc-bet-list"></div>
+
+      <!-- Keep old pitcher-list hidden (existing code writes here, we ignore it) -->
+      <div class="pitcher-list" id="pitcher-list" style="display:none">
         <div class="empty" id="empty-today" hidden>
-          <div class="empty-title">No bets logged for this date</div>
-          <div class="empty-sub">Run the 9 AM edge script to generate picks.</div>
+          <div class="sc-empty">No bets placed for this date yet.</div>
+          <div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>
         </div>
       </div>
+
       <div id="live-bets-section" class="live-bets-section" hidden>
         <div class="lbs-header">
           <span class="lbs-title">IN-GAME WAGERS</span>

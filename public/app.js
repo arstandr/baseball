@@ -257,34 +257,26 @@ async function refreshBettorCards() {
   if (!wrap || !bettors.length) return
 
   wrap.style.display = 'grid'
+  wrap.className = 'sc-bettor-cards'
   wrap.innerHTML = bettors.map(b => {
-    const pnlCls   = b.total_pnl >= 0 ? 'good' : 'bad'
-    const todayCls = b.today_pnl >= 0 ? 'good' : 'bad'
-    const pnlSign  = b.total_pnl >= 0 ? '+' : ''
-    const todaySign = b.today_pnl >= 0 ? '+' : ''
-    const roi = b.start_bankroll > 0
-      ? (((b.bankroll - b.start_bankroll) / b.start_bankroll) * 100).toFixed(1)
-      : '0.0'
-    const roiSign = Number(roi) >= 0 ? '+' : ''
+    const pnlCls  = b.total_pnl >= 0 ? 'good' : 'bad'
+    const pnlSign = b.total_pnl >= 0 ? '+' : ''
+    const record  = `${b.wins}W · ${b.losses}L${b.pending > 0 ? ` · ${b.pending} pending` : ''}`
+    const modeBadge = b.paper
+      ? `<span style="font-size:12px;color:#94a3b8">💧 DRY MODE</span>`
+      : `<span style="font-size:12px;color:#22c55e">⚡ LIVE</span>`
     return `
-      <div class="bettor-card" data-bettor-id="${b.id}">
-        <div class="bettor-card-top">
-          <div class="bettor-name">${b.name}</div>
-          <div class="bettor-bankroll ${pnlCls}">${fmt$(b.bankroll, true)}</div>
-          <div class="bettor-meta">Start: ${fmt$(b.start_bankroll, true)} · ROI: <b class="${pnlCls}">${roiSign}${roi}%</b>
-            <button class="dry-toggle ${b.paper ? 'dry-on' : 'dry-off'}" data-id="${b.id}">
-              ${b.paper ? '💧 DRY MODE' : '⚡ LIVE'}
+      <div class="sc-bettor-card bettor-card" data-bettor-id="${b.id}">
+        <div class="bettor-card-top" style="padding:0;cursor:default">
+          <div class="sc-bettor-name">${b.name} &nbsp; ${modeBadge}
+            <button class="dry-toggle ${b.paper ? 'dry-on' : 'dry-off'}" data-id="${b.id}" style="margin-left:8px">
+              ${b.paper ? 'Switch to Live' : 'Switch to Dry'}
             </button>
           </div>
-          <div class="bettor-stats">
-            <div class="bettor-stat"><span>Today P&L</span><b class="${todayCls}">${todaySign}${fmt$(b.today_pnl)}</b></div>
-            <div class="bettor-stat"><span>All-time P&L</span><b class="${pnlCls}">${pnlSign}${fmt$(b.total_pnl)}</b></div>
-            <div class="bettor-stat"><span>Today Wagered</span><b>${fmt$(b.today_wagered)}</b></div>
-            <div class="bettor-stat"><span>Total Wagered</span><b>${fmt$(b.total_wagered)}</b></div>
-            <div class="bettor-stat"><span>Record</span><b>${b.wins}W-${b.losses}L</b></div>
-            <div class="bettor-stat"><span>Pending</span><b>${b.pending}</b></div>
-          </div>
-          <div class="bettor-expand-btn">▾</div>
+          <div class="sc-bettor-balance">${fmt$(b.bankroll, true)}</div>
+          <div class="sc-bettor-start">Started with ${fmt$(b.start_bankroll, true)}</div>
+          <div class="sc-bettor-pnl ${pnlCls}">${pnlSign}${fmt$(b.total_pnl)} total profit / loss</div>
+          <div class="sc-bettor-record">${record}</div>
         </div>
         <div class="bettor-drawer" hidden></div>
       </div>`
@@ -327,6 +319,111 @@ async function refreshBettorCards() {
       }
     })
   })
+}
+
+function betDescPlain(side, strike) {
+  return side === 'YES'
+    ? `Bet he'd get ${strike} or more strikeouts`
+    : `Bet he'd get fewer than ${strike} strikeouts`
+}
+
+function betOutcomePlain(side, strike, actualKs, result) {
+  if (actualKs == null) return null
+  if (side === 'YES') {
+    return result === 'win'
+      ? `Got ${actualKs} strikeouts — needed ${strike} or more ✓`
+      : `Got ${actualKs} strikeout${actualKs !== 1 ? 's' : ''} — needed ${strike} or more ✗`
+  } else {
+    return result === 'win'
+      ? `Got ${actualKs} strikeouts — needed fewer than ${strike} ✓`
+      : `Got ${actualKs} strikeout${actualKs !== 1 ? 's' : ''} — needed fewer than ${strike} ✗`
+  }
+}
+
+function renderSimpleBetList(pitchers, date) {
+  const container = document.getElementById('sc-bet-list')
+  if (!container) return
+
+  // Flatten all bets with pitcher context
+  const allBets = pitchers.flatMap(p =>
+    p.bets.map(b => ({ ...b, pitcher_name: p.pitcher_name, pitcher_id: p.pitcher_id }))
+  )
+
+  if (!allBets.length) {
+    container.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
+    return
+  }
+
+  // Sort: losses first, then wins, then pending
+  const sortOrder = b => b.result === 'loss' ? 0 : b.result === 'win' ? 1 : 2
+  const sorted = [...allBets].sort((a, b) => sortOrder(a) - sortOrder(b))
+
+  const KALSHI_FEE = 0.07
+
+  container.innerHTML = sorted.map(b => {
+    const isWin  = b.result === 'win'
+    const isLoss = b.result === 'loss'
+    const cls    = isWin ? 'sc-win' : isLoss ? 'sc-loss' : 'sc-wait'
+    const icon   = isWin ? '✅' : isLoss ? '❌' : '⏳'
+    const status = isWin ? 'WON' : isLoss ? 'LOST' : 'IN PROGRESS'
+
+    let amountStr = ''
+    if (b.result) {
+      const sign = (b.pnl ?? 0) >= 0 ? '+' : ''
+      amountStr = `${sign}${fmt$(b.pnl ?? 0)}`
+    } else {
+      // Best case for pending
+      const mid = Number(b.market_mid ?? 50)
+      const potential = b.side === 'YES'
+        ? (b.bet_size ?? 0) * (100 - mid) / 100 * (1 - KALSHI_FEE)
+        : (b.bet_size ?? 0) * mid / 100 * (1 - KALSHI_FEE)
+      amountStr = `up to +${fmt$(potential)}`
+    }
+
+    const desc    = betDescPlain(b.side, b.strike)
+    const outcome = betOutcomePlain(b.side, b.strike, b.actual_ks, b.result)
+
+    // Pending live status text
+    let pendingText = ''
+    if (!b.result) {
+      if (b.actual_ks != null && b.actual_ks > 0) {
+        pendingText = `Has ${b.actual_ks} strikeout${b.actual_ks !== 1 ? 's' : ''} so far`
+      } else {
+        pendingText = 'Game not started yet'
+      }
+    }
+
+    const edgeStr  = b.edge  != null ? `+${(Number(b.edge) * 100).toFixed(1)}¢` : '—'
+    const probStr  = b.model_prob != null ? `${(b.model_prob * 100).toFixed(0)}%` : '—'
+    const priceStr = b.market_mid != null ? `${b.market_mid}¢` : '—'
+    const wagerStr = b.bet_size   != null ? fmt$(b.bet_size) : '—'
+
+    const detailsId = `sc-det-${b.pitcher_id ?? ''}-${b.strike}-${b.side}`
+
+    return `<div class="sc-bet-card ${cls}">
+      <div class="sc-bet-header">
+        <span class="sc-bet-icon">${icon}</span>
+        <span class="sc-bet-status">${status}</span>
+        <span class="sc-bet-amount">${amountStr}</span>
+      </div>
+      <div class="sc-bet-body">
+        <div class="sc-bet-pitcher">${b.pitcher_name}</div>
+        <div class="sc-bet-what">${desc}</div>
+        ${outcome ? `<div class="sc-bet-outcome">${outcome}</div>` : ''}
+        ${pendingText ? `<div class="sc-bet-outcome">${pendingText}</div>` : ''}
+      </div>
+      <button class="sc-details-btn" onclick="
+        var d=document.getElementById('${detailsId}');
+        if(d){d.hidden=!d.hidden;this.textContent=d.hidden?'▸ Details':'▾ Hide details'}
+      ">▸ Details</button>
+      <div id="${detailsId}" class="sc-details-body" hidden>
+        <div class="sc-detail-row"><span>Wager size</span><b>${wagerStr}</b></div>
+        <div class="sc-detail-row"><span>Market price</span><b>${priceStr}</b></div>
+        <div class="sc-detail-row"><span>Our model probability</span><b>${probStr}</b></div>
+        <div class="sc-detail-row"><span>Our edge</span><b>${edgeStr}</b></div>
+      </div>
+    </div>`
+  }).join('')
 }
 
 async function buildBettorDrawer(drawer, b) {
@@ -512,6 +609,10 @@ async function loadDay(date) {
   if (!data || !data.pitchers?.length) {
     hdr.hidden = true
     empty.hidden = false
+    const betList = document.getElementById('sc-bet-list')
+    if (betList) betList.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
+    const scSummary = document.getElementById('sc-summary')
+    if (scSummary) scSummary.hidden = true
     return
   }
   empty.hidden = true
@@ -551,6 +652,8 @@ async function loadDay(date) {
       console.error('[buildPitcherCard] failed for', p.pitcher_name, err)
     }
   }
+
+  try { renderSimpleBetList(sorted, date) } catch (err) { console.error('[renderSimpleBetList]', err) }
 
   try { renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
   try { await loadLiveBets(date)     } catch (err) { console.error('[loadLiveBets]', err) }
@@ -629,6 +732,34 @@ function renderDaySummary(date, data) {
   // Minimal day-summary panel (kept but hidden — banner above handles it now)
   const el = document.getElementById('day-summary')
   if (el) el.hidden = true
+
+  // Update simple scorecard summary
+  const scSummary = document.getElementById('sc-summary')
+  const scDate    = document.getElementById('sc-summary-date')
+  const scWon     = document.getElementById('sc-won-count')
+  const scLost    = document.getElementById('sc-lost-count')
+  const scWait    = document.getElementById('sc-wait-count')
+  const scTotal   = document.getElementById('sc-day-total')
+
+  if (scSummary) {
+    if (!data || !data.pitchers?.length) {
+      scSummary.hidden = true
+    } else {
+      scSummary.hidden = false
+      if (scDate) scDate.textContent = new Date(date + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+      if (scWon)  scWon.textContent  = data.day_wins    || 0
+      if (scLost) scLost.textContent = data.day_losses   || 0
+      if (scWait) scWait.textContent = data.day_pending  || 0
+      if (scTotal) {
+        const pnl = data.day_pnl || 0
+        const sign = pnl > 0 ? '+' : ''
+        scTotal.textContent = pnl === 0 && data.day_wins === 0 && data.day_losses === 0
+          ? 'No settled bets yet'
+          : `${pnl > 0 ? 'UP' : pnl < 0 ? 'DOWN' : 'EVEN'} ${sign}${fmt$(Math.abs(pnl))} today`
+        scTotal.className = `sc-day-total ${pnl > 0 ? 'sc-up' : pnl < 0 ? 'sc-down' : 'sc-even'}`
+      }
+    }
+  }
 }
 
 async function loadLiveBets(date) {

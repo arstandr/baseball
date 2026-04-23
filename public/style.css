@@ -1243,3 +1243,282 @@ a:hover { text-decoration: underline; }
 .pitcher-notes-row td { padding: 0 10px 10px; }
 .pitcher-note { display: block; font-size: 11px; color: var(--muted); line-height: 1.5;
   padding: 3px 0; border-left: 2px solid var(--border); padding-left: 8px; margin-top: 4px; }
+
+/* ── Simple Scorecard Design ─────────────────────────────── */
+
+.sc-summary {
+  margin: 0 0 24px;
+  padding: 20px 24px;
+  background: var(--card);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.sc-summary-date {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 16px;
+}
+
+.sc-scoreboxes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.sc-scorebox {
+  padding: 16px 12px;
+  border-radius: 10px;
+  text-align: center;
+}
+.sc-scorebox-won  { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.25); }
+.sc-scorebox-lost { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.25); }
+.sc-scorebox-wait { background: rgba(148,163,184,0.08); border: 1px solid rgba(148,163,184,0.15); }
+
+.sc-score-num {
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+.sc-scorebox-won  .sc-score-num { color: #22c55e; }
+.sc-scorebox-lost .sc-score-num { color: #ef4444; }
+.sc-scorebox-wait .sc-score-num { color: #94a3b8; }
+
+.sc-score-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.sc-day-total {
+  font-size: 22px;
+  font-weight: 700;
+  text-align: center;
+  padding-top: 4px;
+}
+.sc-day-total.sc-up   { color: #22c55e; }
+.sc-day-total.sc-down { color: #ef4444; }
+.sc-day-total.sc-even { color: var(--muted); }
+
+/* Bet cards */
+.sc-bet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.sc-bet-card {
+  background: var(--card);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.sc-bet-card.sc-win  { border-left: 4px solid #22c55e; }
+.sc-bet-card.sc-loss { border-left: 4px solid #ef4444; }
+.sc-bet-card.sc-wait { border-left: 4px solid #475569; }
+
+.sc-bet-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px 10px;
+}
+
+.sc-bet-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.sc-bet-status {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.sc-win  .sc-bet-status { color: #22c55e; }
+.sc-loss .sc-bet-status { color: #ef4444; }
+.sc-wait .sc-bet-status { color: #94a3b8; }
+
+.sc-bet-amount {
+  margin-left: auto;
+  font-size: 20px;
+  font-weight: 700;
+}
+.sc-win  .sc-bet-amount { color: #22c55e; }
+.sc-loss .sc-bet-amount { color: #ef4444; }
+.sc-wait .sc-bet-amount { color: #94a3b8; }
+
+.sc-bet-body {
+  padding: 0 18px 14px;
+}
+
+.sc-bet-pitcher {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.sc-bet-what {
+  font-size: 15px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.sc-bet-outcome {
+  font-size: 15px;
+  font-weight: 600;
+}
+.sc-win  .sc-bet-outcome { color: #22c55e; }
+.sc-loss .sc-bet-outcome { color: #ef4444; }
+.sc-wait .sc-bet-outcome { color: #94a3b8; }
+
+/* Details toggle */
+.sc-details-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 18px 12px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.sc-details-btn:hover { color: var(--fg); }
+
+.sc-details-body {
+  padding: 0 18px 14px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.sc-detail-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 3px 0;
+}
+.sc-detail-row b { color: var(--fg); }
+
+/* Section headers */
+.sc-section-head {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  padding: 4px 0 10px;
+  margin-top: 8px;
+}
+
+/* Empty state */
+.sc-empty {
+  text-align: center;
+  font-size: 18px;
+  color: var(--fg);
+  padding: 40px 20px 12px;
+}
+.sc-empty-sub {
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+  padding-bottom: 40px;
+}
+
+/* Pitcher group header in bet list */
+.sc-pitcher-group {
+  margin-bottom: 4px;
+}
+.sc-pitcher-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+/* Live bet cards in scorecard style */
+.sc-live-section {
+  margin-top: 24px;
+}
+.sc-live-header {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.sc-live-card {
+  background: var(--card);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-left: 4px solid #f59e0b;
+  padding: 14px 18px;
+  margin-bottom: 10px;
+}
+.sc-live-pitcher { font-size: 17px; font-weight: 700; margin-bottom: 3px; }
+.sc-live-what    { font-size: 14px; color: var(--muted); margin-bottom: 3px; }
+.sc-live-status  { font-size: 14px; color: #f59e0b; font-weight: 600; }
+
+/* Bettor cards — simplified */
+.sc-bettor-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.sc-bettor-card {
+  background: var(--card);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 20px 24px;
+}
+.sc-bettor-name {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.sc-bettor-balance {
+  font-size: 32px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.sc-bettor-start {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.sc-bettor-pnl {
+  font-size: 16px;
+  font-weight: 700;
+}
+.sc-bettor-record {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+/* Hero simplification */
+.sh-stat-label {
+  font-size: 11px !important;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
