@@ -389,7 +389,7 @@ function betOutcomePlain(side, strike, actualKs, result) {
   }
 }
 
-function renderSimpleBetList(pitchers, date, marketPrices = {}) {
+function renderSimpleBetList(pitchers, date, marketPrices = {}, positions = {}) {
   const container = document.getElementById('sc-bet-list')
   if (!container) return
 
@@ -430,17 +430,26 @@ function renderSimpleBetList(pitchers, date, marketPrices = {}) {
     }
 
     // Card total: sum pending potential + settled P&L
+    // Uses Kalshi position data (actual contracts + cost) when available
     let totalVal = 0
     for (const b of bets) {
       if (b.result) {
         totalVal += Number(b.pnl || 0)
       } else {
-        const mid  = Number(b.market_mid ?? 50)
-        const face = Number(b.bet_size   ?? 0)
-        const hs   = (b.spread ?? 4) / 2
-        const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
-        const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
-        totalVal += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
+        const pos = b.ticker ? positions[b.ticker] : null
+        if (pos && pos.contracts > 0) {
+          // Real numbers from Kalshi: contracts held, cost = what was paid
+          const avgFill = pos.cost / pos.contracts  // avg fill price per contract (0-1)
+          totalVal += pos.contracts * (1 - avgFill) * (1 - KALSHI_FEE * avgFill)
+        } else {
+          // Fallback: estimate from stored bet_size
+          const mid  = Number(b.market_mid ?? 50)
+          const face = Number(b.bet_size   ?? 0)
+          const hs   = (b.spread ?? 4) / 2
+          const fill = b.side === 'YES' ? mid + hs : (100 - mid) + hs
+          const win  = b.side === 'YES' ? (100 - mid) - hs : mid - hs
+          totalVal += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
+        }
       }
     }
     const totalSign = totalVal >= 0 ? '+' : ''
@@ -493,14 +502,21 @@ function renderSimpleBetList(pitchers, date, marketPrices = {}) {
         }
       }
 
-      // Row amount
+      // Row amount — use actual Kalshi position if available
       let rowAmt = ''
       if (b.result) {
         const s = (b.pnl ?? 0) >= 0 ? '+' : ''
         rowAmt = `<span class="${b.result === 'win' ? 'good' : 'bad'}">${s}${fmt$(b.pnl ?? 0)}</span>`
       } else {
-        const win = b.side === 'YES' ? (100 - entryMid) - (b.spread ?? 4)/2 : entryMid - (b.spread ?? 4)/2
-        const pot = Number(b.bet_size ?? 0) * win / 100 * (1 - KALSHI_FEE * entryFill / 100)
+        const pos = b.ticker ? positions[b.ticker] : null
+        let pot
+        if (pos && pos.contracts > 0) {
+          const avgFill = pos.cost / pos.contracts
+          pot = pos.contracts * (1 - avgFill) * (1 - KALSHI_FEE * avgFill)
+        } else {
+          const win = b.side === 'YES' ? (100 - entryMid) - (b.spread ?? 4)/2 : entryMid - (b.spread ?? 4)/2
+          pot = Number(b.bet_size ?? 0) * win / 100 * (1 - KALSHI_FEE * entryFill / 100)
+        }
         rowAmt = `<span class="sc-muted">+${fmt$(pot)}</span>`
       }
 
@@ -514,15 +530,20 @@ function renderSimpleBetList(pitchers, date, marketPrices = {}) {
 
     // Expanded detail sections per bet
     const detailsHtml = bets.map(b => {
-      const edge  = b.edge  != null ? `+${(Number(b.edge)*100).toFixed(1)}¢` : '—'
-      const prob  = b.model_prob != null ? `${(b.model_prob*100).toFixed(0)}%` : '—'
-      const wager = b.bet_size != null ? fmt$(b.bet_size) : '—'
-      const kelly = b.kelly_fraction != null ? `${(b.kelly_fraction*100).toFixed(1)}%` : '—'
-      const mid   = b.market_mid != null ? `${b.market_mid}¢` : '—'
+      const pos    = b.ticker ? positions[b.ticker] : null
+      const edge   = b.edge  != null ? `+${(Number(b.edge)*100).toFixed(1)}¢` : '—'
+      const prob   = b.model_prob != null ? `${(b.model_prob*100).toFixed(0)}%` : '—'
+      const wager  = b.bet_size != null ? fmt$(b.bet_size) : '—'
+      const kelly  = b.kelly_fraction != null ? `${(b.kelly_fraction*100).toFixed(1)}%` : '—'
+      const mid    = b.market_mid != null ? `${b.market_mid}¢` : '—'
+      const contractsRow = pos
+        ? `<div class="sc-detail-row"><span>Contracts (Kalshi)</span><b>${pos.contracts} @ ${pos.contracts > 0 ? (pos.cost/pos.contracts*100).toFixed(1) : '?'}¢ avg</b></div>`
+        : (b.filled_contracts ? `<div class="sc-detail-row"><span>Contracts</span><b>${b.filled_contracts}</b></div>` : '')
       const orderRow = b.order_id ? `<div class="sc-detail-row"><span>Order ID</span><b>${b.order_id.slice(0,8)}…</b></div>` : ''
       return `<div class="sc-detail-section">
         <div class="sc-detail-heading">${b.side} ${b.strike}+ Ks</div>
         <div class="sc-detail-row"><span>Wager</span><b>${wager}</b></div>
+        ${contractsRow}
         <div class="sc-detail-row"><span>Entry price</span><b>${mid}</b></div>
         <div class="sc-detail-row"><span>Model probability</span><b>${prob}</b></div>
         <div class="sc-detail-row"><span>Edge</span><b>${edge}</b></div>
@@ -791,14 +812,21 @@ async function loadDay(date) {
   }
 
   try {
-    // Fetch live Kalshi prices for pending bets
+    const uid = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
+    // Fetch live Kalshi prices + actual positions in parallel
     const pendingTickers = sorted.flatMap(p => (p.bets || []).filter(b => !b.result && b.ticker).map(b => b.ticker))
-    let marketPrices = {}
-    if (pendingTickers.length) {
-      const mp = await fetchJson(`/api/ks/market-prices?tickers=${[...new Set(pendingTickers)].join(',')}`).catch(() => [])
-      for (const m of (mp || [])) marketPrices[m.ticker] = m
-    }
-    renderSimpleBetList(sorted, date, marketPrices)
+    const [mpRaw, posRaw] = await Promise.all([
+      pendingTickers.length
+        ? fetchJson(`/api/ks/market-prices?tickers=${[...new Set(pendingTickers)].join(',')}`).catch(() => [])
+        : Promise.resolve([]),
+      fetchJson(`/api/ks/kalshi-positions${uid}`).catch(() => []),
+    ])
+    const marketPrices = {}
+    for (const m of (mpRaw || [])) marketPrices[m.ticker] = m
+    // Build ticker → position map for P&L calculation
+    const positions = {}
+    for (const p of (posRaw || [])) if (p.ticker) positions[p.ticker] = p
+    renderSimpleBetList(sorted, date, marketPrices, positions)
   } catch (err) { console.error('[renderSimpleBetList]', err) }
 
   try { await renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
