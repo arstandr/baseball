@@ -171,13 +171,28 @@ async function logEdges() {
   }
 
   // ── Pre-compute fill fractions (shared across all users) ──────────────────
-  const withFill = edgesJson.map(e => {
+  const rawEdges = edgesJson.map(e => {
     const mid    = (e.market_mid ?? 50) / 100
     const hs     = (e.spread     ??  4) / 200
     const fill   = e.side === 'YES' ? mid + hs : (1 - mid) + hs
     const edgeVal = Math.max(Number(e.edge) || 0, 0.001)
     return { ...e, _fill: fill, _edgeVal: edgeVal }
   })
+
+  // Dedup hedges: if YES and NO both have edge at the same pitcher+threshold,
+  // keep only the higher-edge side — betting both sides nets to near-zero after fees.
+  const hedgeKey = e => `${e.pitcher}|${e.strike}`
+  const bestByKey = new Map()
+  for (const e of rawEdges) {
+    const key = hedgeKey(e)
+    if (!bestByKey.has(key) || e._edgeVal > bestByKey.get(key)._edgeVal) {
+      bestByKey.set(key, e)
+    }
+  }
+  const hedgesRemoved = rawEdges.length - bestByKey.size
+  if (hedgesRemoved > 0) console.log(`[ks-bets] Removed ${hedgesRemoved} hedged opposite-side bet(s)`)
+  const withFill = [...bestByKey.values()]
+
   const totalEdge = withFill.reduce((s, e) => s + e._edgeVal, 0)
 
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────

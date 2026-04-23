@@ -21,43 +21,21 @@ import * as db from '../../lib/db.js'
 import { getAuthHeaders, placeOrder, getMarketPrice } from '../../lib/kalshi.js'
 import { kellySizing, capitalAtRisk } from '../../lib/kelly.js'
 import { notifyLiveBet, notifyCovered, notifyDead, notifyGameResult, notifyDailyReport } from '../../lib/discord.js'
+import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
+import { parseArgs } from '../../lib/cli-args.js'
 
-const args        = process.argv.slice(2)
-const dateArg     = args.includes('--date') ? args[args.indexOf('--date') + 1] : null
-const TODAY       = dateArg || new Date().toISOString().slice(0, 10)
-const POLL_SEC    = args.includes('--poll') ? Number(args[args.indexOf('--poll') + 1]) : 180
+const opts     = parseArgs({
+  date: { default: new Date().toISOString().slice(0, 10) },
+  poll: { type: 'number', default: 180 },
+})
+const TODAY       = opts.date
+const POLL_SEC    = opts.poll
 const LIVE        = process.env.LIVE_TRADING === 'true'
 const LIVE_EDGE   = Number(process.env.LIVE_EDGE_MIN || 0.08)
 const LOSS_LIMIT  = Number(process.env.DAILY_LOSS_LIMIT || 500)
 
 const MLB_BASE    = 'https://statsapi.mlb.com/api/v1'
-const NB_R        = 30
-const LEAGUE_K_PCT     = 0.22
-const LEAGUE_PA_PER_IP = 4.44
 const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
-
-// ── NB distribution ───────────────────────────────────────────────────────────
-
-function nbCDF(mu, r, k) {
-  if (mu <= 0) return k >= 0 ? 1 : 0
-  const p = r / (r + mu), q = 1 - p
-  let term = Math.pow(p, r), sum = term
-  for (let i = 1; i <= Math.floor(k); i++) {
-    term *= (i - 1 + r) / i * q
-    sum += term
-    if (sum >= 1 - 1e-10) return 1
-  }
-  return Math.min(1, sum)
-}
-
-function pAtLeast(mu, n) {
-  return Math.max(0, 1 - nbCDF(mu, NB_R, n - 1))
-}
-
-function ipToDecimal(ip) {
-  const n = Number(ip)
-  return Math.floor(n) + Math.round((n % 1) * 10) / 3
-}
 
 // ── Live λ recalculation ──────────────────────────────────────────────────────
 //
@@ -130,9 +108,20 @@ async function loadDailyLoss() {
 
 // ── Place or paper-log a live bet ─────────────────────────────────────────────
 
+const LIVE_USER_ID  = 284  // Adam-Live
+const PAPER_USER_ID = 1    // Adam (paper)
+
 async function executeBet({ pitcherName, pitcherId, game, strike, side, modelProb, marketMid, edge, ticker, betSize, kellyFraction, capitalRisk, preGameBetId }) {
-  const paper = !LIVE
-  const now   = new Date().toISOString()
+  const paper  = !LIVE
+  const userId = LIVE ? LIVE_USER_ID : PAPER_USER_ID
+  const now    = new Date().toISOString()
+
+  // DB-level dedup: skip if already logged this session (survives monitor restarts)
+  const existing = await db.one(
+    `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id=?`,
+    [TODAY, pitcherName, strike, side, userId],
+  )
+  if (existing) return
 
   if (LIVE) {
     // Real order — Kalshi expects contracts (integer) and price (cents)
@@ -152,6 +141,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
   await db.upsert('ks_bets', {
     bet_date:        TODAY,
     logged_at:       now,
+    user_id:         userId,
     pitcher_id:      pitcherId || null,
     pitcher_name:    pitcherName,
     game,
@@ -166,7 +156,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     paper:           paper ? 1 : 0,
     live_bet:        1,
     ticker,
-  }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
+  }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
 }
 
 // ── Settle a finished game and post Discord summary ───────────────────────────
