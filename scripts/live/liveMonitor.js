@@ -395,27 +395,42 @@ async function main() {
               await notifyOneAway({ pitcherName: ctx.pitcherName, strike: bet.strike, pnl, currentKs, game: ctx.game })
             }
 
-            // Cover: pitcher already has enough Ks
+            // Cover: pitcher already has enough Ks — settle immediately, don't wait for game to end
             if (bet.side === 'YES' && currentKs >= bet.strike && !covered.has(key)) {
               covered.add(key)
-              const pnl = bet.bet_size * (1 - (bet.market_mid ?? 50) / 100)
-              console.log(`\n[live] ✅ COVERED ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)`)
+              const pnl = Math.round(bet.bet_size * (1 - (bet.market_mid ?? 50) / 100) * 100) / 100
+              const now = new Date().toISOString()
+              await db.run(
+                `UPDATE ks_bets SET actual_ks=?, result='win', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
+                [currentKs, now, pnl, bet.id],
+              )
+              console.log(`\n[live] ✅ COVERED + SETTLED ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)  +$${pnl.toFixed(2)}`)
               await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, game: ctx.game })
             }
 
-            // Dead: YES bet, starter pulled and can't reach threshold
+            // Dead: YES bet, starter pulled and can't reach threshold — settle as loss immediately
             if (bet.side === 'YES' && !isCurrent && currentKs < bet.strike && currentIP >= 1 && !dead.has(key)) {
               dead.add(key)
-              const pnl = -bet.bet_size * ((bet.market_mid ?? 50) / 100)
-              console.log(`\n[live] ❌ DEAD ${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)`)
+              const pnl = -Math.round(bet.bet_size * ((bet.market_mid ?? 50) / 100) * 100) / 100
+              const now = new Date().toISOString()
+              await db.run(
+                `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
+                [currentKs, now, pnl, bet.id],
+              )
+              console.log(`\n[live] ❌ DEAD + SETTLED ${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)  $${pnl.toFixed(2)}`)
               await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: 'starter pulled' })
             }
 
-            // Dead: NO bet, pitcher already at or past threshold
+            // Dead: NO bet, pitcher already at or past threshold — settle as loss immediately
             if (bet.side === 'NO' && currentKs >= bet.strike && !dead.has(key)) {
               dead.add(key)
-              const pnl = -bet.bet_size * (1 - (bet.market_mid ?? 50) / 100)
-              console.log(`\n[live] ❌ DEAD (NO) ${ctx.pitcherName} hit ${currentKs}K (needed under ${bet.strike})`)
+              const pnl = -Math.round(bet.bet_size * (1 - (bet.market_mid ?? 50) / 100) * 100) / 100
+              const now = new Date().toISOString()
+              await db.run(
+                `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
+                [currentKs, now, pnl, bet.id],
+              )
+              console.log(`\n[live] ❌ DEAD + SETTLED (NO) ${ctx.pitcherName} hit ${currentKs}K (needed under ${bet.strike})  $${pnl.toFixed(2)}`)
               await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: `hit ${currentKs}K` })
             }
           }
