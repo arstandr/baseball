@@ -91,10 +91,7 @@ export async function startScheduler() {
       setTimeout(() => startLiveMonitor(date), 5_000)
     }
   }
-  if (hm >= 9 * 60 + 30) {   // past 9:30am — NBA morning run missed?
-    console.log('[scheduler] startup catch-up: NBA morning run')
-    setTimeout(() => nbaRun('NBA morning run (catch-up)'), 120_000)  // 2min after MLB
-  }
+  // NBA morning run disabled
   if (hm >= 15 * 60 + 30) {  // past 3:30pm — lineup refresh missed?
     console.log('[scheduler] startup catch-up: MLB lineup refresh')
     mlbRun('MLB lineup refresh (catch-up)', '--lineups')
@@ -107,8 +104,7 @@ export async function startScheduler() {
     setTimeout(() => startLiveMonitor(date), 90_000)
   }, { timezone: 'America/New_York' })
 
-  // 9:30 AM ET — NBA morning run (after MLB finishes)
-  cron.schedule('30 9 * * *', () => nbaRun('NBA morning run'), { timezone: 'America/New_York' })
+  // NBA morning run disabled
 
   // 3:30 PM ET — MLB lineup refresh
   cron.schedule('30 15 * * *', () => mlbRun('MLB lineup refresh', '--lineups'), { timezone: 'America/New_York' })
@@ -119,10 +115,9 @@ export async function startScheduler() {
     cron.schedule(`0 ${hour} * * *`, () => mlbRun(`MLB mid-game settle (${hour}:00)`, '--settle'), { timezone: 'America/New_York' })
   }
 
-  // 11:55 PM ET — settle both MLB + NBA + EOD reports
+  // 11:55 PM ET — MLB settle + EOD reports
   cron.schedule('55 23 * * *', () => {
     mlbRun('MLB settle + EOD', '--settle')
-    nbaRun('NBA settle', '--settle')
   }, { timezone: 'America/New_York' })
 
   console.log('[scheduler] daily jobs (ET): 9:00am MLB+monitor | 9:30am NBA | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
