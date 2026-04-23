@@ -809,7 +809,8 @@ async function renderDaySummary(date, data) {
     }
 
     if (bestcaseCard && bestcaseEl) {
-      if (data.day_pending > 0) {
+      const hasOpenPositions = livePositions?.length > 0
+      if (data.day_pending > 0 || hasOpenPositions) {
         bestcaseCard.style.display = 'flex'
         const projectedEnd = data.day_pnl + bestCase
         const sign = projectedEnd >= 0 ? '+' : ''
