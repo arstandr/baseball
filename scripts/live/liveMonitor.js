@@ -591,6 +591,7 @@ async function main() {
               if (edge < Math.max(0.20, halfSpread + 0.04)) continue
             } else {
               if (modelProb > 0.15) continue
+              if (midCents > 55) continue  // Rule: don't pay >55¢ for a NO — too expensive if pitcher hits threshold
               if (edge < Math.max(0.15, halfSpread + 0.04)) continue
             }
 
