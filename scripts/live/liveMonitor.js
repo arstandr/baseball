@@ -116,6 +116,7 @@ async function fetchLiveKsMarkets(ticker) {
 // ── Daily loss guard ─────────────────────────────────────────────────────────
 
 let _dailyLoss = 0
+let _dailyNetPnl = 0  // net P&L today (all settled bets, pre-game + live)
 
 async function loadDailyLoss() {
   const rows = await db.all(
@@ -125,6 +126,15 @@ async function loadDailyLoss() {
   )
   _dailyLoss = rows[0]?.losses || 0
   return _dailyLoss
+}
+
+async function reloadDailyNetPnl() {
+  const row = await db.one(
+    `SELECT COALESCE(SUM(pnl), 0) as net FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL`,
+    [TODAY],
+  )
+  _dailyNetPnl = row?.net || 0
+  return _dailyNetPnl
 }
 
 // ── Place or paper-log a live bet ─────────────────────────────────────────────
@@ -297,6 +307,7 @@ async function sendDailyReport() {
 async function main() {
   await db.migrate()
   await loadDailyLoss()
+  await reloadDailyNetPnl()
 
   // Load today's pre-game bets as reference for pre-game λ data
   const preGameBets = await db.all(
@@ -385,6 +396,16 @@ async function main() {
 
     if (_dailyLoss >= LOSS_LIMIT) {
       console.log(`\n[live] Daily loss limit hit ($${_dailyLoss.toFixed(0)}). Stopping.`)
+      break
+    }
+
+    // Rule E: Auto-halt after -15% daily drawdown (net across all bets today)
+    await reloadDailyNetPnl()
+    const DRAWDOWN_HALT_PCT = 0.15
+    const userRow = await db.one(`SELECT starting_bankroll FROM users WHERE id = ?`, [LIVE_USER_ID])
+    const drawdownLimit = -((userRow?.starting_bankroll ?? 1000) * DRAWDOWN_HALT_PCT)
+    if (_dailyNetPnl < drawdownLimit) {
+      console.log(`\n[live] Rule E: Drawdown halt — today's P&L $${_dailyNetPnl.toFixed(2)} exceeds -${(DRAWDOWN_HALT_PCT*100).toFixed(0)}% limit. Stopping new bets.`)
       break
     }
 

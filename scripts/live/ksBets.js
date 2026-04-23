@@ -198,12 +198,26 @@ async function logEdges() {
   const yesCapRemoved = deduped.length - withFill.length
   if (yesCapRemoved > 0) console.log(`[ks-bets] Capped ${yesCapRemoved} YES bet(s) (max ${MAX_YES_PER_PITCHER} per pitcher)`)
 
+  // ── Protection rules (A / C / D) ─────────────────────────────────────────────
+  // Rule C: Skip strike=3 markets (structurally mispriced by K-first models)
+  // Rule A: Ban NO bets where market_mid ≥ 65 AND model_prob ≤ 0.75
+  //         Market is already pricing the event as likely; our NO edge is noise
+  // Rule D: Ban YES bets where model_prob < 0.30 (not enough conviction)
+  const guardedEdges = withFill.filter(e => {
+    if (e.strike === 3) return false
+    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob <= 0.75) return false
+    if (e.side === 'YES' && e.model_prob < 0.30) return false
+    return true
+  })
+  const guardsRemoved = withFill.length - guardedEdges.length
+  if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/C/D: removed ${guardsRemoved} bet(s)`)
+
   // Side multipliers: NOs get 1.25x capital weight (structural edge, validated forward)
   // YES stays at 1.0x — don't reduce good YES bets, just overweight NOs
   // Re-evaluate after +300 bets before any further adjustment
   const NO_SIDE_MULT  = 1.25
   const YES_SIDE_MULT = 1.00
-  const totalEdge = withFill.reduce((s, e) => s + e._edgeVal * (e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT), 0)
+  const totalEdge = guardedEdges.reduce((s, e) => s + e._edgeVal * (e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT), 0)
 
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────
   const STAGGER_MS = 45_000   // 45s between users on live orders
@@ -247,7 +261,7 @@ async function logEdges() {
 
     // Size each bet proportionally, then enforce hard budget cap by taking
     // highest-edge bets first and stopping once the budget is spent.
-    const withFace = withFill
+    const withFace = guardedEdges
       .map(e => {
         const sideMult  = e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT
         const riskAlloc = (e._edgeVal * sideMult / totalEdge) * dailyBudget
@@ -267,8 +281,27 @@ async function logEdges() {
       budgetLeft -= e._actualRisk
     }
 
+    // Rule B: Per-pitcher capital-at-risk cap — 2% of bankroll (~$20 on $1,000)
+    // Prevents stacking $300-500 on a single pitcher who underperforms.
+    const PER_PITCHER_CAR_PCT = 0.02
+    const pitcherCarSpent = {}
+    const cappedSized = []
+    for (const e of sized) {
+      const cap   = bankroll * PER_PITCHER_CAR_PCT
+      const soFar = pitcherCarSpent[e.pitcher] || 0
+      const car   = e._face * e._fill
+      if (soFar + car > cap + 0.01) {
+        console.log(`  [Rule B] ${e.pitcher} ${e.strike}+ ${e.side} skipped — pitcher CAR cap $${cap.toFixed(0)} (already $${soFar.toFixed(0)} out)`)
+        continue
+      }
+      pitcherCarSpent[e.pitcher] = soFar + car
+      cappedSized.push(e)
+    }
+    if (sized.length - cappedSized.length > 0)
+      console.log(`[ks-bets] Rule B: capped ${sized.length - cappedSized.length} bet(s) over per-pitcher limit`)
+
     console.log(
-      `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · budget $${dailyBudget.toFixed(0)} (${(riskPct*100).toFixed(0)}%) · ${sized.length} bets · ${isLive ? 'LIVE' : 'paper'}`,
+      `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · budget $${dailyBudget.toFixed(0)} (${(riskPct*100).toFixed(0)}%) · ${cappedSized.length} bets · ${isLive ? 'LIVE' : 'paper'}`,
     )
 
     const now = new Date().toISOString()
@@ -277,7 +310,7 @@ async function logEdges() {
       ? { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
       : {}
 
-    for (const e of sized) {
+    for (const e of cappedSized) {
       const existing = await db.one(
         `SELECT order_id FROM ks_bets
          WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0
@@ -364,7 +397,7 @@ async function logEdges() {
       }
     }
 
-    const totalRisk = sized.reduce((s, e) => s + e._face * e._fill, 0)
+    const totalRisk = cappedSized.reduce((s, e) => s + e._face * e._fill, 0)
     console.log(`[ks-bets] ${bettor.name}: logged ${bettorLogged} · orders ${ordersPlaced} placed / ${ordersFailed} failed · risk $${totalRisk.toFixed(0)} of $${bankroll.toFixed(0)} (${(totalRisk/bankroll*100).toFixed(1)}%)`)
   }
 
