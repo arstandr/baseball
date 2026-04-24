@@ -159,6 +159,7 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
 
   const bets = await db.all(`
     SELECT id, pitcher_name, strike, side, bet_size, market_mid, spread,
+           model_prob, edge, bet_mode,
            result, pnl, logged_at,
            live_ks_at_bet, live_ip_at_bet, live_inning, live_score
     FROM ks_bets

@@ -863,3 +863,6 @@ CREATE TABLE IF NOT EXISTS live_log (
   pnl        REAL
 );
 CREATE INDEX IF NOT EXISTS live_log_date ON live_log(bet_date, ts);
+
+-- bet_mode: 'normal' (edge-based maker) | 'pulled' (free money taker)
+ALTER TABLE ks_bets ADD COLUMN bet_mode TEXT DEFAULT 'normal';

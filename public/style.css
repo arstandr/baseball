@@ -298,6 +298,118 @@ a:hover { text-decoration: underline; }
 .game-card.reject.collapsed .gc-outcome,
 .game-card.reject.collapsed .gc-postmortem { display: none; }
 
+/* ======================== PITCHER GAME CARDS (Today tab) ======================== */
+
+/* Card base — remove left border override, use full status band instead */
+.game-card.gc-s-win   { border-color: var(--border); }
+.game-card.gc-s-loss  { border-color: var(--border); }
+.game-card.gc-s-great { border-color: var(--border); }
+.game-card.gc-s-good  { border-color: var(--border); }
+.game-card.gc-s-play  { border-color: var(--border); }
+.game-card.gc-s-risk  { border-color: var(--border); }
+.game-card.gc-s-bad   { border-color: var(--border); }
+.game-card.gc-s-wait  { border-color: var(--border); }
+.game-card.gc-s-even  { border-color: var(--border); }
+.game-card { border-left-width: 1px; margin-bottom: 12px; border-radius: 14px; overflow: hidden; }
+
+/* Full-width status band */
+.gc-status-band {
+  padding: 10px 18px; font-size: 13px; font-weight: 700;
+  letter-spacing: 0.5px; text-align: center;
+}
+.gc-s-win  .gc-status-band { background: rgba(63,185,113,0.18);  color: var(--good); }
+.gc-s-loss .gc-status-band { background: rgba(248,81,73,0.18);   color: var(--bad); }
+.gc-s-even .gc-status-band { background: rgba(110,118,129,0.15); color: var(--text-dim); }
+.gc-s-great .gc-status-band { background: rgba(63,185,113,0.18);  color: var(--good); }
+.gc-s-good  .gc-status-band { background: rgba(63,185,113,0.12);  color: var(--good); }
+.gc-s-play  .gc-status-band { background: rgba(88,166,255,0.15);  color: var(--accent); }
+.gc-s-risk  .gc-status-band { background: rgba(210,153,34,0.18);  color: var(--warn); }
+.gc-s-bad   .gc-status-band { background: rgba(248,81,73,0.15);   color: var(--bad); }
+.gc-s-wait  .gc-status-band { background: rgba(110,118,129,0.12); color: var(--text-dim); }
+
+/* Card body */
+.gc-body { padding: 18px 18px 14px; }
+.gc-pitcher { font-weight: 700; font-size: 19px; color: var(--text); margin-bottom: 2px; }
+.gc-meta    { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; }
+.gc-gametime { font-family: var(--mono); }
+
+/* Story — THE main line */
+.gc-story {
+  font-size: 15px; font-weight: 500; color: var(--text);
+  line-height: 1.5; margin-bottom: 10px;
+}
+
+/* Situation + callouts */
+.gc-situation {
+  font-size: 12px; font-family: var(--mono); color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.gc-what-needs {
+  display: inline-block; margin-bottom: 10px;
+  background: rgba(88,166,255,0.12); color: var(--accent);
+  border-radius: 8px; padding: 6px 12px;
+  font-size: 13px; font-weight: 600;
+}
+.gc-projected {
+  font-size: 12px; color: var(--text-dim); margin-bottom: 8px;
+  font-style: italic;
+}
+
+/* Progress bar */
+.gc-progress-wrap  { margin-bottom: 6px; }
+.gc-progress-track { height: 6px; background: var(--border); border-radius: 4px; overflow: hidden; margin-bottom: 4px; }
+.gc-progress-fill  { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
+.gc-progress-fill.good { background: var(--good); }
+.gc-progress-fill.warn { background: var(--warn); }
+.gc-progress-fill.bad  { background: var(--bad); }
+.gc-progress-label { font-size: 12px; font-family: var(--mono); color: var(--text-dim); }
+
+/* Money row */
+.gc-money-row {
+  display: flex; gap: 0; border-top: 1px solid var(--border-2);
+  font-family: var(--mono); position: relative;
+}
+.gc-money-main {
+  flex: 1; padding: 14px 18px; text-align: center;
+  border-right: 1px solid var(--border-2);
+}
+.gc-money-main:last-of-type { border-right: none; }
+.gc-money-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 4px; }
+.gc-money-val   { font-size: 22px; font-weight: 700; }
+.gc-money-risk  {
+  position: absolute; bottom: 4px; right: 14px;
+  font-size: 10px; color: var(--text-dim);
+}
+
+/* Expand toggle */
+.gc-expand-toggle {
+  display: block; width: 100%; border: none; background: none;
+  border-top: 1px solid var(--border-2);
+  padding: 12px 18px; text-align: center;
+  font-size: 13px; color: var(--text-dim); cursor: pointer;
+  font-family: var(--font); letter-spacing: 0.2px;
+}
+.gc-expand-toggle:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+
+/* Expandable threshold details */
+.gc-details    { border-top: 1px solid var(--border-2); background: rgba(255,255,255,0.02); }
+.gc-thresholds { padding: 8px 18px 12px; display: flex; flex-direction: column; gap: 6px; }
+.gc-bet-row {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; font-family: var(--mono); padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.gc-bet-row:last-child { border-bottom: none; }
+.gc-bet-icon  { font-size: 15px; flex-shrink: 0; width: 20px; text-align: center; }
+.gc-bet-label { font-weight: 600; color: var(--text); flex: 1; }
+.gc-bet-tag   { margin-left: 4px; font-size: 9px; font-weight: 700; color: var(--accent); background: rgba(88,166,255,0.12); padding: 1px 5px; border-radius: 3px; }
+.gc-bet-prob  { flex-shrink: 0; font-weight: 700; }
+.gc-bet-pnl   { flex-shrink: 0; font-weight: 600; min-width: 70px; text-align: right; }
+
+/* Empty state */
+.sc-empty     { padding: 40px 20px; text-align: center; color: var(--text-dim); font-size: 15px; }
+.sc-empty-sub { padding: 0 20px 28px; text-align: center; color: var(--muted); font-size: 13px; }
+
 /* ======================== STATUS HERO ======================== */
 .status-hero {
   background: linear-gradient(135deg, #1c2128 0%, #161b22 100%);
@@ -797,6 +909,46 @@ a:hover { text-decoration: underline; }
 .pc-badge--covered { background: rgba(63,185,80,0.35); color: var(--good); font-weight: 700; border: 1px solid rgba(63,185,80,0.5); }
 .pc-badge--oneaway { background: rgba(243,156,18,0.25); color: #f39c12; font-weight: 700; animation: pulse-orange 1.2s ease-in-out infinite; }
 @keyframes pulse-orange { 0%,100% { opacity:1; } 50% { opacity:0.6; } }
+.pc-new-pill {
+  display: inline-block; margin-left: 7px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+  padding: 2px 7px; border-radius: 20px; vertical-align: middle;
+  background: rgba(0,212,170,0.18); color: var(--accent);
+  border: 1px solid rgba(0,212,170,0.4);
+  animation: pulse-new 2s ease-in-out infinite;
+}
+@keyframes pulse-new { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+
+/* Free money — pulled pitcher, determined outcome, stale market */
+.pc-free-money-pill {
+  display: inline-block; margin-left: 7px;
+  font-size: 10px; font-weight: 800; letter-spacing: 0.6px;
+  padding: 2px 8px; border-radius: 20px; vertical-align: middle;
+  background: rgba(0,255,100,0.18); color: #00ff64;
+  border: 1px solid rgba(0,255,100,0.45);
+  animation: pulse-fm 1.4s ease-in-out infinite;
+}
+@keyframes pulse-fm { 0%,100% { opacity:1; box-shadow:0 0 6px rgba(0,255,100,0.3); } 50% { opacity:0.75; box-shadow:0 0 14px rgba(0,255,100,0.6); } }
+
+.pc-free-money-banner {
+  background: linear-gradient(90deg, rgba(0,255,100,0.15), rgba(0,255,100,0.08));
+  border-bottom: 1px solid rgba(0,255,100,0.35);
+  color: #00ff64;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.5px;
+  padding: 7px 16px;
+  animation: pulse-fm-banner 2s ease-in-out infinite;
+}
+@keyframes pulse-fm-banner { 0%,100% { background: linear-gradient(90deg,rgba(0,255,100,0.15),rgba(0,255,100,0.08)); } 50% { background: linear-gradient(90deg,rgba(0,255,100,0.25),rgba(0,255,100,0.12)); } }
+
+.pitcher-card.free-money {
+  border-color: rgba(0,255,100,0.5) !important;
+  box-shadow: 0 0 0 1px rgba(0,255,100,0.2), 0 4px 20px rgba(0,255,100,0.15) !important;
+}
+
+.pc-bet-row--free-money {
+  background: rgba(0,255,100,0.04);
+  border-left: 2px solid rgba(0,255,100,0.4);
+}
 
 /* Heat map — last 5 starts vs each threshold */
 .pc-heatmap {
@@ -1627,3 +1779,67 @@ a:hover { text-decoration: underline; }
   color: var(--text);
   font-size: 13px;
 }
+
+/* ── News ticker ─────────────────────────────────────────────── */
+.ticker-wrap {
+  position: sticky; top: 57px; z-index: 19;
+  overflow: hidden;
+  background: rgba(13,17,23,0.97);
+  border-bottom: 1px solid var(--border);
+  height: 42px;
+  display: flex; align-items: center;
+}
+.ticker-track {
+  display: flex; align-items: center; gap: 0;
+  white-space: nowrap;
+  animation: ticker-scroll linear infinite;
+  animation-duration: var(--ticker-dur, 60s);
+  will-change: transform;
+}
+.ticker-wrap:hover .ticker-track { animation-play-state: paused; }
+@keyframes ticker-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(var(--ticker-shift, -50%)); }
+}
+.ticker-item {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 0 22px;
+  font-size: 14px; font-weight: 500; letter-spacing: 0.2px;
+  color: var(--text-dim);
+  border-right: 1px solid var(--border);
+}
+.ticker-item:last-child { border-right: none; }
+.ticker-item.t-win   { color: var(--good); }
+.ticker-item.t-loss  { color: var(--bad); }
+.ticker-item.t-live  { color: #e2b714; }
+.ticker-item.t-fill  { color: var(--accent); }
+.ticker-item.t-pnl   { color: var(--text); font-weight: 700; }
+.ticker-item.t-bal   { color: var(--text-dim); }
+.ticker-dot { font-size: 9px; opacity: 0.5; }
+.ticker-loading { padding: 0 18px; font-size: 13px; color: var(--muted); }
+
+.ticker-label {
+  flex-shrink: 0;
+  padding: 0 14px;
+  font-size: 11px; font-weight: 800; letter-spacing: 1.5px;
+  color: var(--text-dim);
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+  transition: color 0.2s, background 0.2s;
+  z-index: 1;
+}
+.ticker-label.ticker-new {
+  color: #0d1117;
+  background: var(--accent);
+  border-right-color: var(--accent);
+  animation: ticker-new-flash 3s ease forwards;
+}
+@keyframes ticker-new-flash {
+  0%   { background: var(--accent); color: #0d1117; }
+  60%  { background: var(--accent); color: #0d1117; }
+  100% { background: transparent;   color: var(--text-dim); }
+}
+
+.sc-sparkline { margin: 6px 0; }
+.sc-sparkline svg { display: block; width: 100%; }
+.sc-spark-empty { display: block; font-size: 11px; color: #64748b; margin: 4px 0; }

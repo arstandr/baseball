@@ -20,7 +20,7 @@ import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getMarketPrice, getSettlements, getBalance as getKalshiBalance, getQueuePosition, amendOrder, getOrderbook, availableDepth } from '../../lib/kalshi.js'
 import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
-import { notifyLiveBet, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
+import { notifyLiveBet, notifyFreeMoney, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -34,10 +34,12 @@ let   LIVE        = process.env.LIVE_TRADING === 'true'
 const LIVE_EDGE   = Number(process.env.LIVE_EDGE_MIN || 0.08)
 const LOSS_LIMIT  = Number(process.env.DAILY_LOSS_LIMIT || 500)
 
-const MLB_BASE    = 'https://statsapi.mlb.com/api/v1'
+const MLB_BASE        = 'https://statsapi.mlb.com/api/v1'
 // Field filters reduce boxscore payload ~80% — only pull what extractStarterFromBoxscore needs
-const LS_FIELDS  = 'abstractGameState,currentInning,currentInningOrdinal,teams,offense,defense'
-const BOX_FIELDS = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players'
+const LS_FIELDS       = 'abstractGameState,currentInning,currentInningOrdinal,teams,offense,defense'
+const BOX_FIELDS      = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players'
+// Max USD risk per free-money taker order (pulled pitcher, certainty bet)
+const PULLED_CAP_USD  = Number(process.env.PULLED_CAP_USD || 300)
 const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
 
 const PULL_PITCH_COUNT      = Number(process.env.PULL_PITCH_COUNT      || 85)   // pitches at which pull risk becomes real
@@ -157,59 +159,80 @@ async function isLiveEnabled() {
 }
 
 async function executeBet({ pitcherName, pitcherId, game, strike, side, modelProb, marketMid, edge, ticker, betSize, kellyFraction, capitalRisk,
-  liveKs, liveIP, livePitches, liveBF, liveInning, livePkEffective, liveLambda, liveScore }) {
+  liveKs, liveIP, livePitches, liveBF, liveInning, livePkEffective, liveLambda, liveScore, mode = 'normal' }) {
   LIVE = await isLiveEnabled()
   const paper  = !LIVE
   const userId = LIVE ? LIVE_USER_ID : PAPER_USER_ID
   const now    = new Date().toISOString()
 
-  // DB-level dedup: skip if already logged this session (survives monitor restarts)
-  // Use IS instead of = for user_id because SQLite NULL = NULL is always false
+  // DB-level dedup
   const existing = await db.one(
     `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id IS ?`,
     [TODAY, pitcherName, strike, side, userId],
   )
   if (existing) return
 
-  // In-game cap: based on OUTSTANDING exposure (pending bets only), not total wagered.
-  // As afternoon bets settle, the slot opens up for evening games.
-  // Rule E (drawdown halt) still prevents spiraling on bad days.
-  const userRow = await db.one(
-    `SELECT starting_bankroll, live_daily_risk_pct, kalshi_key_id, kalshi_private_key FROM users WHERE id = ?`, [userId],
-  )
-  if (userRow) {
-    let bankroll = userRow.starting_bankroll || 1000
-    if (userRow.kalshi_key_id) {
-      try {
-        const creds = { keyId: userRow.kalshi_key_id, privateKey: userRow.kalshi_private_key }
-        const kb = await getKalshiBalance(creds)
-        bankroll = kb.balance_usd
-      } catch {}
-    }
-    const cap = bankroll * (userRow.live_daily_risk_pct ?? 0.10)
-    const spent = await db.one(
-      `SELECT COALESCE(SUM(capital_at_risk), 0) as total FROM ks_bets WHERE bet_date=? AND live_bet=1 AND user_id=? AND result IS NULL`,
-      [TODAY, userId],
-    )
-    const thisCap = capitalAtRisk(betSize, Math.round(side === 'YES' ? marketMid : 100 - marketMid) / 100, side)
-    if ((spent?.total || 0) + thisCap > cap) {
-      console.log(`  [CAP] ${pitcherName} ${strike}+ ${side} skipped — live cap $${cap.toFixed(0)} (bankroll $${bankroll.toFixed(0)}) reached ($${(spent?.total || 0).toFixed(0)} already out)`)
-      return
-    }
-  }
+  let finalContracts = Math.max(1, Math.round(betSize))
+  let orderCents     = Math.round(side === 'YES' ? marketMid : 100 - marketMid)  // fallback
+  let freeMoneySummary = null  // set below for pulled-mode notifications
 
   if (LIVE) {
-    // betSize is face value ($1 per contract at Kalshi) = contract count directly
-    const contracts = Math.max(1, Math.round(betSize))
+    const ob = await getOrderbook(ticker, 10).catch(() => null)
 
-    // Maker order at ask-1¢: rests on book, 75% fee discount vs taker.
-    // Fall back to mid if orderbook unavailable.
-    let askCents = side === 'YES'
-      ? Math.min(99, Math.round(marketMid + 2))   // rough ask estimate
-      : Math.min(99, Math.round(100 - marketMid + 2))
-    let finalContracts = contracts
-    try {
-      const ob = await getOrderbook(ticker, 10)
+    if (mode === 'pulled') {
+      // ── FREE MONEY: taker order — hit the ask immediately, outcome is determined ──
+      // Speed > fees here: maker at ask-1¢ would wait for a fill that may never come
+      // once the market reprices.
+      const askCents = side === 'NO'
+        ? (ob?.best_no_ask  ?? Math.min(99, Math.round(100 - marketMid + 2)))
+        : (ob?.best_yes_ask ?? Math.min(99, Math.round(marketMid + 2)))
+      const maxByDollars = Math.floor(PULLED_CAP_USD / (askCents / 100))
+      const depth        = ob ? availableDepth(ob, side.toLowerCase(), askCents) : maxByDollars
+      finalContracts     = Math.max(1, Math.min(maxByDollars, depth > 0 ? depth : maxByDollars))
+      orderCents         = askCents
+      const expectedProfit = finalContracts * ((100 - askCents) / 100) * 0.93  // after Kalshi fee
+
+      try {
+        await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents)
+        console.log(`\n  [💰 FREE MONEY TAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢  profit≈+$${expectedProfit.toFixed(2)}`)
+        db.saveLog({ tag: 'BET', msg: `[FREE MONEY] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢ taker  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
+        freeMoneySummary = { askCents, expectedProfit, yesPrice: Math.round(100 - askCents) }
+      } catch (err) {
+        console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
+        db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED [FREE MONEY] ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
+        return { freeMoneySummary: null }
+      }
+
+    } else {
+      // ── NORMAL EDGE: maker at ask-1¢, 75% fee discount ──
+      // Check budget cap for normal bets only; pulled bets are capped by PULLED_CAP_USD above.
+      const userRow = await db.one(
+        `SELECT starting_bankroll, live_daily_risk_pct, kalshi_key_id, kalshi_private_key FROM users WHERE id = ?`, [userId],
+      )
+      if (userRow) {
+        let bankroll = userRow.starting_bankroll || 1000
+        if (userRow.kalshi_key_id) {
+          try {
+            const creds = { keyId: userRow.kalshi_key_id, privateKey: userRow.kalshi_private_key }
+            const kb = await getKalshiBalance(creds)
+            bankroll = kb.balance_usd
+          } catch {}
+        }
+        const cap   = bankroll * (userRow.live_daily_risk_pct ?? 0.10)
+        const spent = await db.one(
+          `SELECT COALESCE(SUM(capital_at_risk), 0) as total FROM ks_bets WHERE bet_date=? AND live_bet=1 AND user_id=? AND result IS NULL`,
+          [TODAY, userId],
+        )
+        const thisCap = capitalAtRisk(betSize, Math.round(side === 'YES' ? marketMid : 100 - marketMid) / 100, side)
+        if ((spent?.total || 0) + thisCap > cap) {
+          console.log(`  [CAP] ${pitcherName} ${strike}+ ${side} skipped — live cap $${cap.toFixed(0)} reached`)
+          return { freeMoneySummary: null }
+        }
+      }
+
+      let askCents = side === 'YES'
+        ? Math.min(99, Math.round(marketMid + 2))
+        : Math.min(99, Math.round(100 - marketMid + 2))
       if (ob) {
         if (side === 'YES' && ob.best_yes_ask != null) askCents = ob.best_yes_ask
         if (side === 'NO'  && ob.best_no_ask  != null) askCents = ob.best_no_ask
@@ -219,19 +242,24 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
           finalContracts = depth
         }
       }
-    } catch { /* non-fatal — use estimate */ }
-    const makerCents = Math.max(1, askCents - 1)
-    try {
-      await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents)
-      console.log(`  [LIVE MAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`)
-      db.saveLog({ tag: 'BET', msg: `${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`, pitcher: pitcherName, strike, side })
-    } catch (err) {
-      console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
-      db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
-      return
+      const makerCents = Math.max(1, askCents - 1)
+      orderCents = makerCents
+      try {
+        await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents)
+        console.log(`  [LIVE MAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`)
+        db.saveLog({ tag: 'BET', msg: `${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`, pitcher: pitcherName, strike, side })
+      } catch (err) {
+        console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
+        db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
+        return { freeMoneySummary: null }
+      }
     }
   } else {
-    console.log(`  [PAPER] ${pitcherName} ${strike}+ Ks ${side} @ ${marketMid}¢  edge=${(edge*100).toFixed(1)}¢  size=$${betSize}  risk=$${capitalRisk.toFixed(2)}`)
+    console.log(`  [PAPER ${mode === 'pulled' ? '💰 FREE MONEY' : 'EDGE'}] ${pitcherName} ${strike}+ ${side} @ ${marketMid}¢  edge=${(edge*100).toFixed(1)}¢  size=$${betSize}`)
+    if (mode === 'pulled') {
+      const askCents = Math.round(100 - marketMid)
+      freeMoneySummary = { askCents, expectedProfit: finalContracts * ((100 - askCents) / 100) * 0.93, yesPrice: Math.round(marketMid) }
+    }
   }
 
   await db.upsert('ks_bets', {
@@ -252,6 +280,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     paper:                paper ? 1 : 0,
     live_bet:             1,
     ticker,
+    bet_mode:             mode,
     live_ks_at_bet:       liveKs       ?? null,
     live_ip_at_bet:       liveIP       ?? null,
     live_pitches_at_bet:  livePitches  ?? null,
@@ -261,6 +290,8 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     live_lambda_remaining: liveLambda  ?? null,
     live_score:           liveScore    ?? null,
   }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
+
+  return { freeMoneySummary, finalContracts, orderCents }
 }
 
 // ── Settle a finished game and post Discord summary ───────────────────────────
@@ -1022,7 +1053,7 @@ async function main() {
             console.log(`\n[live] ${q.mode === 'pulled' ? '🎯 PULLED' : '🔥 EDGE'} ${ctx.game} ${ctx.pitcherName} ${q.n}+ Ks ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p ${currentBF}BF  [${q.mode}]${sizeTag}`)
             db.saveLog({ tag: q.mode === 'pulled' ? 'PULLED' : 'EDGE', msg: `${ctx.pitcherName} ${q.n}+ ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP${sizeTag}`, pitcher: ctx.pitcherName, strike: q.n, side: q.betSide, edge_cents: Math.round(q.edge * 100) })
 
-            await executeBet({
+            const betResult = await executeBet({
               pitcherName:      ctx.pitcherName,
               pitcherId,
               game:             ctx.game,
@@ -1040,23 +1071,39 @@ async function main() {
               livePitches:      currentPitches,
               liveBF:           currentBF,
               liveInning:       currentInning,
-              livePkEffective:  live.pK_effective,
-              liveLambda:       live.lambdaRemaining,
+              livePkEffective:  live?.pK_effective ?? null,
+              liveLambda:       live?.lambdaRemaining ?? null,
               liveScore:        currentScore,
+              mode:             q.mode,
             })
 
-            await notifyLiveBet({
-              pitcherName: ctx.pitcherName,
-              strike: q.n,
-              side: q.betSide,
-              marketMid: q.midCents,
-              edge: q.edge,
-              betSize: finalBetSize,
-              currentKs,
-              currentIPraw,
-              currentPitches,
-              paper: !LIVE,
-            }, await getAllWebhooks(db))
+            const webhooks = await getAllWebhooks(db)
+            if (q.mode === 'pulled' && betResult?.freeMoneySummary) {
+              await notifyFreeMoney({
+                pitcherName: ctx.pitcherName,
+                strike: q.n,
+                currentKs,
+                yesPrice:       betResult.freeMoneySummary.yesPrice,
+                contracts:      betResult.finalContracts,
+                askCents:       betResult.freeMoneySummary.askCents,
+                expectedProfit: betResult.freeMoneySummary.expectedProfit,
+                game:           ctx.game,
+                paper:          !LIVE,
+              }, webhooks)
+            } else {
+              await notifyLiveBet({
+                pitcherName: ctx.pitcherName,
+                strike: q.n,
+                side: q.betSide,
+                marketMid: q.midCents,
+                edge: q.edge,
+                betSize: finalBetSize,
+                currentKs,
+                currentIPraw,
+                currentPitches,
+                paper: !LIVE,
+              }, webhooks)
+            }
 
             if (LIVE) _dailyLoss  // recheck after live order
           }
