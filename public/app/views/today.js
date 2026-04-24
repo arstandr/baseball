@@ -593,9 +593,14 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     if (!p.bets?.length) continue
     map.set(String(p.pitcher_id), { ...p, bets: p.bets.map(b => ({ ...b, bet_type: 'morning' })) })
   }
+  // Build a name→id lookup from daily pitchers so we can match live bets by name when pitcher_id is missing
+  const nameToId = new Map()
+  for (const p of (dailyPitchers || [])) {
+    if (p.pitcher_id && p.pitcher_name) nameToId.set(p.pitcher_name, String(p.pitcher_id))
+  }
   for (const p of (liveBetsPitchers || [])) {
     if (!p.bets?.length) continue
-    const key = String(p.pitcher_id)
+    const key = p.pitcher_id ? String(p.pitcher_id) : (nameToId.get(p.pitcher_name) ?? p.pitcher_name)
     if (map.has(key)) {
       map.get(key).bets.push(...p.bets.map(b => ({ ...b, bet_type: 'live' })))
     } else {

@@ -160,7 +160,7 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
   const uf   = userFilter(req)
 
   const bets = await db.all(`
-    SELECT id, pitcher_name, strike, side, bet_size, market_mid, spread,
+    SELECT id, pitcher_id, pitcher_name, strike, side, bet_size, market_mid, spread,
            model_prob, edge, bet_mode,
            result, pnl, logged_at,
            live_ks_at_bet, live_ip_at_bet, live_inning, live_score
@@ -178,12 +178,14 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
 
   const byPitcher = new Map()
   for (const b of deduped) {
-    if (!byPitcher.has(b.pitcher_name)) byPitcher.set(b.pitcher_name, [])
-    byPitcher.get(b.pitcher_name).push(b)
+    const key = b.pitcher_id ? String(b.pitcher_id) : b.pitcher_name
+    if (!byPitcher.has(key)) byPitcher.set(key, { pitcher_name: b.pitcher_name, pitcher_id: b.pitcher_id || null, bets: [] })
+    byPitcher.get(key).bets.push(b)
   }
 
-  const pitchers = [...byPitcher.entries()].map(([name, pBets]) => ({
+  const pitchers = [...byPitcher.values()].map(({ pitcher_name: name, pitcher_id, bets: pBets }) => ({
     pitcher_name: name,
+    pitcher_id,
     bets: pBets,
     wins:    pBets.filter(b => b.result === 'win').length,
     losses:  pBets.filter(b => b.result === 'loss').length,
