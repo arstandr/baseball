@@ -1,4 +1,4 @@
-// pipeline/execute.js — trade execution for full-game totals on Kalshi.
+// pipeline/execute.js — trade execution for F5 run totals on Kalshi (KXMLBF5TOTAL).
 //
 // Paper mode (default): logs a trade row with mode='paper'; no external
 // calls. Settlement happens later when `mlbie settle` runs.
@@ -60,11 +60,11 @@ export async function executeLive({ tradeId, game, decision }) {
 
 async function executeKalshi({ tradeId, game, decision }) {
   try {
-    // 1. Find the best Kalshi market for this game at the decision's line.
+    // 1. Find the best Kalshi F5-total market for this game.
     //    Kalshi side convention: YES = over, NO = under.
     const side = decision.recommended_side === 'OVER' ? 'yes' : 'no'
 
-    let market = await kalshi.findMarket(
+    let market = await kalshi.findF5Market(
       game.team_away,
       game.team_home,
       game.date,
@@ -72,9 +72,9 @@ async function executeKalshi({ tradeId, game, decision }) {
       game.game_time,
     )
 
-    // Fall back to best-edge market scan if exact line not available
+    // Fall back to best-edge F5 market scan if exact line not available
     if (!market) {
-      market = await kalshi.findBestMarket(
+      market = await kalshi.findBestF5Market(
         game.team_away,
         game.team_home,
         game.date,
@@ -84,9 +84,9 @@ async function executeKalshi({ tradeId, game, decision }) {
       if (!market) {
         await db.run(
           `UPDATE trades SET execution_confirmation = ?, executed_at = datetime('now') WHERE id = ?`,
-          [`kalshi:no_market_found`, tradeId],
+          [`kalshi:no_f5_market_found`, tradeId],
         )
-        return { ok: false, reason: 'no_market_found' }
+        return { ok: false, reason: 'no_f5_market_found' }
       }
     }
 

@@ -17,6 +17,8 @@ const ROOT      = path.resolve(__dirname, '../..')
 
 // ── DB heartbeat ──────────────────────────────────────────────────────────────
 
+let _heartbeatFailures = 0
+
 async function writeHeartbeat(status, extra = {}) {
   try {
     const { getClient } = await import('../../lib/db.js')
@@ -28,8 +30,14 @@ async function writeHeartbeat(status, extra = {}) {
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       args: [payload],
     })
+    _heartbeatFailures = 0
   } catch (err) {
-    console.error('[closer] heartbeat write failed:', err.message)
+    _heartbeatFailures++
+    if (_heartbeatFailures >= 3) {
+      console.error(`[closer] ⚠ HEARTBEAT FAILING (${_heartbeatFailures} consecutive): ${err.message}`)
+    } else {
+      console.error('[closer] heartbeat write failed:', err.message)
+    }
   }
 }
 
@@ -55,7 +63,7 @@ function etNow() {
 
 function isGameHours() {
   const h = etNow().getHours()
-  return h >= 12 && h < 24  // noon–midnight ET
+  return h >= 11 || h < 2  // 11am–2am ET (covers day games + west coast late innings)
 }
 
 function etDate() {
@@ -68,32 +76,46 @@ function git(cmd) {
 
 // ── Child process manager ─────────────────────────────────────────────────────
 
-let _child   = null
-let _date    = null
-let _running = false
+let _child          = null
+let _date           = null
+let _running        = false
+let _noBeatsDate    = null  // date where monitor exited fast with no bets — suppress respawn
 
 async function startMonitor() {
   if (_child) return  // already running
 
   const date = etDate()
-  _date = date
+
+  if (_noBeatsDate === date) {
+    // No bets scheduled today — skip respawn until the date rolls over
+    return
+  }
+
+  _date    = date
   _running = true
 
   console.log(`\n[closer] Starting liveMonitor for ${date}`)
   await writeHeartbeat('running', { date })
 
+  const spawnedAt = Date.now()
   const child = spawn(
-    'node',
+    process.execPath,  // absolute path to current Node binary — immune to PATH shifts
     ['scripts/live/liveMonitor.js', '--date', date],
     { cwd: ROOT, stdio: 'inherit', shell: false }
   )
   _child = child
 
   child.on('close', code => {
+    const elapsed = Date.now() - spawnedAt
     console.log(`[closer] liveMonitor exited (code ${code})`)
     _child   = null
     _running = false
     writeHeartbeat('idle')
+    // If it exited cleanly within 30s, it found no bets — back off until tomorrow
+    if (code === 0 && elapsed < 30_000) {
+      _noBeatsDate = etDate()
+      console.log(`[closer] no bets for ${_noBeatsDate} — suppressing respawn until tomorrow`)
+    }
   })
 }
 
@@ -119,20 +141,29 @@ async function checkForUpdates() {
 
     const msg = git(`log --oneline -1 ${remote}`)
     console.log(`\n[closer] New code detected: ${msg}`)
+
+    // Skip reset if working tree has local changes (hotfixes waiting to be pushed)
+    try {
+      execSync('git diff --quiet HEAD', { cwd: ROOT })
+    } catch {
+      console.log('[closer] working tree has local changes — skipping auto-update until clean')
+      return
+    }
+
     console.log('[closer] Pulling + restarting...')
-
     stopMonitor()
-    execSync('git fetch origin main --quiet', { cwd: ROOT })
-    execSync('git reset --hard origin/main', { cwd: ROOT })
-    execSync('npm install --quiet', { cwd: ROOT })
 
-    _currentHash = remote
-    await writeUpdate(remote.slice(0, 7), msg)
-    await writeHeartbeat('restarting', { reason: 'code update', commit: remote.slice(0, 7) })
-
-    // Exit 0 -- the bat file loops on clean exit to relaunch with new code
-    console.log('[closer] Update applied -- restarting...')
-    process.exit(0)
+    try {
+      execSync('git reset --hard origin/main', { cwd: ROOT })
+      execSync('npm install --quiet', { cwd: ROOT })
+      _currentHash = remote
+      await writeUpdate(remote.slice(0, 7), msg)
+      await writeHeartbeat('restarting', { reason: 'code update', commit: remote.slice(0, 7) })
+      console.log('[closer] Update applied -- restarting...')
+    } finally {
+      // Always exit so the bat loop relaunches with fresh code (or recovers from partial failure)
+      process.exit(0)
+    }
   } catch (err) {
     console.error('[closer] update check failed:', err.message)
   }
@@ -143,11 +174,13 @@ async function checkForUpdates() {
 function repairBatFile() {
   try {
     const bat = path.join(ROOT, 'start-closer.bat')
-    const correct = `@echo off\r\n:loop\r\ntitle The Closer - Money Tree 2.0\r\ncd /d "${ROOT}"\r\necho.\r\necho  THE CLOSER - Money Tree 2.0\r\necho.\r\nnode scripts/closer/launcher.js\r\nif %ERRORLEVEL% == 0 goto loop\r\necho.\r\necho  The Closer stopped unexpectedly.\r\npause\r\n`
+    // Always restart on any exit with a 10s backoff — no pause, no keypress needed.
+    // Check for 'timeout /t 10' as the marker that this is the correct version.
+    const correct = `@echo off\r\n:loop\r\ntitle The Closer - Money Tree 2.0\r\ncd /d "${ROOT}"\r\necho.\r\necho  THE CLOSER - Money Tree 2.0\r\necho.\r\nnode scripts/closer/launcher.js\r\necho.\r\necho  The Closer restarting in 10s...\r\ntimeout /t 10 /nobreak >nul\r\ngoto loop\r\n`
     const current = fs.existsSync(bat) ? fs.readFileSync(bat, 'ascii') : ''
-    if (!current.includes(':loop')) {
+    if (!current.includes('timeout /t 10')) {
       fs.writeFileSync(bat, correct, 'ascii')
-      console.log('[closer] bat file updated with restart loop')
+      console.log('[closer] bat file updated: now restarts on any exit with 10s backoff')
     }
   } catch {}
 }

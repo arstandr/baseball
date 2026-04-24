@@ -121,10 +121,13 @@ if [ "$LINEUPS_MODE" = true ]; then
   echo ""
   echo "── Re-run edge finder with lineup K% ──"
   node scripts/live/strikeoutEdge.js --date "$DATE" --json
+  # NOTE: do NOT call ksBets.js log here — all bets go through the T-2.5h schedule.
+  # firePendingBets() polls every 5 min and will pick up the updated lineup data.
 
   echo ""
-  echo "── Update ks_bets with refined edges ──"
-  node scripts/live/ksBets.js log --date "$DATE"
+  echo "── Re-run F5 XGBoost pipeline with official lineups ──"
+  node cli.js signal --date "$DATE"
+  node cli.js trade --date "$DATE"
 
   echo ""
   echo "════════════════════════════════════════"
@@ -189,6 +192,12 @@ node scripts/live/syncFills.js --date "$DATE" || true
 echo ""
 echo "── 8. Snapshot Kalshi F5 opening prices ──"
 node scripts/live/collectF5Lines.js --date "$DATE" || true
+
+echo ""
+echo "── 9. F5 XGBoost pipeline: fetch games + run agents + judge ──"
+node cli.js fetch --date "$DATE"
+node cli.js signal --date "$DATE"
+node cli.js trade --date "$DATE"
 
 echo ""
 echo "════════════════════════════════════════"

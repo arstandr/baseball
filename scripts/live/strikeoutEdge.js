@@ -625,9 +625,19 @@ async function fetchKsMarkets(eventTicker) {
       timeout: 15000,
       validateStatus: s => s >= 200 && s < 500,
     })
-    if (res.status >= 400) return []
+    if (res.status === 401 || res.status === 403) {
+      console.error(`[edge] Kalshi auth failed (${res.status}) — check KALSHI_KEY_ID / key file. No markets will be priced.`)
+      return []
+    }
+    if (res.status >= 400) {
+      console.warn(`[edge] Kalshi API error for ${eventTicker}: HTTP ${res.status}`)
+      return []
+    }
     return res.data?.markets || []
-  } catch { return [] }
+  } catch (err) {
+    console.warn(`[edge] fetchKsMarkets(${eventTicker}) error: ${err.message}`)
+    return []
+  }
 }
 
 function groupByPitcher(markets) {
@@ -842,6 +852,13 @@ async function main() {
         `${parkStr}${wxStr}${umpStr}${veloStr}${bbStr}${ttoStr}${splitNote}${savantStr}${careerStr}`
       )
 
+      // Resolve Kalshi market group here so lambda_calc can log n_markets without TDZ
+      const kalshiTeam = toKalshiAbbr(team)
+      let group = null
+      for (const [key, g] of pitcherGroups) {
+        if (key.startsWith(kalshiTeam)) { group = g; break }
+      }
+
       // ── Pipeline: emit model_input + lambda_calc ──────────────────────────
       const _gameLabel = label || `${game.team_away}@${game.team_home}`
       recordPipelineStep({
@@ -897,12 +914,6 @@ async function main() {
         },
         summary: { lambda, n_markets: group?.markets?.length ?? 0 },
       }).catch(() => {})
-
-      const kalshiTeam = toKalshiAbbr(team)
-      let group = null
-      for (const [key, g] of pitcherGroups) {
-        if (key.startsWith(kalshiTeam)) { group = g; break }
-      }
 
       if (!group) {
         console.log(`    [no market] no Kalshi group for ${meta.name} (${kalshiTeam})`)

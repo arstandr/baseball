@@ -15,6 +15,7 @@ import {
   fetchPitcherLeaderboard as fgLeaderboard,
   fetchPitcherPlatoonSplits,
 } from '../../lib/fangraphs.js'
+import * as db from '../../lib/db.js'
 import {
   resolveBbrefSlug,
   fetchPitcherGameLog as bbrefGameLog,
@@ -42,6 +43,24 @@ export const LEAGUE_AVG = {
 // Cache leaderboards per-season so we don't refetch per pitcher
 const _savantCache = new Map()
 const _fgCache = new Map()
+const _dbStatcastCache = new Map()  // Map<pitcher_id, row> from Turso pitcher_statcast table
+
+async function loadDbStatcast(season) {
+  if (_dbStatcastCache.has(season)) return _dbStatcastCache.get(season)
+  const rows = await db.all(
+    `SELECT player_id, k_pct, swstr_pct, fb_velo, gb_pct, bb_pct, ip, pa,
+            k_pct_vs_l, k_pct_vs_r
+     FROM pitcher_statcast WHERE season = ? ORDER BY fetch_date DESC`,
+    [season],
+  ).catch(() => [])
+  // Dedupe — first row per player_id is most recent (ORDER BY fetch_date DESC)
+  const map = new Map()
+  for (const r of rows) {
+    if (!map.has(String(r.player_id))) map.set(String(r.player_id), r)
+  }
+  _dbStatcastCache.set(season, map)
+  return map
+}
 
 async function getSavant(season) {
   if (_savantCache.has(season)) return _savantCache.get(season)
@@ -111,19 +130,37 @@ export async function computePitcherSignals({
   season,
 }) {
   if (!pitcherId) return null
-  const [savant, fg, hand, gameLog, slug] = await Promise.all([
+  const [savant, fg, hand, gameLog, slug, dbStatcast] = await Promise.all([
     getSavant(season).catch(() => ({})),
     getFangraphs(season).catch(() => ({})),
     fetchPitcherHand(pitcherId).catch(() => 'R'),
     mlbGameLog(pitcherId, season).catch(() => []),
     resolveBbrefSlug(pitcherName).catch(() => null),
+    loadDbStatcast(season),
   ])
 
-  const sv = savant?.[pitcherId] || null
+  const svRaw = savant?.[pitcherId] || null
+  const dbRow = dbStatcast?.get(String(pitcherId)) || null
+  // Merge: scrape result takes priority; DB row fills any gaps
+  const sv = svRaw || dbRow
+    ? {
+        swstr_pct:        svRaw?.swstr_pct   ?? dbRow?.swstr_pct   ?? null,
+        gb_pct:           svRaw?.gb_pct       ?? dbRow?.gb_pct       ?? null,
+        hard_contact_pct: svRaw?.hard_contact_pct ?? null,
+        xera:             svRaw?.xera         ?? null,
+        fstrike_pct:      svRaw?.fstrike_pct  ?? null,
+        k_pct:            svRaw?.k_pct        ?? dbRow?.k_pct        ?? null,
+        fb_velo:          svRaw?.fb_velo      ?? dbRow?.fb_velo      ?? null,
+        k_pct_vs_l:       svRaw?.k_pct_vs_l  ?? dbRow?.k_pct_vs_l  ?? null,
+        k_pct_vs_r:       svRaw?.k_pct_vs_r  ?? dbRow?.k_pct_vs_r  ?? null,
+      }
+    : null
   const fgRow = fg?.[pitcherId] || null
 
   // --- Last 5 starts metrics from the MLB game log
-  const recent = [...(gameLog || [])].reverse().slice(0, 5) // most-recent-first
+  // Exclude starts from the same date as the game being analyzed (avoids rest=0)
+  const priorStarts = [...(gameLog || [])].filter(s => s.date < gameDate).reverse()
+  const recent = priorStarts.slice(0, 5) // most-recent-first
   const eraL5 = computeFullEraL5(recent)
   const avgInnings = recent.length
     ? recent.reduce((a, r) => a + (r.innings || 0), 0) / recent.length
@@ -140,7 +177,7 @@ export async function computePitcherSignals({
   const swstrPct = sv?.swstr_pct ?? LEAGUE_AVG.swstr_pct
   const gbPct = sv?.gb_pct ?? fgRow?.gb_pct ?? LEAGUE_AVG.gb_pct
   const hardPct = sv?.hard_contact_pct ?? LEAGUE_AVG.hard_contact_pct
-  const k9 = fgRow?.k9 ?? sv?.k_pct != null ? (sv.k_pct * 38) : LEAGUE_AVG.k9
+  const k9 = fgRow?.k9 ?? (sv?.k_pct != null ? sv.k_pct * 38 : LEAGUE_AVG.k9)
   const bb9 = fgRow?.bb9 ?? LEAGUE_AVG.bb9
   const fstrike = sv?.fstrike_pct ?? fgRow?.fstrike_pct ?? LEAGUE_AVG.fstrike_pct
 

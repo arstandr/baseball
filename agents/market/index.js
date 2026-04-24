@@ -10,7 +10,7 @@ import { saveAgentOutput } from '../../lib/db.js'
  * Produces the line-movement signals the Judge disqualifiers consume.
  */
 export async function fetchLines(game) {
-  const raw = await getMarketRaw(game.id)
+  const raw = await getMarketRaw(game)
   return raw
 }
 

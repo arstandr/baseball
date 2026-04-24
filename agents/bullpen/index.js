@@ -35,18 +35,19 @@ export async function run(game) {
     [game.team_away_id || game.team_away, bpAway],
   ]) {
     if (!teamId || !sig) continue
+    const safe = v => (v == null || (typeof v === 'number' && !Number.isFinite(v)) ? null : v)
     await upsert(
       'bullpen_signals',
       {
         team_id: String(teamId),
         signal_date: game.date,
-        era_14d: sig.era_14d,
-        whip_14d: sig.whip_14d,
-        k_pct_14d: sig.k_pct_14d,
-        hr_per_9_14d: sig.hr_per_9_14d,
-        inherited_score_pct: sig.inherited_score_pct,
-        quality_score: sig.quality_score,
-        confidence: sig.confidence,
+        era_14d: safe(sig.era_14d),
+        whip_14d: safe(sig.whip_14d),
+        k_pct_14d: safe(sig.k_pct_14d),
+        hr_per_9_14d: safe(sig.hr_per_9_14d),
+        inherited_score_pct: safe(sig.inherited_score_pct),
+        quality_score: safe(sig.quality_score),
+        confidence: safe(sig.confidence),
         raw_data_json: JSON.stringify(sig),
       },
       ['team_id', 'signal_date'],

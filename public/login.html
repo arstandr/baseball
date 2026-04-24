@@ -6,12 +6,14 @@
   <title>Money Tree 2.0 · Sign in</title>
   <style>
     :root {
-      --bg: #0d1117;
-      --card: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --muted: #8b949e;
-      --accent: #58a6ff;
+      --bg:       #F6F3EC;
+      --card:     #FFFFFF;
+      --border:   #DDD9D0;
+      --text:     #161B22;
+      --muted:    #8B909A;
+      --text-dim: #4A5562;
+      --accent:   #1F3A5F;
+      --bad:      #B3261E;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; }
@@ -19,13 +21,14 @@
       background: var(--bg);
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 18px;
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
       background-image:
-        radial-gradient(circle at 20% 20%, rgba(88,166,255,0.08), transparent 40%),
-        radial-gradient(circle at 80% 80%, rgba(63,185,113,0.06), transparent 40%);
+        radial-gradient(circle at 20% 20%, rgba(31,58,95,0.06), transparent 40%),
+        radial-gradient(circle at 80% 80%, rgba(27,127,59,0.04), transparent 40%);
     }
     .card {
       background: var(--card);
@@ -34,13 +37,13 @@
       padding: 48px 40px;
       width: min(400px, 92vw);
       text-align: center;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      box-shadow: 0 8px 32px rgba(22,27,34,0.10);
     }
     .logo {
-      font-size: 40px;
+      font-size: 36px;
       font-weight: 800;
-      letter-spacing: 4px;
-      background: linear-gradient(90deg, #58a6ff 0%, #3fb950 100%);
+      letter-spacing: 3px;
+      background: linear-gradient(90deg, #1F3A5F 0%, #1B7F3B 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
@@ -48,73 +51,68 @@
     }
     .tagline {
       color: var(--muted);
-      font-size: 13px;
-      letter-spacing: 1px;
-      text-transform: uppercase;
+      font-size: 14px;
+      letter-spacing: 0.5px;
       margin-bottom: 36px;
     }
     .field {
-      margin-bottom: 16px;
+      margin-bottom: 18px;
       text-align: left;
     }
     label {
       display: block;
-      font-size: 12px;
+      font-size: 14px;
       font-weight: 600;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 6px;
+      color: var(--text-dim);
+      margin-bottom: 7px;
     }
     input {
       width: 100%;
-      background: #0d1117;
-      border: 1px solid var(--border);
+      background: var(--bg);
+      border: 1.5px solid var(--border);
       border-radius: 8px;
-      padding: 12px 14px;
+      padding: 13px 14px;
       color: var(--text);
-      font-size: 15px;
+      font-size: 17px;
       outline: none;
       transition: border-color 0.15s;
     }
     input:focus { border-color: var(--accent); }
-    input[type="password"] { letter-spacing: 6px; font-size: 18px; }
+    input[type="password"] { letter-spacing: 6px; font-size: 20px; }
     .btn {
       width: 100%;
       background: var(--accent);
-      color: #0d1117;
+      color: #FFFFFF;
       border: none;
       border-radius: 8px;
-      padding: 13px;
-      font-size: 15px;
+      padding: 14px;
+      font-size: 17px;
       font-weight: 700;
       cursor: pointer;
       margin-top: 8px;
       transition: opacity 0.15s, transform 0.15s;
-      letter-spacing: 0.5px;
     }
-    .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+    .btn:hover { opacity: 0.88; transform: translateY(-1px); }
     .btn:active { transform: translateY(0); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
     .err {
       margin-top: 16px;
-      color: #f85149;
-      font-size: 13px;
-      min-height: 18px;
+      color: var(--bad);
+      font-size: 15px;
+      min-height: 20px;
     }
     .footer {
-      margin-top: 32px;
-      color: #484f58;
-      font-size: 11px;
-      letter-spacing: 0.5px;
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 13px;
     }
     .refresh-btn {
       position: fixed; top: 14px; right: 14px;
-      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
-      color: #8b949e; border-radius: 8px; padding: 6px 12px;
-      font-size: 13px; cursor: pointer; transition: background 0.15s;
+      background: rgba(0,0,0,0.05); border: 1px solid var(--border);
+      color: var(--muted); border-radius: 8px; padding: 6px 12px;
+      font-size: 14px; cursor: pointer; transition: background 0.15s;
     }
-    .refresh-btn:hover { background: rgba(255,255,255,0.1); color: #c9d1d9; }
+    .refresh-btn:hover { background: rgba(0,0,0,0.09); color: var(--text); }
   </style>
 </head>
 <body>
@@ -139,7 +137,7 @@
 
     <div class="err" id="err"></div>
     <div class="footer">Authorized access only</div>
-    <div class="footer" id="deploy-date" style="margin-top:6px;opacity:.45;font-size:11px"></div>
+    <div class="footer" id="deploy-date" style="margin-top:6px;opacity:.5;font-size:12px"></div>
   </div>
 
   <script>

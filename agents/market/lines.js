@@ -5,6 +5,7 @@
 // for a given game. (Pivoted from F5 per DEC-016.)
 
 import { fetchCurrentLines } from '../../lib/odds.js'
+import { getF5MarketPrices } from '../../lib/kalshi.js'
 import * as db from '../../lib/db.js'
 
 /**
@@ -96,53 +97,83 @@ export async function fetchAndPersistAllLines(scheduleGames) {
  * Build market_raw structure for a single game from the stored line history.
  * Includes sharp_signal heuristic (reverse line movement proxy).
  */
-export async function getMarketRaw(gameId) {
+export async function getMarketRaw(game) {
+  // Support legacy callers that pass gameId directly
+  const gameId = typeof game === 'object' ? game.id : game
+  const teamAway = typeof game === 'object' ? game.team_away : null
+  const teamHome = typeof game === 'object' ? game.team_home : null
+  const gameDate = typeof game === 'object' ? game.date : null
+  const gameTime = typeof game === 'object' ? game.game_time : null
+
   const opening = await db.getOpeningLine(gameId, 'full_total')
   const current = await db.getCurrentLine(gameId, 'full_total')
-  if (!current) {
+
+  // Fetch live Kalshi F5 prices — this is what we're actually betting on
+  let f5Markets = []
+  if (teamAway && teamHome) {
+    f5Markets = await getF5MarketPrices(teamAway, teamHome, gameDate, gameTime).catch(() => [])
+  }
+
+  // Use the most-traded F5 line as market reference (highest volume, or fallback to middle strike)
+  const f5Ref = f5Markets.length
+    ? (f5Markets.reduce((best, m) => (m.volume ?? 0) > (best.volume ?? 0) ? m : best, f5Markets[Math.floor(f5Markets.length / 2)]))
+    : null
+
+  if (!current && !f5Ref) {
     return {
       game_id: gameId,
       opening_line: null,
       current_line: null,
       movement: 0,
-      efficiency_score: 0.7, // penalise missing data per DATA.md quality rule
+      efficiency_score: 0.7,
       over_price: null,
       under_price: null,
       disqualify: false,
       sharp_signal: null,
       platform_line: null,
       platform_gap: 0,
+      f5_markets: [],
       _missing: true,
     }
   }
-  const movement = opening ? current.line_value - opening.line_value : 0
+  // normalizeMarket renames floor_strike → line
+  const currentLine = current?.line_value ?? f5Ref?.line ?? null
+  const movement = opening && currentLine != null ? currentLine - opening.line_value : 0
   const efficiency = efficiencyScore(movement)
 
-  // sharp_signal — if the line moved > 0.2 in the last look and public % is
-  // skewed toward the other side, that's reverse-line-movement. Without a
-  // public % source (not available on The Odds API free tier), we use a
-  // proxy: if >0.3 move and the under price > 0.55, "under" is the sharp
-  // signal (line dropped toward under at an above-average implied).
+  // Prices: prefer live Kalshi F5 ask prices (API returns cents 0-100 → normalize to 0-1)
+  const f5OverPrice = f5Ref?.yes_ask != null ? f5Ref.yes_ask / 100 : null
+  const f5UnderPrice = f5Ref?.no_ask != null ? f5Ref.no_ask / 100 : null
+  const overPrice = f5OverPrice ?? current?.over_price ?? null
+  const underPrice = f5UnderPrice ?? current?.under_price ?? null
+
+  // sharp_signal proxy: reverse-line-movement heuristic
   let sharp = null
-  if (movement <= -0.3 && current.under_price >= 0.53) sharp = 'under'
-  else if (movement >= 0.3 && current.over_price >= 0.53) sharp = 'over'
+  if (movement <= -0.3 && (underPrice ?? 0) >= 0.53) sharp = 'under'
+  else if (movement >= 0.3 && (overPrice ?? 0) >= 0.53) sharp = 'over'
 
   const disqualify = Math.abs(movement) > 0.5
 
+  const platformLine = f5Ref?.line ?? current?.line_value ?? null
+  const platformGap = platformLine != null && currentLine != null
+    ? Number((currentLine - platformLine).toFixed(2))
+    : 0
+
   return {
     game_id: gameId,
-    opening_line: opening?.line_value ?? current.line_value,
-    current_line: current.line_value,
+    opening_line: opening?.line_value ?? currentLine,
+    current_line: currentLine,
     movement: Number((movement || 0).toFixed(3)),
     movement_direction: movement > 0.05 ? 'up' : movement < -0.05 ? 'down' : 'none',
     efficiency_score: efficiency,
-    over_price: current.over_price,
-    under_price: current.under_price,
+    over_price: overPrice,
+    under_price: underPrice,
     sharp_signal: sharp,
-    platform_line: current.line_value, // TODO: Robinhood/Kalshi line — alias to consensus for now
-    platform_gap: 0, // updated when platform_line differs
+    platform_line: platformLine,
+    platform_gap: platformGap,
     disqualify,
     disqualify_reason: disqualify ? 'line_movement_gt_0.5' : null,
+    f5_markets: f5Markets,
   }
 }
 

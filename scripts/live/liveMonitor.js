@@ -464,6 +464,23 @@ async function sendDailyReport() {
 //   - Otherwise → leave it resting until T-45
 // Guards with _t90Games so it only runs once per game.
 
+// Load per-user Kalshi credentials for a batch of ks_bets rows.
+// Kalshi 404s when an order is looked up under the wrong account, so every
+// cancel/place/getOrder must auth as the row's owner, not the env default.
+async function _loadCredsForBets(bets) {
+  const credsMap = new Map()
+  const userIds = [...new Set(bets.map(b => b.user_id).filter(Boolean))]
+  if (!userIds.length) return credsMap
+  const users = await db.all(
+    `SELECT id, kalshi_key_id, kalshi_private_key FROM users WHERE id IN (${userIds.map(() => '?').join(',')})`,
+    userIds,
+  )
+  for (const u of users) {
+    if (u.kalshi_key_id) credsMap.set(u.id, { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key })
+  }
+  return credsMap
+}
+
 const _t90Games = new Set()
 
 async function manageRestingOrders(game) {
@@ -478,10 +495,14 @@ async function manageRestingOrders(game) {
   )
   if (!restingBets.length) return
 
+  const credsMap = await _loadCredsForBets(restingBets)
+
   console.log(`\n[live] T-90 review: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
 
   for (const bet of restingBets) {
     if (!bet.ticker) continue
+    const creds = credsMap.get(bet.user_id) ?? {}
+    if (!creds.keyId) { console.error(`  [T-90] no creds for user_id=${bet.user_id} (${bet.pitcher_name}) — skipping`); continue }
     try {
       const mkt = await getMarketPrice(bet.ticker)
       if (!mkt) continue
@@ -509,7 +530,7 @@ async function manageRestingOrders(game) {
 
       if (flipEdge >= LIVE_EDGE) {
         // Cancel original, place flip-side maker
-        if (bet.order_id) await cancelOrder(bet.order_id)
+        if (bet.order_id) await cancelOrder(bet.order_id, creds)
         console.log(`  ↔ ${bet.pitcher_name} ${bet.strike}+ flip YES→${flipSide}  original edge=${(originalEdge*100).toFixed(1)}¢  flip edge=${(flipEdge*100).toFixed(1)}¢`)
 
         // flipAsk in cents: for flipping to NO, cost = 100 - yes_bid; for flipping to YES, cost = yes_ask
@@ -517,7 +538,7 @@ async function manageRestingOrders(game) {
         const flipAsk      = Math.min(99, flipAskCents)
         const makerCents   = Math.max(1, flipAsk - 1)
         const contracts   = Math.max(1, Math.round((bet.bet_size ?? 100) / flipPrice))
-        const result      = await placeOrder(bet.ticker, flipSide.toLowerCase(), contracts, makerCents)
+        const result      = await placeOrder(bet.ticker, flipSide.toLowerCase(), contracts, makerCents, creds)
         const newOrder    = result?.order ?? result
         const newOrderId  = newOrder?.order_id ?? null
 
@@ -528,7 +549,7 @@ async function manageRestingOrders(game) {
         console.log(`    → ${flipSide} MAKER ${contracts}c @ ${makerCents}¢  id=${newOrderId}`)
       } else {
         // No edge on either side — cancel and skip
-        if (bet.order_id) await cancelOrder(bet.order_id)
+        if (bet.order_id) await cancelOrder(bet.order_id, creds)
         await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
         console.log(`  ✗ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — no edge on either side at T-90, cancelled  (YES edge=${(edgeYES*100).toFixed(1)}¢ NO edge=${(edgeNO*100).toFixed(1)}¢)`)
       }
@@ -560,12 +581,16 @@ async function managePreGameOrders(game) {
   )
   if (!restingBets.length) return
 
+  const credsMap = await _loadCredsForBets(restingBets)
+
   console.log(`\n[live] T-45 order check: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
 
   for (const bet of restingBets) {
     if (!bet.order_id || !bet.ticker) continue
+    const creds = credsMap.get(bet.user_id) ?? {}
+    if (!creds.keyId) { console.error(`  [T-45] no creds for user_id=${bet.user_id} (${bet.pitcher_name}) — skipping`); continue }
     try {
-      const order = await getOrder(bet.order_id)
+      const order = await getOrder(bet.order_id, creds)
       const filled = order?.status === 'executed' || Number(order?.remaining_count_fp ?? order?.remaining_count ?? 0) === 0
 
       if (filled) {
@@ -582,7 +607,7 @@ async function managePreGameOrders(game) {
       }
 
       // Not filled — cancel and re-evaluate at current market price
-      await cancelOrder(bet.order_id)
+      await cancelOrder(bet.order_id, creds)
       console.log(`  ✗ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — not filled, cancelling maker order`)
 
       const mkt = await getMarketPrice(bet.ticker)
@@ -607,7 +632,7 @@ async function managePreGameOrders(game) {
       const takerCents = Math.min(99, Math.round(currentAsk * 100) + 1)
       // bet_size is face value ($1/contract at Kalshi) = contract count directly
       const contracts  = Math.max(1, Math.round(bet.bet_size ?? 100))
-      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents)
+      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents, creds)
       const order2     = result?.order ?? result
       const newOrderId = order2?.order_id ?? null
       const newStatus  = order2?.status ?? 'placed'
@@ -647,12 +672,23 @@ async function convertStaleMakers() {
     [TODAY, cutoff],
   )
 
+  if (!stale.length) return
+
+  const credsMap = await _loadCredsForBets(stale)
+
   for (const bet of stale) {
     if (_convertedBetIds.has(bet.id)) continue
     if (!bet.order_id || !bet.ticker) { _convertedBetIds.add(bet.id); continue }
 
+    const creds = credsMap.get(bet.user_id) ?? {}
+    if (!creds.keyId) {
+      console.error(`  [stale-maker] no creds for user_id=${bet.user_id} (${bet.pitcher_name}) — skipping`)
+      _convertedBetIds.add(bet.id)
+      continue
+    }
+
     try {
-      const order  = await getOrder(bet.order_id)
+      const order  = await getOrder(bet.order_id, creds)
       const filled = order?.status === 'executed' ||
                      Number(order?.remaining_count_fp ?? order?.remaining_count ?? 0) === 0
 
@@ -672,7 +708,7 @@ async function convertStaleMakers() {
       }
 
       // Not filled after 30 min — cancel and re-evaluate
-      await cancelOrder(bet.order_id)
+      await cancelOrder(bet.order_id, creds)
       console.log(`\n[live] ⏱ stale maker: ${bet.pitcher_name} ${bet.side} ${bet.strike}+ (${bet.ticker}) — 30min unfilled, cancelling`)
 
       const mkt = await getMarketPrice(bet.ticker)
@@ -697,7 +733,7 @@ async function convertStaleMakers() {
       // Edge still good — take the market
       const takerCents = Math.min(99, Math.round(currentAsk * 100) + 1)
       const contracts  = Math.max(1, Math.round(bet.bet_size ?? 100))
-      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents)
+      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents, creds)
       const order2     = result?.order ?? result
       const newOrderId = order2?.order_id ?? null
       const newStatus  = order2?.status ?? 'placed'
@@ -896,6 +932,18 @@ async function main() {
 
   console.log(`[live] Monitoring ${allPitcherIds.size} pitchers across ${games.length} games`)
   console.log(`[live] Mode: ${LIVE ? '🔴 LIVE TRADING' : '📄 PAPER TRADING'} | Min edge: ${(LIVE_EDGE*100).toFixed(0)}¢ | Daily loss limit: $${LOSS_LIMIT}`)
+
+  // Per-user live/paper banner — catches the case where LIVE_TRADING=true but a user still has paper=1
+  if (LIVE) {
+    const bettors = await db.all(`SELECT id, name, paper, kalshi_key_id FROM users WHERE active_bettor = 1`)
+    const paperBettors = bettors.filter(u => u.paper !== 0)
+    const liveBettors  = bettors.filter(u => u.paper === 0 && u.kalshi_key_id)
+    const noCredsLive  = bettors.filter(u => u.paper === 0 && !u.kalshi_key_id)
+    for (const u of liveBettors)  console.log(`  [live] ✅ ${u.name} — LIVE (paper=0, has creds)`)
+    for (const u of paperBettors) console.log(`  [live] 📄 ${u.name} — PAPER despite LIVE_TRADING=true (paper=${u.paper})`)
+    for (const u of noCredsLive)  console.log(`  [live] ⚠  ${u.name} — paper=0 but NO Kalshi creds — orders will fail`)
+  }
+
   console.log(`[live] Polling every ${POLL_SEC}s. Ctrl+C to stop.\n`)
   db.saveLog({ tag: 'STARTUP', msg: `Mode=${LIVE ? 'LIVE' : 'PAPER'}  edge≥${(LIVE_EDGE*100).toFixed(0)}¢  pitchers=${allPitcherIds.size}  games=${games.length}` })
 
