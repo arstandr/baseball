@@ -5,6 +5,7 @@ node_modules/
 *.db-shm
 *.db-wal
 models/artifacts/
+scripts/historical/cache/
 __pycache__/
 *.pyc
 .DS_Store

@@ -138,6 +138,8 @@ router.get('/ks/live', wrap(async (req, res) => {
         is_final:     isFinal,
         home_score:   ls?.teams?.home?.runs ?? null,
         away_score:   ls?.teams?.away?.runs ?? null,
+        inning_state: ls?.inningState ?? null,
+        is_pitching:  !isFinal && !!starter.still_in && (side === 'home' ? ls?.inningState === 'Top' : ls?.inningState === 'Bottom'),
         bet_statuses: allMyBets.map(b => ({
           id:     b.id,
           strike: b.strike,
@@ -203,10 +205,10 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
 router.get('/ks/schedule', wrap(async (req, res) => {
   const date = req.query.date || todayISO()
   const rows = await db.all(
-    `SELECT id, game_label, pitcher_name, pitcher_side, game_time, scheduled_at, status, fired_at
+    `SELECT id, pitcher_id, game_label, pitcher_name, pitcher_side, game_time, scheduled_at, status, fired_at, notes, preflight
      FROM bet_schedule
-     WHERE bet_date = ? AND status = 'pending'
-     ORDER BY scheduled_at ASC`,
+     WHERE bet_date = ? AND status IN ('pending','skipped','error')
+     ORDER BY game_time ASC`,
     [date],
   )
   res.json({ date, schedule: rows })

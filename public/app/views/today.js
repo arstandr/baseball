@@ -304,69 +304,78 @@ export async function loadDay(date) {
   list.querySelectorAll('.pitcher-card').forEach(el => el.remove())
   if (liveBanner) liveBanner.hidden = true
 
-  if (!data || !data.pitchers?.length) {
+  const hasPitchers = data?.pitchers?.length > 0
+  const hasSchedule = shared.betSchedule?.length > 0
+
+  shared.dailyPitchers = data?.pitchers || []
+  shared.dayPnl        = data?.day_pnl  ?? 0
+  shared.liveOverlay   = {}
+  renderTicker()
+
+  if (!hasPitchers && !hasSchedule) {
     hdr.hidden = true
     empty.hidden = false
     const betList = document.getElementById('sc-bet-list')
     if (betList) betList.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
     const scSummary = document.getElementById('sc-summary')
     if (scSummary) scSummary.hidden = true
-    renderTicker()
     return
   }
+
   empty.hidden = true
 
-  shared.dailyPitchers = data.pitchers || []
-  shared.dayPnl = data.day_pnl ?? 0
-  shared.liveOverlay = {}
-  renderTicker()
+  if (hasPitchers) {
+    hdr.hidden = false
+    const pnlCls = data.day_pnl >= 0 ? 'good' : 'bad'
+    const maxT = computeMaxTheoretical(data.pitchers)
+    hdr.innerHTML = `
+      <div>
+        <div class="day-date">${fmtDateFull(date)}</div>
+        <div class="day-meta">${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''} · ${data.day_bets} bets</div>
+      </div>
+      <div>
+        <span id="day-wl" class="day-meta">${data.day_wins}W · ${data.day_losses}L${data.day_pending > 0 ? ` · ${data.day_pending} pending` : ''}</span>
+      </div>
+      <div id="day-pnl-val" class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>
+      <div class="day-max-wrap">
+        <span class="day-max-label">best case</span>
+        <span class="day-max-val" id="day-max-val">${maxT >= 0 ? '+' : ''}${fmt$(maxT)}</span>
+      </div>`
 
-  hdr.hidden = false
-  const pnlCls = data.day_pnl >= 0 ? 'good' : 'bad'
-  const maxT = computeMaxTheoretical(data.pitchers)
-  hdr.innerHTML = `
-    <div>
-      <div class="day-date">${fmtDateFull(date)}</div>
-      <div class="day-meta">${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''} · ${data.day_bets} bets</div>
-    </div>
-    <div>
-      <span id="day-wl" class="day-meta">${data.day_wins}W · ${data.day_losses}L${data.day_pending > 0 ? ` · ${data.day_pending} pending` : ''}</span>
-    </div>
-    <div id="day-pnl-val" class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>
-    <div class="day-max-wrap">
-      <span class="day-max-label">best case</span>
-      <span class="day-max-val" id="day-max-val">${maxT >= 0 ? '+' : ''}${fmt$(maxT)}</span>
-    </div>`
+    const sorted = [...data.pitchers].sort((a, b) => {
+      if (a.game_time && b.game_time) return a.game_time.localeCompare(b.game_time)
+      if (a.game_time) return -1
+      if (b.game_time) return 1
+      return 0
+    })
 
-  const sorted = [...data.pitchers].sort((a, b) => {
-    if (a.game_time && b.game_time) return a.game_time.localeCompare(b.game_time)
-    if (a.game_time) return -1
-    if (b.game_time) return 1
-    return 0
-  })
-
-  for (const p of sorted) {
-    try {
-      list.appendChild(buildPitcherCard(p))
-    } catch (err) {
-      console.error('[buildPitcherCard] failed for', p.pitcher_name, err)
+    for (const p of sorted) {
+      try {
+        list.appendChild(buildPitcherCard(p))
+      } catch (err) {
+        console.error('[buildPitcherCard] failed for', p.pitcher_name, err)
+      }
     }
+
+    try {
+      const lbUid = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
+      const liveBetsData = await fetchJson(`/api/ks/live-bets?date=${date}${lbUid}`).catch(() => null)
+      shared.liveBetsPitchers = liveBetsData?.pitchers || []
+      renderGameCards(sorted, shared.liveBetsPitchers)
+      const heroMax = computeMaxTheoretical(sorted)
+      updateBestCaseCard(heroMax, 1, 0)
+    } catch (err) { console.error('[renderGameCards]', err) }
+
+    try { await renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
+  } else {
+    // No bets yet but schedule exists — just render schedule cards
+    hdr.hidden = true
+    renderGameCards([], [])
   }
-
-  try {
-    const lbUid = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
-    const liveBetsData = await fetchJson(`/api/ks/live-bets?date=${date}${lbUid}`).catch(() => null)
-    shared.liveBetsPitchers = liveBetsData?.pitchers || []
-    renderGameCards(sorted, shared.liveBetsPitchers)
-    const heroMax = computeMaxTheoretical(sorted)
-    updateBestCaseCard(heroMax, 1, 0)
-  } catch (err) { console.error('[renderGameCards]', err) }
-
-  try { await renderDaySummary(date, data) } catch (err) { console.error('[renderDaySummary]', err) }
 
   startCountdowns()
 
-  if (data.day_pending > 0) startLivePolling(date)
+  if (data?.day_pending > 0) startLivePolling(date)
 }
 
 export async function renderDaySummary(date, data) {
@@ -492,6 +501,59 @@ export function updateBestCaseCard(bestCase, atRisk, dayPnl) {
   }
 }
 
+function renderScheduleCard(s) {
+  const now       = Date.now()
+  const fireAt    = new Date(s.scheduled_at)
+  const gameAt    = new Date(s.game_time)
+  const minsUntil = Math.round((fireAt.getTime() - now) / 60000)
+
+  const buyTime  = fireAt.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true })
+  const gameTime = gameAt.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true })
+  const side     = s.pitcher_side === 'home' ? 'Home' : 'Away'
+
+  if (s.status === 'skipped' || s.status === 'error') {
+    let reason = ''
+    try {
+      const pf = typeof s.preflight === 'string' ? JSON.parse(s.preflight) : s.preflight
+      reason = pf?.reason || s.notes || ''
+    } catch { reason = s.notes || '' }
+    const label = s.status === 'error' ? '⚠ Error' : '✗ Skipped'
+    return `<div class="game-card gc-s-even sched-card sched-card--skipped" id="sc-${s.id}">
+      <div class="gc-status-band gc-s-even">${label}</div>
+      <div class="gc-body">
+        <div class="gc-pitcher">${esc(s.pitcher_name)}</div>
+        <div class="gc-meta">${esc(s.game_label)} · ${side} · Game ${gameTime} ET</div>
+        ${reason ? `<div class="gc-story sched-skip-reason">${esc(reason)}</div>` : ''}
+      </div>
+    </div>`
+  }
+
+  let buyLabel, buyMeta
+  if (minsUntil > 60) {
+    const h = Math.floor(minsUntil / 60), m = minsUntil % 60
+    buyLabel = `Buying at ${buyTime} ET`
+    buyMeta  = `in ${h}h ${m}m`
+  } else if (minsUntil > 0) {
+    buyLabel = `Buying at ${buyTime} ET`
+    buyMeta  = `in ${minsUntil}m`
+  } else if (minsUntil >= -10) {
+    buyLabel = `Placing order now`
+    buyMeta  = buyTime + ' ET'
+  } else {
+    buyLabel = `Scheduled ${buyTime} ET`
+    buyMeta  = ''
+  }
+
+  return `<div class="game-card gc-s-wait sched-card" id="sc-${s.id}">
+    <div class="gc-status-band gc-s-wait">⏰ ${buyLabel}</div>
+    <div class="gc-body">
+      <div class="gc-pitcher">${esc(s.pitcher_name)}</div>
+      <div class="gc-meta">${esc(s.game_label)} · ${side} · Game ${gameTime} ET</div>
+      <div class="gc-story sched-card-meta">${buyMeta ? `<span class="sched-countdown">${buyMeta}</span>` : ''}</div>
+    </div>
+  </div>`
+}
+
 export function renderGameCards(dailyPitchers, liveBetsPitchers) {
   const container = document.getElementById('sc-bet-list')
   const picksHead = document.getElementById('sc-picks-head')
@@ -512,8 +574,15 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     }
   }
 
-  const pitchers = [...map.values()]
-  if (!pitchers.length) {
+  const pitchers    = [...map.values()]
+  const bettedIds   = new Set(pitchers.map(p => String(p.pitcher_id)))
+
+  // Schedule cards for pitchers not yet bet — sorted by game time
+  const schedItems  = (shared.betSchedule || [])
+    .filter(s => !bettedIds.has(String(s.pitcher_id)))
+    .sort((a, b) => (a.game_time || '').localeCompare(b.game_time || ''))
+
+  if (!pitchers.length && !schedItems.length) {
     if (picksHead) picksHead.hidden = true
     container.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
     return
@@ -538,7 +607,9 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     [...container.querySelectorAll('.game-card.gc-expanded')].map(el => el.id)
   )
 
-  container.innerHTML = cards.map(({ p, sd }) => renderGameCard(p, sd)).join('')
+  container.innerHTML =
+    cards.map(({ p, sd }) => renderGameCard(p, sd)).join('') +
+    schedItems.map(s => renderScheduleCard(s)).join('')
 
   for (const id of openIds) {
     const card = document.getElementById(id)
@@ -556,19 +627,78 @@ function renderGameCard(p, sd) {
   const cfg    = GC_STATUS_CFG[sd.status] || GC_STATUS_CFG.waiting
   const cardId = `gc-${p.pitcher_id}`
 
+  const live = shared.liveOverlay[String(p.pitcher_id)] || null
+
   const matchupMeta = [p.game, p.game_time ? fmtGameTime(p.game_time) : null].filter(Boolean).join(' · ')
 
+  const isPitching    = live?.is_pitching === true
+  const inningState   = live?.inning_state ?? null
+  const pitchCount    = live?.pitches ?? null
+  const currentInning = live?.inning ?? null
+
+  let pitchingStatusHtml = ''
+  if (live && !live.is_final) {
+    if (isPitching) {
+      pitchingStatusHtml = `<div class="gc-pitching-now">⚾ Pitching Now · ${pitchCount ? pitchCount + ' pitches' : ''}</div>`
+    } else if (live.still_in === false) {
+      pitchingStatusHtml = `<div class="gc-pitching-out">Out of game</div>`
+    } else if (inningState === 'Middle' || inningState === 'End') {
+      pitchingStatusHtml = `<div class="gc-pitching-between">Between innings${currentInning ? ` · ${currentInning}` : ''}</div>`
+    }
+  }
+
+  let milestonePillsHtml = ''
+  const currentKs = live?.ks ?? null
+  const allYesBets = sd.enrichedBets.filter(b => b.side === 'YES').sort((a, b) => a.strike - b.strike)
+
+  if (allYesBets.length > 0 && (live || sd.isFinished)) {
+    const pills = allYesBets.map(b => {
+      const hit     = currentKs !== null && currentKs >= b.strike
+      const settled = b.result !== null && b.result !== undefined
+      const won     = b.result === 'win'
+      const lost    = b.result === 'loss'
+      const needed  = currentKs !== null ? Math.max(0, b.strike - currentKs) : null
+
+      let pillCls, pillText
+      if (won || (hit && !lost)) {
+        pillCls  = 'ms-pill--hit'
+        pillText = `✓ ${b.strike}+`
+      } else if (lost) {
+        pillCls  = 'ms-pill--miss'
+        pillText = `✗ ${b.strike}+`
+      } else if (needed !== null && needed === 1) {
+        pillCls  = 'ms-pill--close'
+        pillText = `${b.strike}+ (1 away)`
+      } else if (needed !== null && needed <= 3 && needed > 0) {
+        pillCls  = 'ms-pill--close'
+        pillText = `${b.strike}+ (${needed} away)`
+      } else {
+        pillCls  = 'ms-pill--pending'
+        pillText = `· ${b.strike}+`
+      }
+      return `<span class="ms-pill ${pillCls}">${pillText}</span>`
+    }).join('')
+
+    milestonePillsHtml = `<div class="gc-milestones">${pills}</div>`
+  }
+
   let progressHtml = ''
-  if (sd.progressPct != null && sd.progressDen != null && sd.isLive) {
-    const pct = sd.progressPct
-    const fc  = pct >= 75 ? 'good' : pct >= 45 ? 'warn' : 'bad'
-    const ps  = sd.nextBetProb != null
-      ? ` · <span class="${sd.nextBetProb >= 0.6 ? 'good' : sd.nextBetProb >= 0.4 ? 'warn' : 'bad'}">${Math.round(sd.nextBetProb * 100)}% chance</span>`
-      : ''
-    progressHtml = `<div class="gc-progress-wrap">
-      <div class="gc-progress-track"><div class="gc-progress-fill ${fc}" style="width:${pct}%"></div></div>
-      <div class="gc-progress-label">${sd.progressNum} / ${sd.progressDen} Ks${ps}</div>
-    </div>`
+  if (live && !live.is_final) {
+    const ks  = live.ks ?? 0
+    const maxStrike = allYesBets.length > 0 ? Math.max(...allYesBets.map(b => b.strike)) : null
+    const nextStrike = allYesBets.find(b => !b.result && ks < b.strike)?.strike ?? null
+    const target = nextStrike ?? maxStrike
+
+    if (target !== null) {
+      const pct = Math.min(100, Math.round(ks / target * 100))
+      const fc  = pct >= 75 ? 'good' : pct >= 45 ? 'warn' : 'bad'
+      progressHtml = `<div class="gc-progress-wrap">
+        <div class="gc-progress-label-top">${ks} / ${target} Ks</div>
+        <div class="gc-progress-track"><div class="gc-progress-fill ${fc}" style="width:${pct}%"></div></div>
+      </div>`
+    } else if (live.ks != null && live.ip > 0) {
+      progressHtml = `<div class="gc-progress-wrap"><div class="gc-progress-label">${live.ks} Ks · ${live.ip} IP</div></div>`
+    }
   }
 
   let moneyHtml
@@ -618,9 +748,11 @@ function renderGameCard(p, sd) {
     <div class="gc-body">
       <div class="gc-pitcher">${esc(p.pitcher_name)}</div>
       ${matchupMeta ? `<div class="gc-meta">${esc(matchupMeta)}</div>` : ''}
+      ${pitchingStatusHtml}
+      ${milestonePillsHtml}
       <div class="gc-story">${sd.storySentence}</div>
-      ${sd.situationLine ? `<div class="gc-situation">${esc(sd.situationLine)}</div>` : ''}
-      ${sd.whatNeeds && !sd.isFinished ? `<div class="gc-what-needs">${esc(sd.whatNeeds)}</div>` : ''}
+      ${sd.situationLine && !live ? `<div class="gc-situation">${esc(sd.situationLine)}</div>` : ''}
+      ${sd.whatNeeds && !sd.isFinished && !milestonePillsHtml ? `<div class="gc-what-needs">${esc(sd.whatNeeds)}</div>` : ''}
       ${sd.projectedRange && sd.isWaiting ? `<div class="gc-projected">Model projects ~${esc(sd.projectedRange)} Ks</div>` : ''}
       ${progressHtml}
     </div>

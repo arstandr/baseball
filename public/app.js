@@ -215,8 +215,8 @@ async function refreshBettorCards(bettors) {
     const todaySign = b.today_pnl >= 0 ? '+' : ''
     const record   = `${b.wins}W · ${b.losses}L${b.pending > 0 ? ` · ${b.pending} pending` : ''}`
     const modeBadge = b.paper
-      ? `<span style="font-size:12px;color:#94a3b8">💧 DRY MODE</span>`
-      : `<span style="font-size:12px;color:#22c55e">⚡ LIVE</span>`
+      ? `<span class="bettor-mode-dry">💧 Dry Mode</span>`
+      : `<span class="bettor-mode-live">⚡ Live</span>`
     return `
       <div class="sc-bettor-card bettor-card" data-bettor-id="${b.id}">
         <div class="bettor-card-top" style="padding:0;cursor:default">
@@ -226,18 +226,18 @@ async function refreshBettorCards(bettors) {
             </button>
           </div>
           <div class="sc-bettor-balance">${fmt$(b.kalshi_cash ?? b.bankroll, true)}</div>
-          ${b.kalshi_exposure > 0 ? `<div class="sc-bettor-start" style="color:#94a3b8">+${fmt$(b.kalshi_exposure)} in open positions</div>` : ''}
-          <div class="sc-bettor-day-row" style="display:flex;gap:24px;margin:10px 0 6px;flex-wrap:wrap">
+          ${b.kalshi_exposure > 0 ? `<div class="sc-bettor-start">+${fmt$(b.kalshi_exposure)} in open positions</div>` : ''}
+          <div class="sc-bettor-day-row">
             <div>
-              <div class="sc-bettor-day-label" style="font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:#94a3b8;margin-bottom:3px">TODAY</div>
-              <div class="sc-bettor-day-val ${todayCls}" style="font-size:20px;font-weight:700;font-family:var(--mono)">${todaySign}${fmt$(b.today_pnl)}</div>
+              <div class="sc-bettor-day-label">TODAY</div>
+              <div class="sc-bettor-day-val ${todayCls}">${todaySign}${fmt$(b.today_pnl)}</div>
             </div>
             <div>
-              <div class="sc-bettor-day-label" style="font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:#94a3b8;margin-bottom:3px">BEST CASE</div>
-              <div class="sc-bettor-day-val good" id="bettor-bestcase-${b.id}" style="font-size:20px;font-weight:700;font-family:var(--mono)">…</div>
+              <div class="sc-bettor-day-label">BEST CASE</div>
+              <div class="sc-bettor-day-val good" id="bettor-bestcase-${b.id}">…</div>
             </div>
           </div>
-          <div class="sc-bettor-pnl ${pnlCls}" style="margin-bottom:4px">${pnlSign}${fmt$(b.total_pnl)} all-time P&L</div>
+          <div class="sc-bettor-pnl ${pnlCls}">${pnlSign}${fmt$(b.total_pnl)} all-time P&L</div>
           <div class="sc-bettor-record">${record}</div>
         </div>
         <div class="bettor-drawer" hidden></div>
@@ -292,7 +292,7 @@ async function refreshBettorCards(bettors) {
     } else {
       bcEl.textContent = '—'
       bcEl.className = 'sc-bettor-day-val'
-      bcEl.style.cssText = 'font-size:20px;font-weight:700;font-family:var(--mono);color:#94a3b8'
+      bcEl.style.cssText = 'font-size:20px;font-weight:700;font-family:var(--mono);color:var(--muted)'
     }
   }
 }
