@@ -40,7 +40,9 @@ const MLB_BASE        = 'https://statsapi.mlb.com/api/v1'
 const LS_FIELDS       = 'abstractGameState,currentInning,currentInningOrdinal,teams,offense,defense'
 const BOX_FIELDS      = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players'
 // Max USD risk per free-money taker order (pulled pitcher, certainty bet)
-const PULLED_CAP_USD  = Number(process.env.PULLED_CAP_USD || 300)
+const PULLED_CAP_USD    = Number(process.env.PULLED_CAP_USD    || 300)
+// Max USD risk per dead-path NO taker (high pitch count, gap structurally uncloseable)
+const DEAD_PATH_CAP_USD = Number(process.env.DEAD_PATH_CAP_USD || 150)
 const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
 
 const PULL_PITCH_COUNT      = Number(process.env.PULL_PITCH_COUNT      || 85)   // pitches at which pull risk becomes real
@@ -87,6 +89,11 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
     const blended  = w_live * liveKpct + (1 - w_live) * pK_blended
     pK_effective   = Math.max(0.10, Math.min(0.45, blended))
   }
+
+  // TTO K-rate penalty: batters have seen this pitcher 2-3× through the order and adjust.
+  // Separate from the pitch-budget penalty above — both effects are real and independent.
+  if      (currentBF >= 24) pK_effective *= 0.75  // deep into 4th time through
+  else if (currentBF >= 18) pK_effective *= 0.85  // 3rd time through
 
   // λ_remaining = remaining BF × K rate
   const lambdaRemaining = Math.max(0, remainingBF * pK_effective)
@@ -180,14 +187,16 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
   if (LIVE) {
     const ob = await getOrderbook(ticker, 10).catch(() => null)
 
-    if (mode === 'pulled') {
-      // ── FREE MONEY: taker order — hit the ask immediately, outcome is determined ──
-      // Speed > fees here: maker at ask-1¢ would wait for a fill that may never come
-      // once the market reprices.
+    if (mode === 'pulled' || mode === 'dead-path') {
+      // ── STRUCTURAL EDGE: taker order — hit the ask immediately ──
+      // pulled   → pitcher removed, outcome determined (certainty)
+      // dead-path → high pitch count, 3+ K gap, market still fat (near-certainty)
+      // Speed > fees in both cases; maker orders risk sitting unfilled as market reprices.
+      const capUSD   = mode === 'pulled' ? PULLED_CAP_USD : DEAD_PATH_CAP_USD
       const askCents = side === 'NO'
         ? (ob?.best_no_ask  ?? Math.min(99, Math.round(100 - marketMid + 2)))
         : (ob?.best_yes_ask ?? Math.min(99, Math.round(marketMid + 2)))
-      const maxByDollars = Math.floor(PULLED_CAP_USD / (askCents / 100))
+      const maxByDollars = Math.floor(capUSD / (askCents / 100))
       const depth        = ob ? availableDepth(ob, side.toLowerCase(), askCents) : maxByDollars
       finalContracts     = Math.max(1, Math.min(maxByDollars, depth > 0 ? depth : maxByDollars))
       orderCents         = askCents
@@ -209,9 +218,11 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       } catch { /* non-fatal */ }
 
       try {
+        const betTag  = mode === 'pulled' ? '💰 FREE MONEY TAKER' : '🚫 DEAD PATH TAKER'
+        const logTag  = mode === 'pulled' ? 'FREE MONEY'          : 'DEAD PATH'
         await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents)
-        console.log(`\n  [💰 FREE MONEY TAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢  profit≈+$${expectedProfit.toFixed(2)}`)
-        db.saveLog({ tag: 'BET', msg: `[FREE MONEY] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢ taker  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
+        console.log(`\n  [${betTag}] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢  profit≈+$${expectedProfit.toFixed(2)}`)
+        db.saveLog({ tag: 'BET', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢ taker  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
         freeMoneySummary = { askCents, expectedProfit, yesPrice: Math.round(100 - askCents) }
       } catch (err) {
         console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
@@ -1158,6 +1169,23 @@ async function main() {
                 modelProbSide: 0.98, marketPriceSide: 1 - marketPrice,
               })
               continue
+            }
+
+            // ── MODE 1.5: Dead-path NO — pitch count + gap make threshold unreachable ──
+            // Pitcher is still in the game but structurally cannot accumulate enough Ks.
+            // Use env-configured thresholds so they can be tuned without a redeploy.
+            if (isCurrent && currentPitches >= PULL_PITCH_COUNT && currentIP >= PULL_MIN_IP && n - currentKs >= 3) {
+              if (!preGameKeys.has(`${n}-NO`) && noMid < 72 && noMid > 5) {
+                const deadEdge = (1 - marketPrice) - 0.05  // 5¢ buffer for model uncertainty
+                if (deadEdge >= 0.10) {
+                  qualifying.push({
+                    n, mkt, midCents, marketPrice, modelProb: 0.05,
+                    edge: deadEdge, betSide: 'NO', betKey, mode: 'dead-path',
+                    modelProbSide: 0.95, marketPriceSide: 1 - marketPrice,
+                  })
+                }
+              }
+              continue  // gap is structurally uncloseable — skip normal model for this n
             }
 
             if (!live) continue  // pulled pitcher — no high-conviction model available
