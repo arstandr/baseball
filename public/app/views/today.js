@@ -825,6 +825,50 @@ export function buildPitcherCard(p) {
   const coverCls = coverPct >= 60 ? 'good' : coverPct >= 40 ? 'warn' : 'bad'
   card.dataset.coverage = coverPct ?? 0
 
+  // Aggregate contract fill data for visible strip
+  let makerOrdered = 0, makerFilled = 0, hasAnyMaker = false
+  let makerAllFilled = false, makerHasResting = false, makerHasPartial = false
+  for (const b of p.bets) {
+    if (b.order_id) {
+      hasAnyMaker   = true
+      makerOrdered += b.bet_size ?? 0
+      makerFilled  += b.filled_contracts ?? 0
+      if (b.order_status === 'partial') makerHasPartial = true
+      if (!b.order_status || b.order_status === 'resting') makerHasResting = true
+    }
+  }
+  if (hasAnyMaker) makerAllFilled = makerOrdered > 0 && makerFilled >= makerOrdered
+  const liveBuyBets = p.bets.filter(b => b.live)
+  const liveTotalContracts = liveBuyBets.reduce((s, b) => s + (b.live.filled_contracts ?? b.live.bet_size ?? 0), 0)
+  const livePrices = liveBuyBets.map(b => b.live.fill_price).filter(x => x != null)
+  const liveAvgPrice = livePrices.length ? Math.round(livePrices.reduce((s, x) => s + x, 0) / livePrices.length) : null
+
+  let fillStrip = ''
+  if (hasAnyMaker || liveBuyBets.length > 0) {
+    let makerHtml = ''
+    if (hasAnyMaker) {
+      const fillPct   = makerOrdered > 0 ? Math.min(100, Math.round(makerFilled / makerOrdered * 100)) : 0
+      const barCls    = makerAllFilled ? 'filled' : makerHasPartial ? 'partial' : makerHasResting ? 'resting' : 'filled'
+      const statusTxt = makerAllFilled ? '✓ Filled'
+                      : makerHasPartial ? '⏳ Partial'
+                      : makerHasResting ? '⏳ Resting' : ''
+      makerHtml = `<div class="pc-fill-maker">
+        <span class="pc-fill-label">MAKER</span>
+        <div class="pc-fill-bar-track"><div class="pc-fill-bar-fill ${barCls}" style="width:${fillPct}%"></div></div>
+        <span class="pc-fill-count">${makerFilled}/${makerOrdered}</span>
+        ${statusTxt ? `<span class="pc-fill-status ${barCls}">${statusTxt}</span>` : ''}
+      </div>`
+    }
+    let liveHtml = ''
+    if (liveBuyBets.length > 0) {
+      liveHtml = `<div class="pc-fill-live">
+        <span class="pc-fill-live-chip">⚡ LIVE</span>
+        <span class="pc-fill-live-detail">${liveTotalContracts} contract${liveTotalContracts !== 1 ? 's' : ''}${liveAvgPrice ? ` @ ${liveAvgPrice}¢` : ''}</span>
+      </div>`
+    }
+    fillStrip = `<div class="pc-fill-strip">${makerHtml}${liveHtml}</div>`
+  }
+
   const s = p.bets[0] || {}
   const firstName = p.pitcher_name.split(' ').pop()
 
@@ -1036,6 +1080,7 @@ export function buildPitcherCard(p) {
       </div>
     </div>
     <div class="pc-overall-bar"><div class="pc-overall-fill ${overallClr}" style="width:${overallPct}%"></div></div>
+    ${fillStrip}
     <div class="pc-body" hidden>
       <div class="pc-signals-section">
         <div class="pc-signals">${signalItems}</div>

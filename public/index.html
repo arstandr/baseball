@@ -4,9 +4,9 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Money Tree 2.0</title>
-  <link rel="stylesheet" href="/style.css?v=7"/>
+  <link rel="stylesheet" href="/style.css?v=11"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
-  <script type="module" src="/app.js?v=7" defer></script>
+  <script type="module" src="/app.js?v=9" defer></script>
 </head>
 <body>
 
@@ -25,18 +25,20 @@
     </nav>
     <div class="closer-status" id="closer-status" title="The Closer — live monitor agent">
       <span class="closer-dot" id="closer-dot"></span>
-      <span class="closer-label">THE CLOSER</span>
-      <span class="closer-meta" id="closer-meta"></span>
+      <div class="closer-info">
+        <span class="closer-label">THE CLOSER</span>
+        <span class="closer-meta" id="closer-meta">—</span>
+      </div>
     </div>
     <div class="user" id="user-chip">
       <div class="user-meta">
         <div class="user-name-row">
           <span id="user-name">—</span>
-          <button class="hard-refresh-btn" title="Hard refresh" onclick="location.reload(true)">↺</button>
+          <button class="hard-refresh-btn" onclick="location.reload(true)">↺ Refresh</button>
+          <a href="/auth/logout" class="logout" onclick="return confirm('Sign out?')">Sign Out</a>
         </div>
         <span id="deploy-time" class="deploy-time"></span>
         <span id="last-updated" class="deploy-time"></span>
-        <a href="/auth/logout" class="logout" onclick="return confirm('Sign out?')">Sign out</a>
       </div>
     </div>
   </header>
