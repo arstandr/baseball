@@ -221,8 +221,10 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     try {
       await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents)
       console.log(`  [LIVE MAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`)
+      db.saveLog({ tag: 'BET', msg: `${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`, pitcher: pitcherName, strike, side })
     } catch (err) {
       console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
+      db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
       return
     }
   } else {
@@ -327,7 +329,10 @@ async function settleAndNotifyGame(game, boxData) {
   if (!settled.length) return
 
   const gamePnl = settled.reduce((s, b) => s + (b.pnl || 0), 0)
-  console.log(`\n[live] ${gameLabel} settled: ${settled.filter(b => b.result === 'win').length}W/${settled.filter(b => b.result === 'loss').length}L  ${gamePnl >= 0 ? '+' : ''}$${gamePnl.toFixed(2)}`)
+  const wins = settled.filter(b => b.result === 'win').length
+  const losses = settled.length - wins
+  console.log(`\n[live] ${gameLabel} settled: ${wins}W/${losses}L  ${gamePnl >= 0 ? '+' : ''}$${gamePnl.toFixed(2)}`)
+  db.saveLog({ tag: 'SETTLED', msg: `${gameLabel}  ${wins}W/${losses}L  ${gamePnl >= 0 ? '+' : ''}$${gamePnl.toFixed(2)}`, pnl: gamePnl })
 
   await notifyGameResult({ game: gameLabel, bets: settled, gamePnl }, await getAllWebhooks(db))
 }
@@ -710,6 +715,7 @@ async function main() {
   console.log(`[live] Monitoring ${allPitcherIds.size} pitchers across ${games.length} games`)
   console.log(`[live] Mode: ${LIVE ? '🔴 LIVE TRADING' : '📄 PAPER TRADING'} | Min edge: ${(LIVE_EDGE*100).toFixed(0)}¢ | Daily loss limit: $${LOSS_LIMIT}`)
   console.log(`[live] Polling every ${POLL_SEC}s. Ctrl+C to stop.\n`)
+  db.saveLog({ tag: 'STARTUP', msg: `Mode=${LIVE ? 'LIVE' : 'PAPER'}  edge≥${(LIVE_EDGE*100).toFixed(0)}¢  pitchers=${allPitcherIds.size}  games=${games.length}` })
 
   // Track which in-game bets we've already placed this session (avoid dups)
   const placed = new Set()
@@ -866,6 +872,7 @@ async function main() {
                 [currentKs, now, pnl, bet.id],
               )
               console.log(`\n[live] ✅ COVERED + SETTLED ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)  +$${pnl.toFixed(2)}`)
+              db.saveLog({ tag: 'COVER', msg: `${ctx.pitcherName} ${bet.strike}+ YES covered at ${currentKs}K  +$${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl })
               await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
             }
 
@@ -884,6 +891,7 @@ async function main() {
                 [currentKs, now, pnl, bet.id],
               )
               console.log(`\n[live] ❌ DEAD + SETTLED ${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)  $${pnl.toFixed(2)}`)
+              db.saveLog({ tag: 'DEAD', level: 'warn', msg: `${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)  $${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl })
               await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: 'starter pulled' }, await getAllWebhooks(db))
             }
 
@@ -1009,6 +1017,7 @@ async function main() {
             placed.add(q.betKey)
             const sizeTag = edgeMult > 1 ? ` [2× edge=${(q.edge*100).toFixed(0)}¢]` : ''
             console.log(`\n[live] ${q.mode === 'pulled' ? '🎯 PULLED' : '🔥 EDGE'} ${ctx.game} ${ctx.pitcherName} ${q.n}+ Ks ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p ${currentBF}BF  [${q.mode}]${sizeTag}`)
+            db.saveLog({ tag: q.mode === 'pulled' ? 'PULLED' : 'EDGE', msg: `${ctx.pitcherName} ${q.n}+ ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP${sizeTag}`, pitcher: ctx.pitcherName, strike: q.n, side: q.betSide, edge_cents: Math.round(q.edge * 100) })
 
             await executeBet({
               pitcherName:      ctx.pitcherName,

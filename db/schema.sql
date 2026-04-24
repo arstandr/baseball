@@ -478,6 +478,7 @@ CREATE INDEX IF NOT EXISTS idx_lineup_signals_game ON lineup_signals(game_id);
 CREATE INDEX IF NOT EXISTS idx_bullpen_signals_date ON bullpen_signals(signal_date);
 CREATE INDEX IF NOT EXISTS idx_lines_game ON lines(game_id);
 CREATE INDEX IF NOT EXISTS idx_agent_outputs_game ON agent_outputs(game_id);
+CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent ON agent_outputs(agent, created_at);
 CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(trade_date);
 CREATE INDEX IF NOT EXISTS idx_trades_mode ON trades(mode);
 CREATE INDEX IF NOT EXISTS idx_trades_game ON trades(game_id);
@@ -653,14 +654,75 @@ ALTER TABLE users ADD COLUMN kalshi_private_key TEXT;
 ALTER TABLE users ADD COLUMN discord_webhook       TEXT;
 ALTER TABLE users ADD COLUMN live_daily_risk_pct  REAL DEFAULT 0.10;
 
--- Add user_id to ks_bets (safe no-op if column already exists)
-ALTER TABLE ks_bets ADD COLUMN user_id INTEGER REFERENCES users(id);
-CREATE INDEX IF NOT EXISTS idx_ks_bets_user ON ks_bets(user_id);
+-- ========================================================================
+-- ks_bets: Kalshi strikeout bet ledger (paper + live)
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS ks_bets (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  bet_date         TEXT NOT NULL,
+  logged_at        TEXT NOT NULL,
+  pitcher_id       TEXT,
+  pitcher_name     TEXT NOT NULL,
+  team             TEXT,
+  game             TEXT,
+  strike           INTEGER NOT NULL,
+  side             TEXT NOT NULL,
+  model_prob       REAL NOT NULL,
+  market_mid       REAL,
+  edge             REAL NOT NULL,
+  lambda           REAL,
+  k9_career        REAL,
+  k9_season        REAL,
+  k9_l5            REAL,
+  opp_k_pct        REAL,
+  adj_factor       REAL,
+  n_starts         INTEGER,
+  confidence       TEXT,
+  savant_k_pct     REAL,
+  savant_whiff     REAL,
+  savant_fbv       REAL,
+  whiff_flag       TEXT,
+  ticker           TEXT,
+  bet_size         REAL DEFAULT 100,
+  kelly_fraction   REAL,
+  capital_at_risk  REAL,
+  paper            INTEGER DEFAULT 1,
+  live_bet         INTEGER DEFAULT 0,
+  actual_ks        INTEGER,
+  result           TEXT,
+  settled_at       TEXT,
+  pnl              REAL,
+  park_factor      REAL,
+  weather_mult     REAL,
+  ump_factor       REAL,
+  ump_name         TEXT,
+  velo_adj         REAL,
+  velo_trend_mph   REAL,
+  bb_penalty       REAL,
+  raw_adj_factor   REAL,
+  spread           REAL,
+  raw_model_prob   REAL,
+  order_id         TEXT,
+  fill_price       REAL,
+  filled_at        TEXT,
+  filled_contracts INTEGER,
+  order_status     TEXT,
+  user_id          INTEGER REFERENCES users(id),
+  model            TEXT DEFAULT 'mlb_strikeouts',
+  open_interest    INTEGER,
+  UNIQUE(bet_date, pitcher_name, strike, side, live_bet)
+);
+CREATE INDEX IF NOT EXISTS idx_ks_bets_date      ON ks_bets(bet_date);
+CREATE INDEX IF NOT EXISTS idx_ks_bets_pitcher   ON ks_bets(pitcher_id);
+CREATE INDEX IF NOT EXISTS idx_ks_bets_result    ON ks_bets(result);
+CREATE INDEX IF NOT EXISTS idx_ks_bets_user      ON ks_bets(user_id);
+CREATE INDEX IF NOT EXISTS idx_ks_bets_model     ON ks_bets(model);
+CREATE INDEX IF NOT EXISTS idx_ks_bets_composite ON ks_bets(bet_date, live_bet, paper, user_id);
 
--- Add model tag + OI to ks_bets
-ALTER TABLE ks_bets ADD COLUMN model TEXT DEFAULT 'mlb_strikeouts';
-ALTER TABLE ks_bets ADD COLUMN open_interest INTEGER;
-CREATE INDEX IF NOT EXISTS idx_ks_bets_model ON ks_bets(model);
+-- Backfill new ks_bets columns for existing databases (safe no-ops)
+ALTER TABLE ks_bets ADD COLUMN user_id          INTEGER REFERENCES users(id);
+ALTER TABLE ks_bets ADD COLUMN model            TEXT DEFAULT 'mlb_strikeouts';
+ALTER TABLE ks_bets ADD COLUMN open_interest    INTEGER;
 
 -- ========================================================================
 -- nba_games: one row per NBA game (today's slate)
@@ -755,3 +817,49 @@ CREATE TABLE IF NOT EXISTS agent_heartbeat (
   value      TEXT,
   updated_at TEXT
 );
+
+-- ========================================================================
+-- balance_snapshots: opening balance per user per day (ET date)
+-- Captured by ksBets.js before placing bets. Used for today_pnl:
+--   today_pnl = current_kalshi_balance - opening_balance_usd
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS balance_snapshots (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL,
+  date         TEXT NOT NULL,
+  balance_usd  REAL,
+  cash_usd     REAL,
+  exposure_usd REAL,
+  captured_at  TEXT,
+  UNIQUE(user_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_balance_snapshots_user ON balance_snapshots(user_id, date);
+
+-- ========================================================================
+-- daily_pnl_events: per-market settlement records for real-time P&L
+-- One row per (user, date, ticker). Populated by WS market_position events
+-- and backfilled from REST settlements API on server startup.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS daily_pnl_events (
+  user_id    INTEGER NOT NULL,
+  date       TEXT NOT NULL,
+  ticker     TEXT NOT NULL,
+  pnl_usd    REAL NOT NULL,
+  settled_at TEXT,
+  PRIMARY KEY (user_id, date, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS live_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         TEXT    NOT NULL DEFAULT (datetime('now')),
+  bet_date   TEXT    NOT NULL,
+  level      TEXT    NOT NULL DEFAULT 'info',   -- info | warn | error
+  tag        TEXT    NOT NULL,                  -- BET | COVER | DEAD | SETTLED | PULLED | ERROR | STARTUP
+  msg        TEXT    NOT NULL,
+  pitcher    TEXT,
+  strike     INTEGER,
+  side       TEXT,
+  edge_cents REAL,
+  pnl        REAL
+);
+CREATE INDEX IF NOT EXISTS live_log_date ON live_log(bet_date, ts);
