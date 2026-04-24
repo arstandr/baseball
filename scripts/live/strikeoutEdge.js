@@ -517,15 +517,10 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
   // Apply velocity adjustment to blended K% before computing lambda
   const pK_afterVelo = pK_blended * veloAdj
 
-  // ── BB% penalty (loss prevention fix) ───────────────────────────────────
-  // High-walk pitchers burn pitches on non-K PAs, reducing K opportunities.
-  // Each walk uses ~10-12 pitches without a K chance → early exit, fewer Ks.
-  // Flaherty (15% BB): -10.5% on pK | Arrighetti (12% BB): -6% on pK
-  // Evidence: Flaherty 6BB/3.1IP/3K, Arrighetti 4BB/5IP/3K on Apr 20.
-  let bbPenalty = 1.0
-  if (savant?.bb_pct != null && savant.bb_pct > 0.09) {
-    bbPenalty = Math.max(0.80, 1 - (savant.bb_pct - 0.08) * 1.5)
-  }
+  // BB% penalty DISABLED 2026-04-24 — backtest with n=28,973 predictions showed
+  // BB_THRESHOLD=1.0 (disabled) produces better Brier score than the active penalty.
+  // The rolling game-log BB% is too noisy; season Savant BB% doesn't add signal here.
+  const bbPenalty = 1.0
 
   // ── TTO (Times Through Order) penalty ───────────────────────────────────
   // K rate drops ~18% on the 3rd pass through the lineup — hitters adjust.

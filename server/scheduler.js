@@ -38,6 +38,20 @@ function run(label, cmd) {
   })
 }
 
+function runAsync(label, cmd) {
+  const date = etDate()
+  console.log(`\n[scheduler] ▶ ${label} (${date})\n[scheduler] cmd: ${cmd}`)
+  return new Promise((resolve, reject) => {
+    const child = exec(cmd, { cwd: ROOT, timeout: 10 * 60 * 1000 })
+    child.stdout.on('data', d => process.stdout.write(d))
+    child.stderr.on('data', d => process.stderr.write(d))
+    child.on('close', code => {
+      if (code === 0) { console.log(`[scheduler] ✓ ${label} done`); resolve() }
+      else            { console.error(`[scheduler] ✗ ${label} exited with code ${code}`); reject(new Error(`exit ${code}`)) }
+    })
+  })
+}
+
 function mlbRun(label, args = '') {
   const date = etDate()
   run(label, `bash scripts/live/dailyRun.sh ${args} ${date}`.trim())
@@ -137,6 +151,32 @@ async function firePendingBets() {
     } catch { continue }
     if (!claimed) continue
 
+    // Guard 1: if a sibling row for same pitcher+game already fired/skipped, don't double-bet
+    const sibling = await dbOne(
+      `SELECT id, status FROM bet_schedule
+       WHERE bet_date=? AND game_id=? AND pitcher_id=? AND id != ?
+         AND status IN ('fired','skipped','error')`,
+      [date, entry.game_id, entry.pitcher_id, entry.id],
+    ).catch(() => null)
+    if (sibling) {
+      console.log(`[scheduler] dup-guard: ${entry.pitcher_name} already ${sibling.status} (row ${sibling.id}) — marking skipped`)
+      dbRun(`UPDATE bet_schedule SET status='skipped', notes=? WHERE id=?`,
+        [`dup-guard: sibling row ${sibling.id} ${sibling.status}`, entry.id]).catch(() => {})
+      continue
+    }
+
+    // Guard 2: if ks_bets already has a row for this pitcher today, skip
+    const existingBet = await dbOne(
+      `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_id=? AND live_bet=0 LIMIT 1`,
+      [date, entry.pitcher_id],
+    ).catch(() => null)
+    if (existingBet) {
+      console.log(`[scheduler] dup-guard: ${entry.pitcher_name} already has ks_bets row — marking skipped`)
+      dbRun(`UPDATE bet_schedule SET status='skipped', notes=? WHERE id=?`,
+        [`dup-guard: ks_bets row ${existingBet.id} exists`, entry.id]).catch(() => {})
+      continue
+    }
+
     // AI preflight check: confirm pitcher still probable, check news for skip/boost signals
     let check = { action: 'proceed', reason: '' }
     try {
@@ -170,10 +210,18 @@ async function firePendingBets() {
     }
 
     console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}`)
-    run(
-      `Scheduled bet: ${entry.pitcher_name} (${entry.game_label})`,
-      `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}`,
-    )
+    try {
+      await runAsync(
+        `Scheduled bet: ${entry.pitcher_name} (${entry.game_label})`,
+        `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}`,
+      )
+    } catch (err) {
+      console.error(`[scheduler] ksBets failed for ${entry.pitcher_name}: ${err.message}`)
+      dbRun(
+        `UPDATE bet_schedule SET status='error', notes=? WHERE id=?`,
+        [`ksBets crash: ${String(err.message).slice(0, 250)}`, entry.id],
+      ).catch(() => {})
+    }
   }
 }
 
@@ -187,15 +235,25 @@ export async function startScheduler() {
   const hm = etHHMM()
   const date = etDate()
 
+  // Cleanup stale 'fired' rows from crashed sessions (older than 4h → error)
+  const fourHoursAgo = new Date(Date.now() - 4 * 3600 * 1000).toISOString()
+  await dbRun(
+    `UPDATE bet_schedule SET status='error',
+      notes=COALESCE(notes,'') || ' [stale-fired ' || datetime('now') || ']'
+     WHERE status='fired' AND fired_at IS NOT NULL AND fired_at < ?`,
+    [fourHoursAgo],
+  ).catch(() => {})
+
   if (hm >= 9 * 60) {        // past 9:00am — MLB morning run missed?
     // Skip if either bets OR schedule entries exist for today (morning run writes to bet_schedule now)
-    const existingBets = await dbOne(`SELECT COUNT(*) AS n FROM ks_bets WHERE bet_date = ? AND live_bet = 0`, [date])
+    const existingBets  = await dbOne(`SELECT COUNT(*) AS n FROM ks_bets WHERE bet_date = ? AND live_bet = 0`, [date])
     const existingSched = await dbOne(`SELECT COUNT(*) AS n FROM bet_schedule WHERE bet_date = ?`, [date]).catch(() => ({ n: 0 }))
-    if (!existingBets?.n && !existingSched?.n) {
+    const firedSched    = await dbOne(`SELECT COUNT(*) AS n FROM bet_schedule WHERE bet_date = ? AND status IN ('fired','skipped','error')`, [date]).catch(() => ({ n: 0 }))
+    if (!existingBets?.n && !existingSched?.n && !firedSched?.n) {
       console.log('[scheduler] startup catch-up: MLB morning run')
       mlbRun('MLB morning run (catch-up)')
     } else {
-      console.log(`[scheduler] startup: morning pipeline already ran for ${date} (${existingBets?.n ?? 0} bets, ${existingSched?.n ?? 0} scheduled) — skipping`)
+      console.log(`[scheduler] startup: morning pipeline already ran for ${date} (${existingBets?.n ?? 0} bets, ${existingSched?.n ?? 0} scheduled, ${firedSched?.n ?? 0} fired/skipped/error) — skipping`)
     }
   }
   // NOTE: liveMonitor is managed by The Closer (Windows agent) — not started here

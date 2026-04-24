@@ -171,7 +171,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id IS ?`,
     [TODAY, pitcherName, strike, side, userId],
   )
-  if (existing) return
+  if (existing) return { dedup: true }
 
   let finalContracts = Math.max(1, Math.round(betSize))
   let orderCents     = Math.round(side === 'YES' ? marketMid : 100 - marketMid)  // fallback
@@ -204,7 +204,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
         const restingContracts = restingOrders.filter(o => o.side === sideKey).reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
         if (filledContracts + restingContracts > 0) {
           console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} — already ${filledContracts} filled + ${restingContracts} resting on Kalshi, skipping`)
-          return { freeMoneySummary: null }
+          return { freeMoneySummary: null, kalshiDedup: true }
         }
       } catch { /* non-fatal */ }
 
@@ -216,7 +216,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       } catch (err) {
         console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
         db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED [FREE MONEY] ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
-        return { freeMoneySummary: null }
+        return { freeMoneySummary: null, apiFailed: true }
       }
 
     } else {
@@ -242,7 +242,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
         const thisCap = capitalAtRisk(betSize, Math.round(side === 'YES' ? marketMid : 100 - marketMid) / 100, side)
         if ((spent?.total || 0) + thisCap > cap) {
           console.log(`  [CAP] ${pitcherName} ${strike}+ ${side} skipped — live cap $${cap.toFixed(0)} reached`)
-          return { freeMoneySummary: null }
+          return { freeMoneySummary: null, budget: true }
         }
       }
 
@@ -272,7 +272,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
         const restingContracts = restingOrders.filter(o => o.side === sideKey).reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
         if (filledContracts + restingContracts > 0) {
           console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} — already ${filledContracts} filled + ${restingContracts} resting on Kalshi, skipping`)
-          return { freeMoneySummary: null }
+          return { freeMoneySummary: null, kalshiDedup: true }
         }
       } catch { /* non-fatal */ }
 
@@ -283,7 +283,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       } catch (err) {
         console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
         db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
-        return { freeMoneySummary: null }
+        return { freeMoneySummary: null, apiFailed: true }
       }
     }
   } else {
@@ -360,8 +360,17 @@ async function settleAndNotifyGame(game, boxData) {
     // P&L: use Kalshi's revenue minus our cost basis.
     // profit_loss is always 0 in their API; revenue is the actual cash credited.
     let pnl
-    const contracts = bet.filled_contracts != null ? bet.filled_contracts : Math.round(bet.bet_size)
-    const fillPrice = bet.fill_price ?? bet.market_mid ?? 50  // cents
+    const fillCents = bet.fill_price ?? bet.market_mid ?? 50
+    let contracts
+    if (bet.filled_contracts != null) {
+      contracts = bet.filled_contracts
+    } else if (bet.capital_at_risk != null && fillCents > 0) {
+      contracts = Math.max(1, Math.round((bet.capital_at_risk * 100) / fillCents))
+    } else {
+      contracts = Math.max(1, Math.round((bet.bet_size || 100) * 100 / Math.max(1, fillCents)))
+      console.warn(`[settle] ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: contracts estimated from bet_size`)
+    }
+    const fillPrice = fillCents  // cents — kept for P&L math below
     if (bet.ticker) {
       try {
         const liveCreds = await db.one(`SELECT kalshi_key_id, kalshi_private_key FROM users WHERE id = ?`, [bet.user_id])
@@ -468,8 +477,11 @@ async function manageRestingOrders(game) {
 
       const modelProb   = bet.model_prob ?? 0.5
       // Current mid for each side (fractions 0-1)
-      const yesMid  = mkt.mid != null ? mkt.mid / 100 : null
-      if (yesMid == null) continue
+      // getMarketPrice() returns: { bid, ask } as YES bid/ask fractions; price_over = (bid+ask)/2
+      const yesMid  = mkt.price_over != null ? mkt.price_over : (mkt.bid + mkt.ask) / 2
+      const yesBid  = mkt.bid   // fraction 0-1
+      const yesAsk  = mkt.ask   // fraction 0-1
+      const noAsk   = 1 - yesBid  // cost to buy NO = 100 - yes_bid
       const noMid   = 1 - yesMid
 
       const edgeYES = modelProb - yesMid
@@ -489,8 +501,10 @@ async function manageRestingOrders(game) {
         if (bet.order_id) await cancelOrder(bet.order_id)
         console.log(`  ↔ ${bet.pitcher_name} ${bet.strike}+ flip YES→${flipSide}  original edge=${(originalEdge*100).toFixed(1)}¢  flip edge=${(flipEdge*100).toFixed(1)}¢`)
 
-        const flipAsk     = bet.side === 'YES' ? (mkt.no_ask ?? Math.round(noMid * 100 + 1)) : (mkt.yes_ask ?? Math.round(yesMid * 100 + 1))
-        const makerCents  = Math.max(1, flipAsk - 1)
+        // flipAsk in cents: for flipping to NO, cost = 100 - yes_bid; for flipping to YES, cost = yes_ask
+        const flipAskCents = bet.side === 'YES' ? Math.round(noAsk * 100) : Math.round(yesAsk * 100)
+        const flipAsk      = Math.min(99, flipAskCents)
+        const makerCents   = Math.max(1, flipAsk - 1)
         const contracts   = Math.max(1, Math.round((bet.bet_size ?? 100) / flipPrice))
         const result      = await placeOrder(bet.ticker, flipSide.toLowerCase(), contracts, makerCents)
         const newOrder    = result?.order ?? result
@@ -1102,11 +1116,17 @@ async function main() {
             const n = parseInt(parts[parts.length - 1])
             if (!Number.isInteger(n) || n < 2 || n > 15) continue
 
-            if (mkt.yes_bid == null || mkt.yes_ask == null) continue
-            const midCents   = (mkt.yes_bid + mkt.yes_ask) / 2
-            const halfSpread = (mkt.yes_ask - mkt.yes_bid) / 200
+            // Harden bid/ask parsing — Kalshi returns either integer cents or *_dollars string fields
+            const yesBidCents = mkt.yes_bid != null ? mkt.yes_bid
+                              : mkt.yes_bid_dollars != null ? Math.round(parseFloat(mkt.yes_bid_dollars) * 100) : null
+            const yesAskCents = mkt.yes_ask != null ? mkt.yes_ask
+                              : mkt.yes_ask_dollars != null ? Math.round(parseFloat(mkt.yes_ask_dollars) * 100) : null
+            if (yesBidCents == null || yesAskCents == null) continue
+            const noAskCents  = 100 - yesBidCents   // cost to buy NO = 100 - yes_bid
+            const midCents    = (yesBidCents + yesAskCents) / 2
+            const halfSpread  = (yesAskCents - yesBidCents) / 200
             const marketPrice = midCents / 100
-            const noMid      = 100 - midCents
+            const noMid       = 100 - midCents
 
             const betKey = `${pitcherId}-${n}-live`  // mode-agnostic dedup key
             if (placed.has(betKey)) continue
@@ -1140,7 +1160,7 @@ async function main() {
               if (edge < Math.max(0.20, halfSpread + 0.04)) continue
             } else {
               if (modelProb > 0.15) continue
-              if (midCents > 55) continue  // Rule: don't pay >55¢ for a NO — too expensive if pitcher hits threshold
+              if (noAskCents > 55) continue   // don't pay >55¢ for a NO — cost = 100 - yes_bid
               if (edge < Math.max(0.15, halfSpread + 0.04)) continue
             }
 
@@ -1173,7 +1193,6 @@ async function main() {
             const finalBetSize = s.betSize * edgeMult
             const capitalRisk = capitalAtRisk(finalBetSize, q.marketPrice, q.betSide)
 
-            placed.add(q.betKey)
             const sizeTag = edgeMult > 1 ? ` [2× edge=${(q.edge*100).toFixed(0)}¢]` : ''
             console.log(`\n[live] ${q.mode === 'pulled' ? '🎯 PULLED' : '🔥 EDGE'} ${ctx.game} ${ctx.pitcherName} ${q.n}+ Ks ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p ${currentBF}BF  [${q.mode}]${sizeTag}`)
             db.saveLog({ tag: q.mode === 'pulled' ? 'PULLED' : 'EDGE', msg: `${ctx.pitcherName} ${q.n}+ ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP${sizeTag}`, pitcher: ctx.pitcherName, strike: q.n, side: q.betSide, edge_cents: Math.round(q.edge * 100) })
@@ -1201,6 +1220,16 @@ async function main() {
               liveScore:        currentScore,
               mode:             q.mode,
             })
+
+            // Add to placed set based on result type — only skip retry for API failures
+            if (betResult?.dedup || betResult?.kalshiDedup || betResult?.budget) {
+              placed.add(q.betKey)   // intentional skip — don't retry
+            } else if (betResult?.apiFailed) {
+              console.log(`  [live] order failed for ${q.betKey} — will retry next poll`)
+              // don't add to placed — allow retry
+            } else if (betResult?.finalContracts != null || betResult?.freeMoneySummary != null) {
+              placed.add(q.betKey)   // successful bet
+            }
 
             const webhooks = await getAllWebhooks(db)
             if (q.mode === 'pulled' && betResult?.freeMoneySummary) {
@@ -1230,7 +1259,7 @@ async function main() {
               }, webhooks)
             }
 
-            if (LIVE) _dailyLoss  // recheck after live order
+            if (LIVE) await loadDailyLoss()  // recheck loss tally after live order fires
           }
         }
       } catch { /* skip game on error */ }

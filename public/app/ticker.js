@@ -50,15 +50,19 @@ export function buildTickerItems() {
     }
   }
 
-  // 4. Upcoming scheduled bets (pending only, before their fire time)
+  // 4. Scheduled bets — upcoming (with countdown + clock time) and just-fired (last 10 min)
   for (const s of (shared.betSchedule || [])) {
     const fireAt = new Date(s.scheduled_at)
     const minsUntil = Math.round((fireAt.getTime() - now) / 60000)
-    if (minsUntil <= 0) continue  // already fired or past due — scheduler will clean it up
-    const countdown = minsUntil >= 60
-      ? `${Math.floor(minsUntil / 60)}h ${minsUntil % 60}m`
-      : `${minsUntil}m`
-    items.push({ cls: 't-schedule', icon: '⏰', text: `${s.pitcher_name}  ${s.game_label}  —  buying in ${countdown}` })
+    const clockTime = fireAt.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true })
+    if (minsUntil > 0) {
+      const countdown = minsUntil >= 60
+        ? `${Math.floor(minsUntil / 60)}h ${minsUntil % 60}m`
+        : `${minsUntil}m`
+      items.push({ cls: 't-schedule', icon: '⏰', text: `${s.pitcher_name}  ${s.game_label}  —  buying at ${clockTime} ET  (in ${countdown})` })
+    } else if (minsUntil >= -10) {
+      items.push({ cls: 't-schedule', icon: '⏰', text: `${s.pitcher_name}  ${s.game_label}  —  placing order now  (${clockTime} ET)` })
+    }
   }
 
   // 5. Day P&L — always pinned

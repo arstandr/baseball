@@ -492,19 +492,19 @@ async function logEdges() {
       TODAY,
       minEdge,
       0.28,   // ADJ_THRESHOLD — update manually when changed
-      0.97, 0.95, 0.93,
+      1.0, 1.0, 1.0,   // shrinkage removed — raw probability used directly
       Number(process.env.KELLY_MULT  || 0.25),
       Number(process.env.MAX_BET_PCT || 0.05),
       Number(process.env.MIN_BET     || 25),
-      1,      // bb_penalty active in live model via Savant data
+      0,      // bb_penalty disabled
       80,     // NO cap at 80¢
       logged,
     ],
   )
 
-  // Discord: post morning picks
+  // Discord: post morning picks — only show edges that actually passed ALL filters and got logged
   if (logged > 0) {
-    const discordEdges = edgesJson.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
+    const discordEdges = guardedEdges.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
     await notifyEdges(discordEdges, TODAY, await getAllWebhooks(db))
   }
 }
@@ -782,8 +782,16 @@ async function settleBets() {
     let pnl
     const userSettlements = kalshiSettlements.get(bet.user_id)
     const kalshiRecord    = bet.ticker ? userSettlements?.get(bet.ticker) : null
-    const contracts       = bet.filled_contracts != null ? bet.filled_contracts : Math.round(bet.bet_size)
     const fillPrice       = bet.fill_price ?? bet.market_mid ?? 50  // cents
+    let contracts
+    if (bet.filled_contracts != null) {
+      contracts = bet.filled_contracts
+    } else if (bet.capital_at_risk != null && fillPrice > 0) {
+      contracts = Math.max(1, Math.round((bet.capital_at_risk * 100) / fillPrice))
+    } else {
+      contracts = Math.max(1, Math.round((bet.bet_size || 100) * 100 / Math.max(1, fillPrice)))
+      console.warn(`[ks-bets] ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: contract count estimated from bet_size`)
+    }
     if (kalshiRecord?.revenue != null) {
       const revenue   = kalshiRecord.revenue / 100               // dollars
       const costBasis = contracts * (fillPrice / 100)            // dollars
@@ -835,12 +843,30 @@ async function settleBets() {
     `SELECT SUM(pnl) as pnl, COUNT(*) as n, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(bet_size) as wagered FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0`,
   )
   const sp = season[0] || {}
-  const dayPnl = allSettled.reduce((s, b) => s + (b.pnl || 0), 0)
+
+  // P&L sourcing: for live users, prefer Kalshi's authoritative figures.
+  // ks_bets.pnl is used only as the paper fallback.
+  let seasonPnl = sp.pnl || 0
+  let dayPnl    = allSettled.reduce((s, b) => s + (b.pnl || 0), 0)
+  try {
+    const liveUser = await db.one(
+      `SELECT id, kalshi_pnl FROM users WHERE active_bettor=1 AND paper=0 AND kalshi_key_id IS NOT NULL ORDER BY id LIMIT 1`,
+    )
+    if (liveUser?.kalshi_pnl != null) {
+      seasonPnl = Number(liveUser.kalshi_pnl)
+      const dayRow = await db.one(
+        `SELECT COALESCE(SUM(pnl_usd), 0) AS pnl FROM daily_pnl_events WHERE user_id=? AND date=?`,
+        [liveUser.id, TODAY],
+      )
+      if (dayRow?.pnl != null) dayPnl = Number(dayRow.pnl)
+    }
+  } catch { /* fall back to ks_bets sums */ }
+
   await notifyDailyReport({
     date:         TODAY,
     bets:         allSettled,
     dayPnl,
-    seasonPnl:    sp.pnl     || 0,
+    seasonPnl,
     seasonW:      sp.w       || 0,
     seasonL:      (sp.n || 0) - (sp.w || 0),
     totalWagered: sp.wagered || 0,

@@ -290,7 +290,12 @@ async function refreshDates() {
 export async function loadDay(date) {
   stopLivePolling()
   const uidParam = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
-  const data = await fetchJson(`/api/ks/daily?date=${date}${uidParam}`).catch(err => { console.error('[loadDay] fetch failed:', err); return null })
+  const [data, schedData] = await Promise.all([
+    fetchJson(`/api/ks/daily?date=${date}${uidParam}`).catch(err => { console.error('[loadDay] fetch failed:', err); return null }),
+    fetchJson(`/api/ks/schedule?date=${date}`).catch(() => null),
+  ])
+  if (schedData?.schedule) shared.betSchedule = schedData.schedule
+
   const list  = document.getElementById('pitcher-list')
   const empty = document.getElementById('empty-today')
   const hdr   = document.getElementById('day-header')
@@ -306,6 +311,7 @@ export async function loadDay(date) {
     if (betList) betList.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
     const scSummary = document.getElementById('sc-summary')
     if (scSummary) scSummary.hidden = true
+    renderTicker()
     return
   }
   empty.hidden = true
