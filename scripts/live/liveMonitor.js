@@ -196,25 +196,31 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
   }
 
   if (LIVE) {
-    // Real order — Kalshi expects contracts (integer) and price (cents)
-    const price = side === 'YES' ? Math.round(marketMid) : Math.round(100 - marketMid)
     // betSize is face value ($1 per contract at Kalshi) = contract count directly
     const contracts = Math.max(1, Math.round(betSize))
-    // Orderbook depth check
+
+    // Maker order at ask-1¢: rests on book, 75% fee discount vs taker.
+    // Fall back to mid if orderbook unavailable.
+    let askCents = side === 'YES'
+      ? Math.min(99, Math.round(marketMid + 2))   // rough ask estimate
+      : Math.min(99, Math.round(100 - marketMid + 2))
     let finalContracts = contracts
     try {
       const ob = await getOrderbook(ticker, 10)
       if (ob) {
-        const depth = availableDepth(ob, side.toLowerCase(), price)
+        if (side === 'YES' && ob.best_yes_ask != null) askCents = ob.best_yes_ask
+        if (side === 'NO'  && ob.best_no_ask  != null) askCents = ob.best_no_ask
+        const depth = availableDepth(ob, side.toLowerCase(), askCents)
         if (depth > 0 && finalContracts > depth) {
           console.log(`  [depth] ${pitcherName} ${strike}+ ${side}: capping ${finalContracts}→${depth}c`)
           finalContracts = depth
         }
       }
-    } catch { /* non-fatal */ }
+    } catch { /* non-fatal — use estimate */ }
+    const makerCents = Math.max(1, askCents - 1)
     try {
-      await placeOrder(ticker, side.toLowerCase(), finalContracts, price)
-      console.log(`  [LIVE ORDER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${price}¢`)
+      await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents)
+      console.log(`  [LIVE MAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`)
     } catch (err) {
       console.error(`  [ORDER FAILED] ${pitcherName} ${strike}+ ${side}: ${err.message}`)
       return
