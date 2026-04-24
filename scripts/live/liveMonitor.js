@@ -11,7 +11,7 @@
 // Daily loss limit: DAILY_LOSS_LIMIT (default $500) — stops all trading if hit.
 //
 // Usage:
-//   node scripts/live/liveMonitor.js [--date YYYY-MM-DD] [--poll 180]
+//   node scripts/live/liveMonitor.js [--date YYYY-MM-DD] [--poll 15]
 //
 // Run after morning dailyRun.sh. Keeps running until all today's games finish.
 
@@ -26,7 +26,7 @@ import { parseArgs } from '../../lib/cli-args.js'
 
 const opts     = parseArgs({
   date: { default: new Date().toISOString().slice(0, 10) },
-  poll: { type: 'number', default: 180 },
+  poll: { type: 'number', default: 15 },
 })
 const TODAY       = opts.date
 const POLL_SEC    = opts.poll
@@ -35,6 +35,9 @@ const LIVE_EDGE   = Number(process.env.LIVE_EDGE_MIN || 0.08)
 const LOSS_LIMIT  = Number(process.env.DAILY_LOSS_LIMIT || 500)
 
 const MLB_BASE    = 'https://statsapi.mlb.com/api/v1'
+// Field filters reduce boxscore payload ~80% — only pull what extractStarterFromBoxscore needs
+const LS_FIELDS  = 'abstractGameState,currentInning,currentInningOrdinal,teams,offense,defense'
+const BOX_FIELDS = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players'
 const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
 
 const PULL_PITCH_COUNT      = Number(process.env.PULL_PITCH_COUNT      || 85)   // pitches at which pull risk becomes real
@@ -731,8 +734,8 @@ async function main() {
   for (const game of games) {
     try {
       const [lsRes, boxRes] = await Promise.all([
-        axios.get(`${MLB_BASE}/game/${game.id}/linescore`, { timeout: 8000 }),
-        axios.get(`${MLB_BASE}/game/${game.id}/boxscore`, { timeout: 8000 }),
+        axios.get(`${MLB_BASE}/game/${game.id}/linescore?fields=${LS_FIELDS}`, { timeout: 8000 }),
+        axios.get(`${MLB_BASE}/game/${game.id}/boxscore?fields=${BOX_FIELDS}`, { timeout: 8000 }),
       ])
       if (lsRes.data.abstractGameState === 'Final' && !settledGames.has(game.id)) {
         settledGames.add(game.id)
