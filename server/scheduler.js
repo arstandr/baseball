@@ -130,7 +130,7 @@ async function firePendingBets() {
   let rows
   try {
     rows = await dbAll(
-      `SELECT id, game_id, game_label, pitcher_id, pitcher_name, pitcher_side
+      `SELECT id, game_id, game_label, pitcher_id, pitcher_name, pitcher_side, game_time
        FROM bet_schedule
        WHERE bet_date = ? AND status = 'pending' AND scheduled_at <= ?
        ORDER BY scheduled_at ASC`,
@@ -140,8 +140,9 @@ async function firePendingBets() {
 
   if (!rows.length) return
 
+  // ── Phase 1: claim rows + dup-guard (fast sequential DB ops) ──────────────
+  const eligible = []
   for (const entry of rows) {
-    // Atomically claim the row — prevents double-fire on concurrent poll cycles
     let claimed = false
     try {
       const r = await dbRun(
@@ -152,7 +153,6 @@ async function firePendingBets() {
     } catch { continue }
     if (!claimed) continue
 
-    // Guard 1: if a sibling row for same pitcher+game already fired/skipped, don't double-bet
     const sibling = await dbOne(
       `SELECT id, status FROM bet_schedule
        WHERE bet_date=? AND game_id=? AND pitcher_id=? AND id != ?
@@ -166,7 +166,6 @@ async function firePendingBets() {
       continue
     }
 
-    // Guard 2: if ks_bets already has a row for this pitcher today, skip
     const existingBet = await dbOne(
       `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_id=? AND live_bet=0 LIMIT 1`,
       [date, entry.pitcher_id],
@@ -178,67 +177,78 @@ async function firePendingBets() {
       continue
     }
 
-    // AI preflight check: confirm pitcher still probable, check news for skip/boost signals
-    let check = { action: 'proceed', reason: '' }
-    try {
-      check = await runPreflightCheck(entry)
-    } catch (err) {
-      console.error(`[scheduler] preflight error for ${entry.pitcher_name}: ${err.message}`)
-    }
+    eligible.push(entry)
+  }
 
-    // Persist the preflight result regardless of action
+  if (!eligible.length) return
+
+  // ── Phase 2: run ALL preflight checks in parallel ─────────────────────────
+  // Previously sequential — each preflight takes 5-20s (10 HTTP calls + optional AI).
+  // With 6+ pitchers sharing a window this caused 1-2 min slippage on later entries.
+  if (eligible.length > 1) {
+    console.log(`[scheduler] running ${eligible.length} preflight checks in parallel`)
+  }
+  const preflightResults = await Promise.allSettled(
+    eligible.map(entry =>
+      runPreflightCheck(entry).catch(err => {
+        console.error(`[scheduler] preflight error for ${entry.pitcher_name}: ${err.message}`)
+        return { action: 'proceed', reason: '' }
+      })
+    )
+  )
+
+  // ── Phase 3: persist results + fire bets (sequential — Kalshi rate limits) ─
+  const webhooks = await getAllWebhooks({ all: dbAll }).catch(() => [])
+
+  for (let i = 0; i < eligible.length; i++) {
+    const entry = eligible[i]
+    const check = preflightResults[i].status === 'fulfilled'
+      ? preflightResults[i].value
+      : { action: 'proceed', reason: '' }
+
     dbRun(
       `UPDATE bet_schedule SET preflight=?, notes=? WHERE id=?`,
       [check.action, check.reason || null, entry.id],
     ).catch(() => {})
 
-    // Pipeline: record preflight result
-    {
-      const isSkip  = check.action === 'skip'
-      const isBoost = check.action === 'boost'
-      recordPipelineStep({
-        bet_date: date,
-        pitcher_id: String(entry.pitcher_id),
-        pitcher_name: entry.pitcher_name,
-        game_id: entry.game_id,
-        game_label: entry.game_label,
-        pitcher_side: entry.pitcher_side,
-        game_time: entry.game_time,
-        step: 'preflight',
-        payload: {
-          action: check.action,
-          reason: check.reason || null,
-          confidence: check.confidence ?? null,
-          sources: check.sources ?? [],
-          k_prop_gap: check.k_prop_gap ?? null,
-          dk_line: check.dk_line ?? null,
-        },
-        summary: isSkip ? {
-          final_action: 'preflight_skip',
-          status: 'skipped',
-          skip_reason: check.reason?.slice(0, 200) ?? 'preflight skip',
-        } : isBoost ? {
-          final_action: 'preflight_boost',
-        } : {},
-      }).catch(() => {})
-    }
+    const isSkip  = check.action === 'skip'
+    const isBoost = check.action === 'boost'
+    recordPipelineStep({
+      bet_date: date,
+      pitcher_id: String(entry.pitcher_id),
+      pitcher_name: entry.pitcher_name,
+      game_id: entry.game_id,
+      game_label: entry.game_label,
+      pitcher_side: entry.pitcher_side,
+      game_time: entry.game_time,
+      step: 'preflight',
+      payload: {
+        action: check.action,
+        reason: check.reason || null,
+        confidence: check.confidence ?? null,
+        sources: check.sources ?? [],
+        k_prop_gap: check.k_prop_gap ?? null,
+        dk_line: check.dk_line ?? null,
+      },
+      summary: isSkip ? {
+        final_action: 'preflight_skip',
+        status: 'skipped',
+        skip_reason: check.reason?.slice(0, 200) ?? 'preflight skip',
+      } : isBoost ? {
+        final_action: 'preflight_boost',
+      } : {},
+    }).catch(() => {})
 
     if (check.action === 'skip') {
       dbRun(`UPDATE bet_schedule SET status='skipped' WHERE id=?`, [entry.id]).catch(() => {})
       console.log(`[scheduler] ⏭  SKIP  ${entry.pitcher_name}  —  ${check.reason}`)
-      try {
-        const webhooks = await getAllWebhooks({ all: dbAll })
-        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'skip', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
-      } catch {}
+      notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'skip', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
       continue
     }
 
     if (check.action === 'boost') {
       console.log(`[scheduler] ⚡  BOOST ${entry.pitcher_name}  —  ${check.reason}`)
-      try {
-        const webhooks = await getAllWebhooks({ all: dbAll })
-        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
-      } catch {}
+      notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
     }
 
     console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}`)
