@@ -29,7 +29,6 @@ async function init() {
   wireTabs()
   applyView(state.view, false)
   await refreshAll()
-  setInterval(refreshHero, 3 * 60 * 1000)
   setInterval(updateLastSeen, 15 * 1000)
   refreshCloserStatus()
   setInterval(refreshCloserStatus, 60 * 1000)

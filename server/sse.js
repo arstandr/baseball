@@ -3,6 +3,7 @@ import * as db from '../lib/db.js'
 import { sseBus } from '../lib/sseBus.js'
 import { syncSettlementsForUser } from '../lib/ksSettlementSync.js'
 import { todayISO, invalidateBalanceCache } from './shared.js'
+import { fetchLivePitcherData } from '../lib/liveGameData.js'
 
 const router = express.Router()
 
@@ -96,6 +97,25 @@ setInterval(async () => {
     _sseState.kalshiBalance = newBal
   } catch { /* ignore DB errors */ }
 }, 10_000)
+
+// Push live game data (K counts, innings, scores) to all connected clients.
+// Runs every 20s; only fetches MLB API when there are pending bets today.
+let _lastLiveHash = ''
+setInterval(async () => {
+  if (!_sseClients.size) return
+  try {
+    const today = todayISO()
+    const pitchers = await fetchLivePitcherData(today)
+    if (!pitchers.length) return
+    const hash = pitchers.map(p =>
+      `${p.pitcher_id}|${p.ks}|${p.is_final}|${p.inning}|${String(p.still_in)}`
+    ).join(',')
+    if (hash === _lastLiveHash) return
+    _lastLiveHash = hash
+    broadcastSSE('live_update', { pitchers, date: today })
+    _lastDataUpdate = new Date().toISOString()
+  } catch {}
+}, 20_000)
 
 router.get('/meta', async (req, res) => {
   try {

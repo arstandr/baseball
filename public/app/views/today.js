@@ -6,13 +6,9 @@ import { renderTicker } from '../ticker.js'
 
 // ── Live polling timers ──────────────────────────────────────────────────
 
-export function startLivePolling(date) {
+export function startLivePolling(_date) {
   stopLivePolling()
-  // Notify live.js via DOM event — avoids circular import
-  document.dispatchEvent(new CustomEvent('ks:start-live', { detail: { date } }))
-  state.liveTimer = setInterval(() => {
-    document.dispatchEvent(new CustomEvent('ks:poll-tick', { detail: { date } }))
-  }, 20_000)
+  // Live updates are server-pushed via SSE live_update events — no polling needed.
 }
 
 export function stopLivePolling() {

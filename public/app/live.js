@@ -7,6 +7,36 @@ import {
   updateBestCaseCard, computeMaxTheoretical, stopLivePolling,
 } from './views/today.js'
 
+// ── Live state tracker (for transition notifications) ───────────────────────
+
+const _prevLiveState = {}
+
+function _checkTransitions(pitchers) {
+  for (const p of pitchers) {
+    const pid  = String(p.pitcher_id)
+    const prev = _prevLiveState[pid]
+
+    if (prev) {
+      if (!prev.is_postponed && p.is_postponed) {
+        showToast(`🌧 ${p.pitcher_name}'s game has been postponed`, 'warn')
+      } else if (prev.ip === 0 && p.ip > 0 && !p.is_final) {
+        showToast(`🏟 ${p.pitcher_name}'s game is now live`, 'info')
+      } else if (!prev.is_pitching && p.is_pitching) {
+        showToast(`⚡ ${p.pitcher_name} is now on the mound`, 'info')
+      } else if (prev.still_in && !p.still_in && !p.is_final) {
+        showToast(`⚠️ ${p.pitcher_name} pulled after ${p.ks}K`, 'warn')
+      } else if (!prev.is_final && p.is_final) {
+        showToast(`🏁 ${p.pitcher_name} finished with ${p.ks}K`, 'info')
+      }
+    }
+
+    _prevLiveState[pid] = {
+      ip: p.ip, is_pitching: p.is_pitching, still_in: p.still_in,
+      is_final: p.is_final, is_postponed: !!p.is_postponed,
+    }
+  }
+}
+
 // ── SSE connection ──────────────────────────────────────────────────────────
 
 export function connectSSE() {
@@ -64,6 +94,30 @@ export function connectSSE() {
       if (ev.type === 'balance_update' || ev.type === 'pnl_update') {
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
       }
+      if (ev.type === 'live_update' && ev.pitchers?.length) {
+        _checkTransitions(ev.pitchers)
+        if (state.view === 'today') {
+          // Update overlay before re-render so renderGameCards picks up fresh live data
+          for (const p of ev.pitchers) {
+            shared.liveOverlay[String(p.pitcher_id)] = {
+              ks: p.ks, still_in: p.still_in, is_final: p.is_final,
+              ip: p.ip, pitches: p.pitches, inning: p.inning,
+              home_score: p.home_score, away_score: p.away_score,
+              inning_state: p.inning_state, is_pitching: p.is_pitching,
+            }
+          }
+          renderGameCards(shared.dailyPitchers, shared.liveBetsPitchers)
+          renderLiveBanner({ pitchers: ev.pitchers })
+          updateBannerChipColors(ev.pitchers)
+          const maxEl = document.getElementById('day-max-val')
+          if (maxEl && shared.dailyPitchers.length) {
+            const maxT = computeMaxTheoretical(shared.dailyPitchers)
+            maxEl.textContent = (maxT >= 0 ? '+' : '') + fmt$(maxT)
+            maxEl.className = 'day-max-val ' + (maxT >= 0 ? 'good' : 'bad')
+          }
+        }
+        document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
+      }
     } catch {}
   }
   es.onerror = () => { es.close(); setTimeout(connectSSE, 5000) }
@@ -93,14 +147,7 @@ export function updateLastUpdated(ts) {
 
 function _updateLastUpdated(ts) { updateLastUpdated(ts) }
 
-// ── Live poll ───────────────────────────────────────────────────────────────
-
-document.addEventListener('ks:start-live', e => _doPoll(e.detail.date))
-document.addEventListener('ks:poll-tick',  e => _doPoll(e.detail.date))
-
-async function _doPoll(date) {
-  await pollLive(date)
-}
+// ── Live poll (kept for manual/debug use — not called by any interval) ──────
 
 export async function pollLive(date) {
   const uid = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
@@ -242,6 +289,11 @@ export function updatePitcherCardLive(p) {
     liveRow = document.createElement('div')
     liveRow.className = 'pc-live-row'
     card.querySelector('.pc-header-left')?.appendChild(liveRow)
+  }
+
+  if (p.is_postponed) {
+    liveRow.innerHTML = `<span class="pc-live-chip postponed">🌧 Postponed</span>`
+    return
   }
 
   if (p.is_final) {
