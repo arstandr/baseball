@@ -894,6 +894,7 @@ async function main() {
   const covered = new Set()
   const dead    = new Set()
   const oneAway = new Set()
+  const lastKsMap = new Map()  // pitcherId → last confirmed K count (delta detection)
   // Track which games have been settled + Discord'd
   const settledGames = new Set()
 
@@ -914,9 +915,14 @@ async function main() {
     }
   }
 
+  const FAST_SEC = Math.max(3, Math.floor(POLL_SEC / 4))  // e.g. 15s→3s, 5s→3s
+
   let iteration = 0
   while (true) {
     iteration++
+    // Fast mode: shorten sleep if anyone is 1 K away from a threshold or a pitcher was pulled
+    // (oneAway persists once set; urgentThisCycle is re-evaluated each iteration for pulled pitchers)
+    let urgentThisCycle = oneAway.size > 0
     const now = new Date().toISOString().slice(11, 16)
     process.stdout.write(`\r[live] ${now} UTC | poll #${iteration} | daily loss: $${_dailyLoss.toFixed(0)}/$${LOSS_LIMIT}  `)
 
@@ -1015,6 +1021,15 @@ async function main() {
           const oppScore       = side === 'away' ? homeScore : awayScore
           const scoreDiff      = (pitcherScore ?? 0) - (oppScore ?? 0)
 
+          // ── K-delta detection — log when K count changes, flag urgency ──────
+          const prevKs = lastKsMap.get(pitcherId) ?? null
+          const ksChanged = prevKs !== null && currentKs !== prevKs
+          lastKsMap.set(pitcherId, currentKs)
+          if (ksChanged) {
+            console.log(`\n[live] ⚡ K DELTA  ${ctx.pitcherName}  ${prevKs}→${currentKs}K  running edge check`)
+            urgentThisCycle = true
+          }
+
           // ── Cover / dead detection for pre-game bets ───────────────────────
           const openBets = await db.all(
             `SELECT * FROM ks_bets WHERE bet_date = ? AND pitcher_id = ? AND result IS NULL`,
@@ -1074,6 +1089,7 @@ async function main() {
           }
 
           const pitcherPulledEarly = !isCurrent && currentIP >= 1
+          if (pitcherPulledEarly) urgentThisCycle = true  // free money window — stay fast
 
           // BF + inning gates — bypassed for confirmed-pulled pitchers (state already resolved)
           if (!pitcherPulledEarly && currentBF < 6) continue
@@ -1293,7 +1309,9 @@ async function main() {
       break
     }
 
-    await new Promise(r => setTimeout(r, POLL_SEC * 1000))
+    const sleepSec = urgentThisCycle ? FAST_SEC : POLL_SEC
+    if (urgentThisCycle) process.stdout.write(`⚡${sleepSec}s `)
+    await new Promise(r => setTimeout(r, sleepSec * 1000))
   }
 
   await db.close()
