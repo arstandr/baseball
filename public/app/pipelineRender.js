@@ -112,13 +112,31 @@ export function renderRuleFilters(j) {
 export function renderPreflight(j) {
   if (!j) return ''
   const actionType = j.action === 'proceed' ? 'good' : j.action === 'boost' ? 'good' : 'bad'
+
+  let newsHtml = ''
+  if (j.headlines?.length) {
+    const skips   = j.headlines.filter(h => h.signal === 'skip')
+    const boosts  = j.headlines.filter(h => h.signal === 'boost')
+    const neutral = j.headlines.filter(h => h.signal === 'neutral')
+    const rows = [
+      ...skips.map(h   => `<div class="sc-pipe-news-row sc-pipe-news-skip">${badge('SKIP', 'bad')} <span class="sc-pipe-news-src muted">[${esc(h.source)}]</span> ${esc(h.text)}</div>`),
+      ...boosts.map(h  => `<div class="sc-pipe-news-row sc-pipe-news-boost">${badge('BOOST', 'good')} <span class="sc-pipe-news-src muted">[${esc(h.source)}]</span> ${esc(h.text)}</div>`),
+      ...neutral.map(h => `<div class="sc-pipe-news-row sc-pipe-news-neutral"><span class="sc-pipe-badge sc-pipe-badge-neutral">—</span> <span class="sc-pipe-news-src muted">[${esc(h.source)}]</span> ${esc(h.text)}</div>`),
+    ]
+    newsHtml = `<div class="sc-pipe-news" style="margin-top:10px">
+      <div class="sc-pipe-news-label muted" style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">News (${j.headlines.length} found)</div>
+      ${rows.join('')}
+    </div>`
+  } else if (j.headlines) {
+    newsHtml = `<div class="sc-pipe-news muted" style="margin-top:8px;font-size:11px">No relevant headlines found</div>`
+  }
+
   return `<div class="sc-pipe-kv">
     ${kv('Action', badge(j.action ?? '—', actionType))}
     ${kv('Confidence', j.confidence != null ? (j.confidence * 100).toFixed(0) + '%' : '—')}
     ${kv('Reason', `<span class="sc-pipe-reason">${esc(j.reason ?? '—')}</span>`)}
     ${j.dk_line != null ? kv('DK line', j.dk_line + ' Ks (model λ=' + num(j.model_lambda, 2) + ')') : ''}
-    ${j.sources?.length ? kv('Sources', j.sources.map(s => esc(s)).join(', ')) : ''}
-  </div>`
+  </div>${newsHtml}`
 }
 
 export function renderBetsPlaced(j) {

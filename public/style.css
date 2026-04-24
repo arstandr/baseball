@@ -1999,6 +1999,13 @@ a:hover { text-decoration: underline; }
 .sc-pipe-rule-row          { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .sc-pipe-reason            { font-size: 12px; }
 
+/* Preflight news feed */
+.sc-pipe-news-row          { display: flex; align-items: flex-start; gap: 6px; font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border-faint, rgba(0,0,0,.05)); line-height: 1.4; }
+.sc-pipe-news-src          { flex-shrink: 0; font-size: 10px; }
+.sc-pipe-news-skip         { color: var(--bad); }
+.sc-pipe-news-boost        { color: var(--good); }
+.sc-pipe-news-neutral      { color: var(--text); }
+
 /* Badges */
 .sc-pipe-badge             { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .sc-pipe-badge-good        { background: rgba(27,127,59,0.15); color: var(--good); }
