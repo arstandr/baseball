@@ -18,7 +18,7 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getMarketPrice, getSettlements, getBalance as getKalshiBalance, getQueuePosition, amendOrder, getOrderbook, availableDepth } from '../../lib/kalshi.js'
+import { getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getMarketPrice, getSettlements, getBalance as getKalshiBalance, getQueuePosition, amendOrder, getOrderbook, availableDepth, listOrders, getFills } from '../../lib/kalshi.js'
 import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
 import { notifyLiveBet, notifyFreeMoney, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
@@ -192,6 +192,21 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       orderCents         = askCents
       const expectedProfit = finalContracts * ((100 - askCents) / 100) * 0.93  // after Kalshi fee
 
+      // API dedup: skip if we already have fills or resting orders on this ticker+side
+      try {
+        const sideKey = side.toLowerCase()
+        const [existingFills, restingOrders] = await Promise.all([
+          getFills({ ticker, limit: 200 }).catch(() => []),
+          listOrders({ ticker, status: 'resting' }).catch(() => []),
+        ])
+        const filledContracts = existingFills.filter(f => f.side === sideKey).reduce((s, f) => s + Number(f.count_fp || 0), 0)
+        const restingContracts = restingOrders.filter(o => o.side === sideKey).reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
+        if (filledContracts + restingContracts > 0) {
+          console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} — already ${filledContracts} filled + ${restingContracts} resting on Kalshi, skipping`)
+          return { freeMoneySummary: null }
+        }
+      } catch { /* non-fatal */ }
+
       try {
         await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents)
         console.log(`\n  [💰 FREE MONEY TAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢  profit≈+$${expectedProfit.toFixed(2)}`)
@@ -244,6 +259,22 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       }
       const makerCents = Math.max(1, askCents - 1)
       orderCents = makerCents
+
+      // API dedup: skip if we already have fills or resting orders on this ticker+side
+      try {
+        const sideKey = side.toLowerCase()
+        const [existingFills, restingOrders] = await Promise.all([
+          getFills({ ticker, limit: 200 }).catch(() => []),
+          listOrders({ ticker, status: 'resting' }).catch(() => []),
+        ])
+        const filledContracts = existingFills.filter(f => f.side === sideKey).reduce((s, f) => s + Number(f.count_fp || 0), 0)
+        const restingContracts = restingOrders.filter(o => o.side === sideKey).reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
+        if (filledContracts + restingContracts > 0) {
+          console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} — already ${filledContracts} filled + ${restingContracts} resting on Kalshi, skipping`)
+          return { freeMoneySummary: null }
+        }
+      } catch { /* non-fatal */ }
+
       try {
         await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents)
         console.log(`  [LIVE MAKER] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`)
@@ -289,7 +320,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     live_pk_effective:    livePkEffective ?? null,
     live_lambda_remaining: liveLambda  ?? null,
     live_score:           liveScore    ?? null,
-  }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
+  }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
 
   return { freeMoneySummary, finalContracts, orderCents }
 }

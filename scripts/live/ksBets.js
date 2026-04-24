@@ -18,7 +18,7 @@
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getBalance as getKalshiBalance, getSettlements, getFills, getOrderbook, availableDepth } from '../../lib/kalshi.js'
+import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getBalance as getKalshiBalance, getSettlements, getFills, listOrders, getOrderbook, availableDepth } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -391,7 +391,7 @@ async function logEdges() {
         raw_adj_factor:  e.raw_adj_factor  ?? null,
         spread:          e.spread          ?? null,
         live_bet:        0,
-      }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
+      }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
       bettorLogged++
       logged++
 
@@ -407,6 +407,26 @@ async function logEdges() {
           const makerCents = Math.max(1, askCents - 1)
           // Orderbook depth check — cap contracts at available liquidity
           let contracts = Math.max(1, Math.round(e._face))
+
+          // API-level dedup: check Kalshi for existing fills + resting orders on this ticker+side.
+          // Catches cases where DB row was overwritten (multi-user schema collision) or script re-ran.
+          try {
+            const sideKey = e.side.toLowerCase()
+            const [existingFills, restingOrders] = await Promise.all([
+              getFills({ ticker: e.ticker, limit: 200 }, creds).catch(() => []),
+              listOrders({ ticker: e.ticker, status: 'resting' }, creds).catch(() => []),
+            ])
+            const filledContracts = existingFills
+              .filter(f => f.side === sideKey)
+              .reduce((s, f) => s + Number(f.count_fp || 0), 0)
+            const restingContracts = restingOrders
+              .filter(o => o.side === sideKey)
+              .reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
+            if (filledContracts + restingContracts > 0) {
+              console.log(`  [kalshi] SKIP    ${e.side} ${e.strike}+ ${e.pitcher} — already ${filledContracts} filled + ${restingContracts} resting on Kalshi`)
+              continue
+            }
+          } catch { /* non-fatal — proceed with order */ }
           try {
             const ob = await getOrderbook(e.ticker, 10, creds)
             if (ob) {

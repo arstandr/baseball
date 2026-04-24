@@ -92,11 +92,12 @@ await db.run(`DROP TABLE ks_bets`)
 await db.run(`ALTER TABLE ks_bets_v2 RENAME TO ks_bets`)
 
 // Recreate indexes
-await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_date    ON ks_bets(bet_date)`)
-await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_pitcher ON ks_bets(pitcher_id)`)
-await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_result  ON ks_bets(result)`)
-await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_user    ON ks_bets(user_id)`)
-await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_model   ON ks_bets(model)`)
+await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_date      ON ks_bets(bet_date)`)
+await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_pitcher   ON ks_bets(pitcher_id)`)
+await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_result    ON ks_bets(result)`)
+await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_user      ON ks_bets(user_id)`)
+await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_model     ON ks_bets(model)`)
+await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_composite ON ks_bets(bet_date, live_bet, paper, user_id)`)
 
 const count = await db.one('SELECT COUNT(*) as n FROM ks_bets')
 console.log(`[migrate] Done — ${count.n} rows preserved, indexes rebuilt.`)

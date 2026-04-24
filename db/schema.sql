@@ -711,7 +711,7 @@ CREATE TABLE IF NOT EXISTS ks_bets (
   user_id          INTEGER REFERENCES users(id),
   model            TEXT DEFAULT 'mlb_strikeouts',
   open_interest    INTEGER,
-  UNIQUE(bet_date, pitcher_name, strike, side, live_bet)
+  UNIQUE(bet_date, pitcher_name, strike, side, live_bet, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ks_bets_date      ON ks_bets(bet_date);
 CREATE INDEX IF NOT EXISTS idx_ks_bets_pitcher   ON ks_bets(pitcher_id);
