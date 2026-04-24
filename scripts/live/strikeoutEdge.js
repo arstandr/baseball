@@ -55,6 +55,7 @@ import * as db from '../../lib/db.js'
 import { toKalshiAbbr, getAuthHeaders } from '../../lib/kalshi.js'
 import { getParkFactor } from '../../lib/parkFactors.js'
 import { fetchGameWeather } from '../../lib/weather.js'
+import { VENUES } from '../../agents/park/venues.js'
 import { fetchUmpiresForGames } from './fetchUmpire.js'
 import { getUmpireFactor } from '../../lib/umpireFactors.js'
 import { correlatedKellyDivide } from '../../lib/kelly.js'
@@ -93,47 +94,22 @@ const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
 const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
 
-// ── Venue coordinates (for weather fetch) ────────────────────────────────────
-// Lat/lng for each home team's stadium. Used to fetch OpenWeather forecast.
-const VENUE_COORDS = {
-  LAA: { lat: 33.8003,  lng: -117.8827 },  // Angel Stadium
-  ARI: { lat: 33.4453,  lng: -112.0667 },  // Chase Field (retractable)
-  ATL: { lat: 33.8909,  lng: -84.4678  },  // Truist Park
-  BAL: { lat: 39.2838,  lng: -76.6218  },  // Camden Yards
-  BOS: { lat: 42.3467,  lng: -71.0972  },  // Fenway Park
-  CHC: { lat: 41.9484,  lng: -87.6553  },  // Wrigley Field
-  CIN: { lat: 39.0975,  lng: -84.5078  },  // Great American Ball Park
-  CLE: { lat: 41.4953,  lng: -81.6852  },  // Progressive Field
-  COL: { lat: 39.7559,  lng: -104.9942 },  // Coors Field
-  DET: { lat: 42.3390,  lng: -83.0485  },  // Comerica Park
-  HOU: { lat: 29.7573,  lng: -95.3555  },  // Minute Maid Park (retractable)
-  KC:  { lat: 39.0517,  lng: -94.4803  },  // Kauffman Stadium
-  LAD: { lat: 34.0739,  lng: -118.2400 },  // Dodger Stadium
-  WSH: { lat: 38.8730,  lng: -77.0074  },  // Nationals Park
-  WAS: { lat: 38.8730,  lng: -77.0074  },  // alias
-  NYM: { lat: 40.7571,  lng: -73.8458  },  // Citi Field
-  OAK: { lat: 37.7516,  lng: -122.2005 },  // Oakland Coliseum
-  ATH: { lat: 37.7516,  lng: -122.2005 },  // Athletics alias
-  PIT: { lat: 40.4469,  lng: -80.0057  },  // PNC Park
-  SD:  { lat: 32.7073,  lng: -117.1566 },  // Petco Park
-  SEA: { lat: 47.5914,  lng: -122.3325 },  // T-Mobile Park (retractable)
-  SF:  { lat: 37.7786,  lng: -122.3893 },  // Oracle Park
-  STL: { lat: 38.6226,  lng: -90.1928  },  // Busch Stadium
-  TB:  { lat: 27.7683,  lng: -82.6534  },  // Tropicana Field (dome)
-  TEX: { lat: 32.7473,  lng: -97.0825  },  // Globe Life Field (retractable)
-  TOR: { lat: 43.6414,  lng: -79.3894  },  // Rogers Centre (dome)
-  MIN: { lat: 44.9817,  lng: -93.2775  },  // Target Field
-  PHI: { lat: 39.9057,  lng: -75.1665  },  // Citizens Bank Park
-  NYY: { lat: 40.8296,  lng: -73.9262  },  // Yankee Stadium
-  MIA: { lat: 25.7781,  lng: -80.2197  },  // loanDepot Park (retractable)
-  MIL: { lat: 43.0282,  lng: -87.9712  },  // American Family Field (retractable)
-  CHW: { lat: 41.8299,  lng: -87.6338  },  // Guaranteed Rate Field
-  CWS: { lat: 41.8299,  lng: -87.6338  },  // alias
-}
-
-// Teams whose stadiums are fully climate-controlled (dome or closed retractable).
-// Weather adjustments are skipped for these parks.
-const DOME_TEAMS = new Set(['TB', 'TOR', 'HOU', 'MIA', 'MIL', 'ARI', 'SEA', 'TEX'])
+// Venue coord + dome lookups — derived from agents/park/venues.js (single source of truth)
+const _venueByTeam = new Map(VENUES.flatMap(v => {
+  const entries = [[ v.team.toUpperCase(), v ]]
+  if (v.team === 'OAK') entries.push(['ATH', v])  // Athletics alias
+  if (v.team === 'WSH') entries.push(['WAS', v])  // Washington alias
+  if (v.team === 'CWS') entries.push(['CHW', v])  // Chicago White Sox alias
+  return entries
+}))
+const VENUE_COORDS = Object.fromEntries(
+  [..._venueByTeam.entries()].map(([t, v]) => [t, { lat: v.lat, lng: v.lng }])
+)
+const DOME_TEAMS = new Set(
+  [..._venueByTeam.entries()]
+    .filter(([, v]) => v.roof_type === 'dome' || v.roof_type === 'retractable')
+    .map(([t]) => t)
+)
 
 // Standard MLB numeric team IDs → abbreviations (used for opponent K% lookup)
 const TEAM_ABBR_TO_MLB_ID = {
