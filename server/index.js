@@ -20,6 +20,7 @@ import { sessionMiddleware, registerAuthRoutes, requireAuth, seedUsersFromEnv } 
 import * as db from '../lib/db.js'
 import apiRouter from './api.js'
 import { startScheduler } from './scheduler.js'
+import { startWsDaemon, getWsDaemonStatus } from './wsDaemon.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -36,12 +37,16 @@ export function createApp() {
   app.use(cookieParser())
   app.use(sessionMiddleware())
 
-  // Public health check — shows DB status and user count (no auth required)
+  // Public health check — shows DB status, user count, and WS daemon status (no auth required)
   app.get('/health', async (req, res) => {
     try {
       const users = await db.all('SELECT name FROM users')
       const bets  = await db.one('SELECT COUNT(*) as n FROM ks_bets')
-      res.json({ ok: true, users: users.map(u => u.name), bets: bets?.n, db: 'turso' })
+      const wsClients = getWsDaemonStatus()
+      const wsOk = wsClients.length > 0 && wsClients.every(
+        c => c.state === 'subscribed' && (c.lastMsgAgoMs === null || c.lastMsgAgoMs < 5 * 60 * 1000)
+      )
+      res.json({ ok: true, users: users.map(u => u.name), bets: bets?.n, db: 'turso', ws: { ok: wsOk, clients: wsClients } })
     } catch (err) {
       res.json({ ok: false, error: err.message })
     }
@@ -65,6 +70,7 @@ export function createApp() {
   const noCache = { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate') }
   app.use('/style.css', express.static(path.join(PUBLIC_DIR, 'style.css'), noCache))
   app.use('/app.js',    express.static(path.join(PUBLIC_DIR, 'app.js'),    noCache))
+  app.use('/app/',      express.static(path.join(PUBLIC_DIR, 'app'),       noCache))
 
   // Gated API.
   app.use('/api', requireAuth, apiRouter)
@@ -94,6 +100,7 @@ export function startServer() {
     await db.migrate()
     await seedUsersFromEnv()
     startScheduler()
+    startWsDaemon().catch(e => console.error('[ws-daemon] startup failed:', e.message))
     console.log(`[mlbie] dashboard listening on http://localhost:${port}`)
   })
 }

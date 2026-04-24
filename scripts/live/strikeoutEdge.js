@@ -132,13 +132,13 @@ async function loadStatcastData(season) {
 
   // Prefer today's fetch; fall back to most recent available
   let rows = await db.all(
-    `SELECT player_id, k_pct, swstr_pct, fb_velo, gb_pct, bb_pct, ip, pa
+    `SELECT player_id, k_pct, swstr_pct, fb_velo, fb_spin, gb_pct, bb_pct, ip, pa, k_pct_vs_l, k_pct_vs_r
        FROM pitcher_statcast WHERE season = ? AND fetch_date = ?`,
     [season, today],
   )
   if (!rows.length) {
     rows = await db.all(
-      `SELECT player_id, k_pct, swstr_pct, fb_velo, gb_pct, bb_pct, ip, pa
+      `SELECT player_id, k_pct, swstr_pct, fb_velo, fb_spin, gb_pct, bb_pct, ip, pa, k_pct_vs_l, k_pct_vs_r
          FROM pitcher_statcast WHERE season = ?
          ORDER BY fetch_date DESC LIMIT 500`,
       [season],
@@ -799,7 +799,23 @@ async function main() {
       const umpFactor = getUmpireFactor(umpInfo.umpName)
       const umpName   = umpInfo.umpName || null
 
-      const lambda    = lambdaBase * effectiveAdj * parkFactor * weatherMult * umpFactor
+      // Handedness split adjustment: pitcher's K% vs LHB/RHB vs typical MLB lineup composition.
+      // MLB lineups are ~40% LHB on average. This corrects for extreme platoon mismatches
+      // (e.g., RHP who dominates LHB facing a lineup that's 75% RHB → reduce lambda).
+      // Capped at ±7% since the 40% LHB assumption is a league average, not lineup-specific.
+      let splitAdj = 1.0
+      let splitNote = ''
+      if (savant?.k_pct_vs_l != null && savant?.k_pct_vs_r != null && (savant.k_pct ?? 0) > 0.01) {
+        const LHB_PCT = 0.40  // MLB default; refined when confirmed lineups are available
+        const splitK  = LHB_PCT * savant.k_pct_vs_l + (1 - LHB_PCT) * savant.k_pct_vs_r
+        const raw     = splitK / savant.k_pct
+        splitAdj = Math.max(0.93, Math.min(1.07, raw))
+        if (Math.abs(splitAdj - 1.0) > 0.015) {
+          splitNote = ` | splitK×${splitAdj.toFixed(2)}(vsL=${(savant.k_pct_vs_l*100).toFixed(1)}%,vsR=${(savant.k_pct_vs_r*100).toFixed(1)}%)`
+        }
+      }
+
+      const lambda    = lambdaBase * splitAdj * effectiveAdj * parkFactor * weatherMult * umpFactor
 
       const adjStr = ` | opp=${(oppKpct*100).toFixed(1)}% [${kpctSource}] ×${adjFactor.toFixed(2)}→${effectiveAdj.toFixed(2)}`
       const parkStr = ` | park×${parkFactor.toFixed(2)}(${game.team_home})`
@@ -820,14 +836,14 @@ async function main() {
       const veloStr = veloTrendMph != null
         ? ` | velo${veloTrendMph >= 0 ? '+' : ''}${veloTrendMph.toFixed(1)}mph→×${veloAdj.toFixed(2)}`
         : ''
-      const bbStr  = bbPenalty  < 1.0 ? ` | bb%×${bbPenalty.toFixed(3)}`  : ''
-      const ttoStr = ttoNote         ? ` | ${ttoNote}`                     : ''
+      const bbStr    = bbPenalty  < 1.0 ? ` | bb%×${bbPenalty.toFixed(3)}`  : ''
+      const ttoStr   = ttoNote         ? ` | ${ttoNote}`                     : ''
 
       console.log(
         `  ${meta.name} (${team} ${meta.hand}HP) | λ=${lambda.toFixed(2)} (base=${lambdaBase.toFixed(2)})` +
         `${blendStr} |${bfStr} | starts=${nStarts} [${confidence}]` +
         `${earlyExitRate != null ? ` | exit%=${(earlyExitRate*100).toFixed(0)}%` : ''}${adjStr}` +
-        `${parkStr}${wxStr}${umpStr}${veloStr}${bbStr}${ttoStr}${savantStr}${careerStr}`
+        `${parkStr}${wxStr}${umpStr}${veloStr}${bbStr}${ttoStr}${splitNote}${savantStr}${careerStr}`
       )
 
       const kalshiTeam = toKalshiAbbr(team)

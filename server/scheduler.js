@@ -14,6 +14,8 @@ import { exec, spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { one as dbOne, all as dbAll, run as dbRun } from '../lib/db.js'
+import { runPreflightCheck } from '../lib/preflightCheck.js'
+import { notifyPreflightResult, getAllWebhooks } from '../lib/discord.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -81,7 +83,7 @@ async function firePendingBets() {
   let rows
   try {
     rows = await dbAll(
-      `SELECT id, game_id, game_label, pitcher_id, pitcher_name
+      `SELECT id, game_id, game_label, pitcher_id, pitcher_name, pitcher_side
        FROM bet_schedule
        WHERE bet_date = ? AND status = 'pending' AND scheduled_at <= ?
        ORDER BY scheduled_at ASC`,
@@ -92,13 +94,48 @@ async function firePendingBets() {
   if (!rows.length) return
 
   for (const entry of rows) {
-    // Atomically claim the row — prevents double-fire on redeploys
+    // Atomically claim the row — prevents double-fire on concurrent poll cycles
+    let claimed = false
     try {
-      await dbRun(
+      const r = await dbRun(
         `UPDATE bet_schedule SET status='fired', fired_at=? WHERE id=? AND status='pending'`,
         [now, entry.id],
       )
+      claimed = (r?.changes ?? 0) > 0
     } catch { continue }
+    if (!claimed) continue
+
+    // AI preflight check: confirm pitcher still probable, check news for skip/boost signals
+    let check = { action: 'proceed', reason: '' }
+    try {
+      check = await runPreflightCheck(entry)
+    } catch (err) {
+      console.error(`[scheduler] preflight error for ${entry.pitcher_name}: ${err.message}`)
+    }
+
+    // Persist the preflight result regardless of action
+    dbRun(
+      `UPDATE bet_schedule SET preflight=?, notes=? WHERE id=?`,
+      [check.action, check.reason || null, entry.id],
+    ).catch(() => {})
+
+    if (check.action === 'skip') {
+      dbRun(`UPDATE bet_schedule SET status='skipped' WHERE id=?`, [entry.id]).catch(() => {})
+      console.log(`[scheduler] ⏭  SKIP  ${entry.pitcher_name}  —  ${check.reason}`)
+      try {
+        const webhooks = await getAllWebhooks({ all: dbAll })
+        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'skip', reason: check.reason, game: entry.game_label }, webhooks)
+      } catch {}
+      continue
+    }
+
+    if (check.action === 'boost') {
+      console.log(`[scheduler] ⚡  BOOST ${entry.pitcher_name}  —  ${check.reason}`)
+      try {
+        const webhooks = await getAllWebhooks({ all: dbAll })
+        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label }, webhooks)
+      } catch {}
+    }
 
     console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}`)
     run(
@@ -109,6 +146,11 @@ async function firePendingBets() {
 }
 
 export async function startScheduler() {
+  // Safe column migrations for bet_schedule (no-op if already exist)
+  for (const col of ['preflight TEXT', 'notes TEXT']) {
+    await dbRun(`ALTER TABLE bet_schedule ADD COLUMN ${col}`).catch(() => {})
+  }
+
   // On startup, fire any jobs whose window has already passed today
   const hm = etHHMM()
   const date = etDate()
@@ -155,6 +197,11 @@ export async function startScheduler() {
   // 11:55 PM ET — MLB settle + EOD reports
   cron.schedule('55 23 * * *', () => {
     mlbRun('MLB settle + EOD', '--settle')
+  }, { timezone: 'America/New_York' })
+
+  // Every Monday 8:00 AM ET — NB model calibration check (alerts on drift > 7%)
+  cron.schedule('0 8 * * 1', () => {
+    run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')
   }, { timezone: 'America/New_York' })
 
   console.log('[scheduler] daily jobs (ET): 9:00am data+schedule | */5min bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')

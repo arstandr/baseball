@@ -18,7 +18,8 @@
     "serve": "node cli.js serve",
     "train": "python3 models/train.py",
     "evaluate": "python3 models/evaluate.py",
-    "backtest": "node cli.js backtest --season 2024"
+    "backtest": "node cli.js backtest --season 2024",
+    "start:ws": "node scripts/live/wsFillSync.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.0",
@@ -34,7 +35,8 @@
     "google-auth-library": "^10.6.2",
     "node-cron": "^3.0.3",
     "node-telegram-bot-api": "^0.66.0",
-    "p-limit": "^6.1.0"
+    "p-limit": "^6.1.0",
+    "ws": "^8.20.0"
   },
   "engines": {
     "node": ">=20.0.0"

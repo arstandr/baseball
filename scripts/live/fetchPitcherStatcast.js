@@ -37,10 +37,14 @@ const SAVANT_PARAMS = {
   year: SEASON,
   type: 'pitcher',
   filter: '',
-  min: MIN_IP,          // minimum IP
-  selections: 'k_percent,whiff_percent,fastball_avg_speed,groundballs_percent,bb_percent,pa,p_formatted_ip',
+  min: MIN_IP,
+  selections: 'k_percent,whiff_percent,fastball_avg_speed,fastball_avg_spin,groundballs_percent,bb_percent,pa,p_formatted_ip',
   csv: 'true',
 }
+
+// Separate params for LHB and RHB splits — opponent_bat_side filter
+const SAVANT_PARAMS_VS_L = { ...SAVANT_PARAMS, opponent_bat_side: 'L' }
+const SAVANT_PARAMS_VS_R = { ...SAVANT_PARAMS, opponent_bat_side: 'R' }
 
 // Parse "16.1" baseball IP notation → decimal innings (e.g. 16.1 → 16⅓ → 16.33)
 function parseIpField(raw) {
@@ -66,6 +70,7 @@ function mapRow(r) {
   const raw_k    = parseNum(r['k_percent'])
   const raw_whiff = parseNum(r['whiff_percent'])
   const raw_fbv  = parseNum(r['fastball_avg_speed'])
+  const raw_spin = parseNum(r['fastball_avg_spin'])
   const raw_gb   = parseNum(r['groundballs_percent'])
   const raw_bb   = parseNum(r['bb_percent'])
   const raw_pa   = parseNum(r['pa'])
@@ -82,14 +87,33 @@ function mapRow(r) {
     k_pct:       raw_k   != null ? raw_k   / 100 : null,   // Savant gives 0-100, store as 0-1
     swstr_pct:   raw_whiff != null ? raw_whiff / 100 : null,
     fb_velo:     raw_fbv,
+    fb_spin:     raw_spin,    // fastball spin rate (RPM) — spin drop signals injury/fatigue
     gb_pct:      raw_gb  != null ? raw_gb   / 100 : null,
     bb_pct:      raw_bb  != null ? raw_bb   / 100 : null,
     pa:          raw_pa,
   }
 }
 
+// mapRow for split data — only extracts k_pct and pa (other columns not available in split views)
+function mapSplitRow(r) {
+  const pid     = r['player_id'] ? String(r['player_id']).trim() : null
+  const raw_k   = parseNum(r['k_percent'])
+  const raw_pa  = parseNum(r['pa'])
+  if (!pid) return null
+  return {
+    player_id: pid,
+    k_pct:     raw_k  != null ? raw_k  / 100 : null,
+    pa:        raw_pa,
+  }
+}
+
 async function main() {
   await db.migrate()
+
+  // Safe column additions — no-ops if already exist
+  for (const col of ['fb_spin REAL', 'k_pct_vs_l REAL', 'k_pct_vs_r REAL']) {
+    await db.run(`ALTER TABLE pitcher_statcast ADD COLUMN ${col}`).catch(() => {})
+  }
 
   console.log(`[statcast] Fetching Baseball Savant pitcher data — season=${SEASON} min_ip=${MIN_IP}`)
 
@@ -143,6 +167,67 @@ async function main() {
   }
 
   console.log(`[statcast] saved=${saved} skipped=${skipped}`)
+
+  // ── Fetch K% splits vs LHB and RHB ──────────────────────────────────────
+  // These are stored as k_pct_vs_l / k_pct_vs_r in the same pitcher_statcast row.
+  // Having split K% lets strikeoutEdge.js weight by the actual handedness mix of the lineup.
+  if (!DRY_RUN) {
+    console.log('[statcast] Fetching handedness splits (vs LHB / vs RHB)…')
+
+    async function fetchSplitData(params, side) {
+      try {
+        const res = await axios.get(SAVANT_URL, {
+          params,
+          timeout: 20000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Accept': 'text/csv,text/plain,*/*',
+          },
+          responseType: 'text',
+          validateStatus: s => s >= 200 && s < 500,
+        })
+        if (res.status >= 400) { console.warn(`[statcast] splits ${side}: HTTP ${res.status}`); return [] }
+        const clean = res.data.replace(/^﻿/, '')
+        const splitRows = csvParse(clean, { columns: true, skip_empty_lines: true, relax_quotes: true })
+        return splitRows.map(r => ({ ...mapSplitRow(r), vs_hand: side })).filter(r => r.player_id)
+      } catch (err) {
+        console.warn(`[statcast] splits ${side} failed: ${err.message}`)
+        return []
+      }
+    }
+
+    const [vsL, vsR] = await Promise.all([
+      fetchSplitData(SAVANT_PARAMS_VS_L, 'L'),
+      fetchSplitData(SAVANT_PARAMS_VS_R, 'R'),
+    ])
+
+    // Build maps for O(1) lookup
+    const vsLMap = new Map(vsL.map(r => [r.player_id, r.k_pct]))
+    const vsRMap = new Map(vsR.map(r => [r.player_id, r.k_pct]))
+
+    let splitsSaved = 0
+    for (const [pid, kL] of vsLMap) {
+      const kR = vsRMap.get(pid)
+      if (kL == null && kR == null) continue
+      await db.run(
+        `UPDATE pitcher_statcast SET k_pct_vs_l=?, k_pct_vs_r=?
+         WHERE player_id=? AND season=? AND fetch_date=?`,
+        [kL ?? null, kR ?? null, pid, SEASON, today],
+      )
+      splitsSaved++
+    }
+    // Any RHB-only entries
+    for (const [pid, kR] of vsRMap) {
+      if (vsLMap.has(pid)) continue
+      if (kR == null) continue
+      await db.run(
+        `UPDATE pitcher_statcast SET k_pct_vs_r=? WHERE player_id=? AND season=? AND fetch_date=?`,
+        [kR, pid, SEASON, today],
+      )
+      splitsSaved++
+    }
+    console.log(`[statcast] handedness splits saved for ${splitsSaved} pitchers`)
+  }
 
   // Print top K% pitchers summary
   if (!DRY_RUN) {

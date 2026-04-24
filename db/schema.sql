@@ -521,7 +521,10 @@ CREATE TABLE IF NOT EXISTS pitcher_statcast (
   bb_pct      REAL,                 -- Season BB% (0-1)
   swstr_pct   REAL,                 -- Whiff% / swinging-strike rate (0-1, leading K indicator)
   fb_velo     REAL,                 -- Average fastball velocity (mph)
+  fb_spin     REAL,                 -- Fastball average spin rate (RPM) — decline = injury/fatigue signal
   gb_pct      REAL,                 -- Ground ball % (0-1)
+  k_pct_vs_l  REAL,                 -- K% vs LHB (0-1) — pitcher handedness split
+  k_pct_vs_r  REAL,                 -- K% vs RHB (0-1) — pitcher handedness split
   UNIQUE(player_id, season, fetch_date)
 );
 CREATE INDEX IF NOT EXISTS idx_pitcher_statcast_pid ON pitcher_statcast(player_id, season);
@@ -882,8 +885,10 @@ CREATE TABLE IF NOT EXISTS bet_schedule (
   pitcher_side TEXT NOT NULL,          -- 'home' | 'away'
   game_time    TEXT NOT NULL,          -- ISO first-pitch timestamp
   scheduled_at TEXT NOT NULL,          -- game_time - 2.5h ISO
-  status       TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | skipped
+  status       TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | skipped | checking
   fired_at     TEXT,
+  preflight    TEXT,                             -- 'proceed'|'skip'|'boost' from AI check
+  notes        TEXT,                             -- reason from preflight check
   UNIQUE(bet_date, game_id, pitcher_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bet_schedule_date ON bet_schedule(bet_date, status);
