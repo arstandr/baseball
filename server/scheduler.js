@@ -156,7 +156,7 @@ async function firePendingBets() {
       console.log(`[scheduler] ⏭  SKIP  ${entry.pitcher_name}  —  ${check.reason}`)
       try {
         const webhooks = await getAllWebhooks({ all: dbAll })
-        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'skip', reason: check.reason, game: entry.game_label }, webhooks)
+        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'skip', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
       } catch {}
       continue
     }
@@ -165,7 +165,7 @@ async function firePendingBets() {
       console.log(`[scheduler] ⚡  BOOST ${entry.pitcher_name}  —  ${check.reason}`)
       try {
         const webhooks = await getAllWebhooks({ all: dbAll })
-        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label }, webhooks)
+        notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
       } catch {}
     }
 
