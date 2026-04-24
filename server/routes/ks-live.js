@@ -200,6 +200,18 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
   res.json({ date, pitchers, totals })
 }))
 
+router.get('/ks/schedule', wrap(async (req, res) => {
+  const date = req.query.date || todayISO()
+  const rows = await db.all(
+    `SELECT id, game_label, pitcher_name, pitcher_side, game_time, scheduled_at, status, fired_at
+     FROM bet_schedule
+     WHERE bet_date = ? AND status = 'pending'
+     ORDER BY scheduled_at ASC`,
+    [date],
+  )
+  res.json({ date, schedule: rows })
+}))
+
 router.get('/ks/live-log', wrap(async (req, res) => {
   const date  = req.query.date  || todayISO()
   const limit = Math.min(parseInt(req.query.limit || '500', 10), 2000)

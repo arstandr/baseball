@@ -50,7 +50,18 @@ export function buildTickerItems() {
     }
   }
 
-  // 4. Day P&L — always pinned
+  // 4. Upcoming scheduled bets (pending only, before their fire time)
+  for (const s of (shared.betSchedule || [])) {
+    const fireAt = new Date(s.scheduled_at)
+    const minsUntil = Math.round((fireAt.getTime() - now) / 60000)
+    if (minsUntil <= 0) continue  // already fired or past due — scheduler will clean it up
+    const countdown = minsUntil >= 60
+      ? `${Math.floor(minsUntil / 60)}h ${minsUntil % 60}m`
+      : `${minsUntil}m`
+    items.push({ cls: 't-schedule', icon: '⏰', text: `${s.pitcher_name}  ${s.game_label}  —  buying in ${countdown}` })
+  }
+
+  // 5. Day P&L — always pinned
   const settled = shared.dailyPitchers.flatMap(p => p.bets || []).filter(b => b.result)
   const wins    = settled.filter(b => b.result === 'win').length
   const losses  = settled.filter(b => b.result === 'loss').length

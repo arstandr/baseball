@@ -1814,7 +1814,8 @@ a:hover { text-decoration: underline; }
 .ticker-item.t-live  { color: #e2b714; }
 .ticker-item.t-fill  { color: var(--accent); }
 .ticker-item.t-pnl   { color: var(--text); font-weight: 700; }
-.ticker-item.t-bal   { color: var(--text-dim); }
+.ticker-item.t-bal      { color: var(--text-dim); }
+.ticker-item.t-schedule { color: #a78bfa; }
 .ticker-dot { font-size: 9px; opacity: 0.5; }
 .ticker-loading { padding: 0 18px; font-size: 13px; color: var(--muted); }
 

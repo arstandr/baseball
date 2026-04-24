@@ -154,10 +154,12 @@ export async function pollLive(date) {
 
   try {
     const uidParam = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
-    const [freshDaily, liveBetsData] = await Promise.all([
+    const [freshDaily, liveBetsData, schedData] = await Promise.all([
       fetchJson(`/api/ks/daily?date=${date}${uidParam}`).catch(() => null),
       fetchJson(`/api/ks/live-bets?date=${date}${uidParam}`).catch(() => null),
+      fetchJson(`/api/ks/schedule?date=${date}`).catch(() => null),
     ])
+    if (schedData?.schedule) shared.betSchedule = schedData.schedule
     if (freshDaily?.pitchers) {
       shared.dailyPitchers = freshDaily.pitchers
       shared.dayPnl = freshDaily.day_pnl ?? shared.dayPnl

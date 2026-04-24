@@ -17,5 +17,6 @@ export const shared = {
   liveOverlay:      {},   // pitcher_id → { ks, still_in, is_final, ip, pitches, inning, home_score, away_score }
   dailyPitchers:    [],   // from /api/ks/daily
   liveBetsPitchers: [],   // from /api/ks/live-bets
+  betSchedule:      [],   // from /api/ks/schedule — pending T-2.5h entries
   dayPnl:           0,
 }
