@@ -1931,6 +1931,7 @@ a:hover { text-decoration: underline; }
 
 /* History accordion */
 .sc-bet-card[data-bet-id]  { cursor: pointer; }
+.sc-bet-card[data-bet-id] .sc-bet-header { user-select: none; }
 .sc-bet-card-open          { border-left: 3px solid var(--accent, #4a7c59); }
 .sc-bet-chev               { font-size: 12px; color: var(--muted); margin-top: 4px; user-select: none; }
 .sc-bet-drawer             { padding: 14px 16px 18px; border-top: 1px solid var(--border); background: rgba(0,0,0,0.15); }

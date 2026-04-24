@@ -72,6 +72,7 @@ function wireLogFilters() {
     logBody.dataset.accordionWired = '1'
     logBody.addEventListener('click', async (e) => {
       if (e.target.closest('a,button,input,select')) return
+      if (e.target.closest('.sc-bet-drawer')) return  // don't close when clicking inside open drawer
       const card = e.target.closest('.sc-bet-card[data-bet-id]')
       if (!card) return
       const drawer = card.querySelector('.sc-bet-drawer')
