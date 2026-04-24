@@ -67,20 +67,27 @@ async function main() {
   console.log(`  Bucket │ N    │ Model % │ Actual % │ Delta  │ Calibration`)
   console.log(`  ${'─'.repeat(63)}`)
 
+  // Normalize model_prob to "probability OUR bet wins" — model_prob is always P(YES),
+  // so for NO bets, expected win probability = 1 - model_prob.
+  const betsNorm = bets.map(b => ({
+    ...b,
+    expected_win: b.side === 'YES' ? b.model_prob : 1 - b.model_prob,
+  }))
+
   const buckets = new Map()
-  for (const b of bets) {
-    const key = (Math.floor(b.model_prob * 10) / 10).toFixed(1)
+  for (const b of betsNorm) {
+    const key = (Math.floor(b.expected_win * 10) / 10).toFixed(1)
     if (!buckets.has(key)) buckets.set(key, { n: 0, wins: 0, modelSum: 0 })
     const bkt = buckets.get(key)
     bkt.n++
-    bkt.modelSum += b.model_prob
+    bkt.modelSum += b.expected_win
     if (b.result === 'win') bkt.wins++
   }
 
   let totalBrier = 0
   let totalECE   = 0
   let maxDrift   = 0
-  for (const [key, b] of [...buckets.entries()].sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))) {
+  for (const [key, b] of [...buckets.entries()].sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))) {  // eslint-disable-line no-shadow
     if (b.n < opts.minBets) continue
     const avgModel  = b.modelSum / b.n
     const actualPct = b.wins / b.n
@@ -108,12 +115,12 @@ async function main() {
   console.log(`  ${'─'.repeat(56)}`)
 
   const byThreshold = new Map()
-  for (const b of bets) {
+  for (const b of betsNorm) {
     const key = `${b.strike}+ ${b.side}`
     if (!byThreshold.has(key)) byThreshold.set(key, { n: 0, wins: 0, modelSum: 0, pnl: 0 })
     const t = byThreshold.get(key)
     t.n++
-    t.modelSum += b.model_prob
+    t.modelSum += b.expected_win  // normalized to P(our bet wins)
     t.pnl += b.pnl || 0
     if (b.result === 'win') t.wins++
   }

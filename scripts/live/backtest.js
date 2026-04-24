@@ -63,6 +63,7 @@ const opts = parseArgs({
   shrink9:      { flag: 'shrink9',       type: 'number',  default: 0.93 },
   adjThreshold: { flag: 'adj-threshold', type: 'number',  default: 0.28 },
   bankroll:     { type: 'number', default: 5000 },
+  sweepNbr:     { flag: 'sweep-nbr',     type: 'boolean', default: false },
 })
 const SEASON        = opts.season
 const MIN_STARTS    = opts.minStarts
@@ -368,6 +369,37 @@ async function main() {
   const brierRaw = predictions.reduce((s, p) => s + Math.pow(p.probRaw - (p.hit ? 1 : 0), 2), 0) / predictions.length
   console.log(`\nBrier score (improved): ${brier.toFixed(4)}  (lower = better; random = 0.25)`)
   console.log(`Brier score (baseline): ${brierRaw.toFixed(4)}  (${brier < brierRaw ? '✓ improved wins' : brier > brierRaw ? '✗ baseline wins' : '= same'})`)
+
+  // ── NB_R sweep: find optimal dispersion from historical predictions ────────────
+  if (opts.sweepNbr) {
+    console.log(`\n══ NB_R SWEEP (n=${predictions.length} predictions) ══`)
+    console.log('Finds the dispersion parameter that minimizes Brier score on this season\'s data.')
+    console.log()
+    // Fine-grained search: 8 through 60
+    const testRs = [8, 10, 12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 50, 60]
+    let bestR = NB_R, bestBrier = Infinity
+    for (const r of testRs) {
+      const brierR = predictions.reduce((s, p) => {
+        const raw = Math.max(0, 1 - nbCDF(p.lambda, r, p.n - 1))
+        const adj = p.n >= 9 ? raw * SHRINK9
+                  : p.n >= 8 ? raw * SHRINK8
+                  : p.n >= 7 ? raw * SHRINK7
+                  : raw
+        return s + (adj - (p.hit ? 1 : 0)) ** 2
+      }, 0) / predictions.length
+      if (brierR < bestBrier) { bestBrier = brierR; bestR = r }
+      const mark = r === NB_R ? ' ← CURRENT' : r === bestR ? ' ← BEST SO FAR' : ''
+      console.log(`  r=${String(r).padEnd(4)}  Brier=${brierR.toFixed(5)}${mark}`)
+    }
+    console.log()
+    if (bestR !== NB_R) {
+      const improvement = ((brier - bestBrier) / brier * 100).toFixed(2)
+      console.log(`  ⚡ Optimal NB_R = ${bestR}  (Brier ${bestBrier.toFixed(5)}, ${improvement}% better than current)`)
+      console.log(`     Update: lib/strikeout-model.js line 12  →  export const NB_R = ${bestR}`)
+    } else {
+      console.log(`  ✓ Current NB_R = ${NB_R} is optimal for ${SEASON} data.`)
+    }
+  }
 
   // ── By K threshold ────────────────────────────────────────────────────────────
 

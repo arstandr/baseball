@@ -15,7 +15,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { one as dbOne, all as dbAll, run as dbRun } from '../lib/db.js'
 import { runPreflightCheck } from '../lib/preflightCheck.js'
-import { notifyPreflightResult, getAllWebhooks } from '../lib/discord.js'
+import { notifyPreflightResult, getAllWebhooks, notifyAlert } from '../lib/discord.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -74,6 +74,38 @@ function etNow() {
 function etHHMM() {
   const now = etNow()
   return now.getHours() * 60 + now.getMinutes()
+}
+
+async function checkBetSanity() {
+  // Last 20 settled non-paper bets — if win rate < 30%, something is wrong.
+  // Not a calibration tool; a break-detector. Normal variance won't trigger it.
+  let bets
+  try {
+    bets = await dbAll(
+      `SELECT result FROM ks_bets
+       WHERE result IS NOT NULL AND paper = 0 AND live_bet = 0
+       ORDER BY settled_at DESC LIMIT 20`,
+    )
+  } catch { return }
+
+  if (bets.length < 10) return  // not enough data yet
+
+  const wins    = bets.filter(b => b.result === 'win').length
+  const winRate = wins / bets.length
+
+  console.log(`[sanity] last ${bets.length} bets: ${wins}W/${bets.length - wins}L  win%=${(winRate*100).toFixed(1)}%`)
+
+  if (winRate < 0.30) {
+    console.error(`[sanity] ⚠ WIN RATE ALARM: ${(winRate*100).toFixed(1)}% over last ${bets.length} bets`)
+    try {
+      const webhooks = await getAllWebhooks({ all: dbAll })
+      await notifyAlert({
+        title:       `⚠️ WIN RATE ALARM`,
+        description: `Last **${bets.length}** settled bets: **${wins}W / ${bets.length - wins}L** (${(winRate*100).toFixed(1)}%)\nExpected ≥ 35%. Model or data pipeline may be broken — check immediately.`,
+        color:       0xff0000,
+      }, webhooks)
+    } catch {}
+  }
 }
 
 async function firePendingBets() {
@@ -194,9 +226,10 @@ export async function startScheduler() {
     cron.schedule(`0 ${hour} * * *`, () => mlbRun(`MLB mid-game settle (${hour}:00)`, '--settle'), { timezone: 'America/New_York' })
   }
 
-  // 11:55 PM ET — MLB settle + EOD reports
+  // 11:55 PM ET — MLB settle + EOD reports + sanity check
   cron.schedule('55 23 * * *', () => {
     mlbRun('MLB settle + EOD', '--settle')
+    setTimeout(() => checkBetSanity(), 5 * 60 * 1000)  // run 5 min after settle finishes
   }, { timezone: 'America/New_York' })
 
   // Every Monday 8:00 AM ET — NB model calibration check (alerts on drift > 7%)
