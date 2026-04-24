@@ -122,7 +122,8 @@ async function checkForUpdates() {
     console.log('[closer] Pulling + restarting...')
 
     stopMonitor()
-    execSync('git pull origin main --quiet', { cwd: ROOT })
+    execSync('git fetch origin main --quiet', { cwd: ROOT })
+    execSync('git reset --hard origin/main', { cwd: ROOT })
     execSync('npm install --quiet', { cwd: ROOT })
 
     _currentHash = remote
