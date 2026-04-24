@@ -1444,10 +1444,27 @@ a:hover { text-decoration: underline; }
   padding: 16px 12px;
   border-radius: 10px;
   text-align: center;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s, box-shadow 0.15s;
+  user-select: none;
 }
+.sc-scorebox:hover { opacity: 0.85; transform: translateY(-1px); }
+.sc-scorebox:active { transform: translateY(0); }
 .sc-scorebox-won  { background: rgba(27,127,59,0.12); border: 1px solid rgba(27,127,59,0.25); }
 .sc-scorebox-lost { background: rgba(179,38,30,0.12);  border: 1px solid rgba(179,38,30,0.25); }
 .sc-scorebox-wait { background: rgba(148,163,184,0.08); border: 1px solid rgba(148,163,184,0.15); }
+.sc-scorebox-won.sc-scorebox-active  { background: rgba(27,127,59,0.28); border-color: rgba(27,127,59,0.6); box-shadow: 0 0 0 2px rgba(27,127,59,0.2); }
+.sc-scorebox-lost.sc-scorebox-active { background: rgba(179,38,30,0.28); border-color: rgba(179,38,30,0.6); box-shadow: 0 0 0 2px rgba(179,38,30,0.2); }
+.sc-scorebox-wait.sc-scorebox-active { background: rgba(148,163,184,0.22); border-color: rgba(148,163,184,0.5); box-shadow: 0 0 0 2px rgba(148,163,184,0.15); }
+
+.sc-filter-reset-btn {
+  display: block; width: 100%; margin-bottom: 14px;
+  background: transparent; border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 0;
+  font-size: 13px; font-weight: 600; color: var(--text-dim);
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.sc-filter-reset-btn:hover { background: var(--border); color: var(--text); }
 
 .sc-score-num {
   font-size: 36px;

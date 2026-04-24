@@ -258,7 +258,39 @@ export function computeMaxTheoretical(pitchers) {
 
 // ── Today view ──────────────────────────────────────────────────────────
 
+let activeCardFilter = null
+
+function wireScoreboxFilter() {
+  const boxes = document.getElementById('sc-scoreboxes')
+  if (!boxes || boxes.dataset.wired) return
+  boxes.dataset.wired = '1'
+  boxes.addEventListener('click', e => {
+    const box = e.target.closest('.sc-scorebox[data-filter]')
+    if (!box) return
+    applyCardFilter(activeCardFilter === box.dataset.filter ? null : box.dataset.filter)
+  })
+  const resetBtn = document.getElementById('sc-filter-reset')
+  if (resetBtn) resetBtn.addEventListener('click', () => applyCardFilter(null))
+}
+
+function applyCardFilter(filter) {
+  activeCardFilter = filter
+  document.querySelectorAll('.sc-scorebox[data-filter]').forEach(box => {
+    box.classList.toggle('sc-scorebox-active', filter !== null && box.dataset.filter === filter)
+  })
+  const resetBtn = document.getElementById('sc-filter-reset')
+  if (resetBtn) resetBtn.hidden = filter === null
+  const container = document.getElementById('sc-bet-list')
+  if (!container) return
+  container.querySelectorAll('.game-card, .sched-card').forEach(card => {
+    if (!filter) { card.hidden = false; return }
+    if (card.classList.contains('sched-card')) { card.hidden = true; return }
+    card.hidden = !(card.dataset.filterResult || '').split(' ').includes(filter)
+  })
+}
+
 export async function refreshTodayView() {
+  wireScoreboxFilter()
   await refreshDates()
 }
 
@@ -288,6 +320,7 @@ async function refreshDates() {
 }
 
 export async function loadDay(date) {
+  applyCardFilter(null)
   stopLivePolling()
   const uidParam = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
   const [data, schedData] = await Promise.all([
@@ -743,7 +776,8 @@ function renderGameCard(p, sd) {
       </div>`
     }).join('')
 
-  return `<div class="game-card ${cfg.cls}" id="${cardId}" data-pitcher-id="${p.pitcher_id}" data-pending-risk="${sd.pendingRisk.toFixed(2)}">
+  const filterTags = [p.wins > 0 ? 'win' : null, p.losses > 0 ? 'loss' : null, p.pending > 0 ? 'pending' : null].filter(Boolean).join(' ') || 'pending'
+  return `<div class="game-card ${cfg.cls}" id="${cardId}" data-pitcher-id="${p.pitcher_id}" data-pending-risk="${sd.pendingRisk.toFixed(2)}" data-filter-result="${filterTags}">
     <div class="gc-status-band ${cfg.cls}">${cfg.label}</div>
     <div class="gc-body">
       <div class="gc-pitcher">${esc(p.pitcher_name)}</div>
