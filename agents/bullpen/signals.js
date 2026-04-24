@@ -189,3 +189,48 @@ export async function computeBullpenSignals({ teamId, gameDate, season }) {
     innings_14d: Number(innings.toFixed(1)),
   }
 }
+
+/**
+ * Fetch recent bullpen workload for a team — last 2 and 3 days of reliever IP.
+ *
+ * High IP in last 2 days → tired bullpen → starter gets a longer leash → E[BF] ↑
+ * Low IP in last 2 days  → fresh bullpen → quick hook → E[BF] ↓
+ *
+ * @param {string|number} teamId  - MLB team ID
+ * @param {string}        date    - YYYY-MM-DD (game date, exclusive cutoff)
+ * @returns {{ ip_2d, ip_3d, appearances_2d, signal: 'tired'|'fresh'|'normal' }}
+ */
+export async function fetchRecentBullpenWorkload(teamId, date) {
+  const cutoff    = new Date(date)
+  const day2Start = new Date(cutoff - 2 * 86_400_000)
+  const day3Start = new Date(cutoff - 3 * 86_400_000)
+  const season    = cutoff.getFullYear()
+
+  const roster = await fetchTeamRoster(String(teamId), season)
+  const pitchers = roster.filter(p => p.is_pitcher)
+
+  let ip2d = 0, ip3d = 0, app2d = 0
+
+  for (const p of pitchers) {
+    const log = await fetchPitcherGameLog(p.person_id, season)
+    for (const r of log) {
+      if (r.started) continue  // starters only — bullpen only
+      const t = new Date(r.date).getTime()
+      if (t >= day3Start.getTime() && t < cutoff.getTime()) {
+        ip3d += r.innings
+        if (t >= day2Start.getTime()) {
+          ip2d += r.innings
+          app2d++
+        }
+      }
+    }
+  }
+
+  ip2d = Number(ip2d.toFixed(1))
+  ip3d = Number(ip3d.toFixed(1))
+
+  // Thresholds calibrated to league average: ~5-7 IP/day for a typical bullpen
+  const signal = ip2d >= 11 ? 'tired' : ip2d <= 3 ? 'fresh' : 'normal'
+
+  return { ip_2d: ip2d, ip_3d: ip3d, appearances_2d: app2d, signal }
+}

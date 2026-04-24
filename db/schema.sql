@@ -892,3 +892,18 @@ CREATE TABLE IF NOT EXISTS bet_schedule (
   UNIQUE(bet_date, game_id, pitcher_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bet_schedule_date ON bet_schedule(bet_date, status);
+
+-- ========================================================================
+-- dk_k_props: DraftKings/FanDuel pitcher K prop lines (fetched 2x daily)
+-- Used by preflight check to compare model λ vs sharp market consensus.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS dk_k_props (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  prop_date    TEXT NOT NULL,
+  pitcher_name TEXT NOT NULL,
+  dk_line      REAL NOT NULL,       -- K over/under line (e.g. 7.5)
+  over_price   REAL,                -- implied probability of over
+  book         TEXT,                -- 'draftkings'|'fanduel'|'betmgm'
+  fetched_at   TEXT DEFAULT (datetime('now')),
+  UNIQUE(prop_date, pitcher_name)
+);

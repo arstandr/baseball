@@ -115,6 +115,10 @@ if [ "$LINEUPS_MODE" = true ]; then
   node scripts/live/fetchLineups.js --date "$DATE"
 
   echo ""
+  echo "── Refresh DK/FD K prop lines (updated market signal) ──"
+  node scripts/live/fetchKProps.js --date "$DATE" || true
+
+  echo ""
   echo "── Re-run edge finder with lineup K% ──"
   node scripts/live/strikeoutEdge.js --date "$DATE" --json
 
@@ -167,19 +171,23 @@ echo "── 4. Pitcher recent starts (BF + pitch count) ──"
 node scripts/live/fetchPitcherRecentStarts.js --date "$DATE"
 
 echo ""
-echo "── 5. Edge finder (lineup fallback: team K%) ──"
+echo "── 5. DK/FD pitcher K prop lines (sharp market signal for preflight) ──"
+node scripts/live/fetchKProps.js --date "$DATE" || true
+
+echo ""
+echo "── 6. Edge finder (lineup fallback: team K%) ──"
 node scripts/live/strikeoutEdge.js --date "$DATE" --json
 
 echo ""
-echo "── 6. Build bet schedule (bets fire at T-2.5h via polling job) ──"
+echo "── 7. Build bet schedule (bets fire at T-2.5h via polling job) ──"
 node scripts/live/ksBets.js build-schedule --date "$DATE"
 
 echo ""
-echo "── 6b. Sync initial Kalshi fills ──"
+echo "── 7b. Sync initial Kalshi fills ──"
 node scripts/live/syncFills.js --date "$DATE" || true
 
 echo ""
-echo "── 7. Snapshot Kalshi F5 opening prices ──"
+echo "── 8. Snapshot Kalshi F5 opening prices ──"
 node scripts/live/collectF5Lines.js --date "$DATE" || true
 
 echo ""
