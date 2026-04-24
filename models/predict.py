@@ -76,7 +76,61 @@ def compute_shap(raw_model, X):
         return [None] * len(X)
 
 
+def run_once(payload):
+    """One-shot mode: process a single payload dict, return result."""
+    model_dir = payload.get("model_dir")
+    if not model_dir:
+        raise ValueError("missing model_dir")
+    features = payload.get("features")
+    if features is None:
+        raise ValueError("missing features")
+    calibrated, raw_model, feature_names = load_model(model_dir)
+    X = build_matrix(features, feature_names)
+    probs = calibrated.predict_proba(X)[:, 1]
+    shap_vals = compute_shap(raw_model, X)
+    results = [
+        {"probability": float(p), "shap": shap_vals[i] if shap_vals and i < len(shap_vals) else None}
+        for i, p in enumerate(probs)
+    ]
+    return results[0] if not isinstance(features, list) else results
+
+
+def daemon_main(model_dir: str):
+    """Persistent mode: load model once, then read NDJSON lines and respond.
+    Write READY to stderr once the model is loaded so the caller knows it's warm.
+    """
+    calibrated, raw_model, feature_names = load_model(model_dir)
+    print("READY", file=sys.stderr, flush=True)
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+            features = payload.get("features")
+            if features is None:
+                raise ValueError("missing features")
+            X = build_matrix(features, feature_names)
+            probs = calibrated.predict_proba(X)[:, 1]
+            shap_vals = compute_shap(raw_model, X)
+            results = [
+                {"probability": float(p), "shap": shap_vals[i] if shap_vals and i < len(shap_vals) else None}
+                for i, p in enumerate(probs)
+            ]
+            out = results[0] if not isinstance(features, list) else results
+        except Exception as exc:
+            out = {"error": str(exc)}
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+
+
 def main():
+    # --daemon <model_dir>: persistent subprocess mode (no spawn overhead per prediction)
+    if len(sys.argv) >= 3 and sys.argv[1] == "--daemon":
+        daemon_main(sys.argv[2])
+        return
+
     raw = sys.stdin.read()
     if not raw.strip():
         print("ERROR: empty stdin", file=sys.stderr)
@@ -87,28 +141,12 @@ def main():
         print(f"ERROR: bad JSON: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    model_dir = payload.get("model_dir")
-    if not model_dir:
-        print("ERROR: missing model_dir", file=sys.stderr)
-        sys.exit(2)
-    features = payload.get("features")
-    if features is None:
-        print("ERROR: missing features", file=sys.stderr)
+    try:
+        out = run_once(payload)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    calibrated, raw_model, feature_names = load_model(model_dir)
-    X = build_matrix(features, feature_names)
-    probs = calibrated.predict_proba(X)[:, 1]
-    shap_vals = compute_shap(raw_model, X)
-
-    results = []
-    for i, p in enumerate(probs):
-        results.append({
-            "probability": float(p),
-            "shap": shap_vals[i] if shap_vals and i < len(shap_vals) else None,
-        })
-
-    out = results[0] if not isinstance(features, list) else results
     sys.stdout.write(json.dumps(out))
     sys.stdout.flush()
 
