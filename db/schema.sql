@@ -653,6 +653,7 @@ ALTER TABLE users ADD COLUMN kalshi_key_id      TEXT;
 ALTER TABLE users ADD COLUMN kalshi_private_key TEXT;
 ALTER TABLE users ADD COLUMN discord_webhook       TEXT;
 ALTER TABLE users ADD COLUMN live_daily_risk_pct  REAL DEFAULT 0.10;
+ALTER TABLE users ADD COLUMN kalshi_pnl           REAL DEFAULT NULL;
 
 -- ========================================================================
 -- ks_bets: Kalshi strikeout bet ledger (paper + live)
@@ -866,3 +867,23 @@ CREATE INDEX IF NOT EXISTS live_log_date ON live_log(bet_date, ts);
 
 -- bet_mode: 'normal' (edge-based maker) | 'pulled' (free money taker)
 ALTER TABLE ks_bets ADD COLUMN bet_mode TEXT DEFAULT 'normal';
+
+-- ========================================================================
+-- bet_schedule: per-game scheduled bet entries (T-2.5h before first pitch)
+-- Built by ksBets.js build-schedule at 9am. Polled every 5min by scheduler.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS bet_schedule (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  bet_date     TEXT NOT NULL,
+  game_id      TEXT NOT NULL,
+  game_label   TEXT NOT NULL,
+  pitcher_id   TEXT NOT NULL,
+  pitcher_name TEXT NOT NULL,
+  pitcher_side TEXT NOT NULL,          -- 'home' | 'away'
+  game_time    TEXT NOT NULL,          -- ISO first-pitch timestamp
+  scheduled_at TEXT NOT NULL,          -- game_time - 2.5h ISO
+  status       TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | skipped
+  fired_at     TEXT,
+  UNIQUE(bet_date, game_id, pitcher_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bet_schedule_date ON bet_schedule(bet_date, status);

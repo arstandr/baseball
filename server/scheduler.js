@@ -13,7 +13,7 @@ import cron from 'node-cron'
 import { exec, spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { one as dbOne } from '../lib/db.js'
+import { one as dbOne, all as dbAll, run as dbRun } from '../lib/db.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -74,28 +74,61 @@ function etHHMM() {
   return now.getHours() * 60 + now.getMinutes()
 }
 
+async function firePendingBets() {
+  const date = etDate()
+  const now  = new Date().toISOString()
+
+  let rows
+  try {
+    rows = await dbAll(
+      `SELECT id, game_id, game_label, pitcher_id, pitcher_name
+       FROM bet_schedule
+       WHERE bet_date = ? AND status = 'pending' AND scheduled_at <= ?
+       ORDER BY scheduled_at ASC`,
+      [date, now],
+    )
+  } catch { return }
+
+  if (!rows.length) return
+
+  for (const entry of rows) {
+    // Atomically claim the row — prevents double-fire on redeploys
+    try {
+      await dbRun(
+        `UPDATE bet_schedule SET status='fired', fired_at=? WHERE id=? AND status='pending'`,
+        [now, entry.id],
+      )
+    } catch { continue }
+
+    console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}`)
+    run(
+      `Scheduled bet: ${entry.pitcher_name} (${entry.game_label})`,
+      `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}`,
+    )
+  }
+}
+
 export async function startScheduler() {
   // On startup, fire any jobs whose window has already passed today
   const hm = etHHMM()
   const date = etDate()
 
   if (hm >= 9 * 60) {        // past 9:00am — MLB morning run missed?
-    // Only catch-up if no bets exist for today yet (prevents re-running on redeploys)
-    const existing = await dbOne(`SELECT COUNT(*) AS n FROM ks_bets WHERE bet_date = ? AND live_bet = 0`, [date])
-    if (!existing?.n) {
+    // Skip if either bets OR schedule entries exist for today (morning run writes to bet_schedule now)
+    const existingBets = await dbOne(`SELECT COUNT(*) AS n FROM ks_bets WHERE bet_date = ? AND live_bet = 0`, [date])
+    const existingSched = await dbOne(`SELECT COUNT(*) AS n FROM bet_schedule WHERE bet_date = ?`, [date]).catch(() => ({ n: 0 }))
+    if (!existingBets?.n && !existingSched?.n) {
       console.log('[scheduler] startup catch-up: MLB morning run')
       mlbRun('MLB morning run (catch-up)')
     } else {
-      console.log(`[scheduler] startup: ${existing.n} bets already logged for ${date} — skipping morning catch-up`)
+      console.log(`[scheduler] startup: morning pipeline already ran for ${date} (${existingBets?.n ?? 0} bets, ${existingSched?.n ?? 0} scheduled) — skipping`)
     }
   }
   // NOTE: liveMonitor is managed by The Closer (Windows agent) — not started here
   // NBA morning run disabled
-  if (hm >= 12 * 60 + 30 && hm < 15 * 60 + 30) {  // between 12:30pm and 3:30pm — midday pass missed?
-    console.log('[scheduler] startup catch-up: MLB midday re-scan')
-    mlbRun('MLB midday re-scan (catch-up)', '--midday')
-  }
-  if (hm >= 15 * 60 + 30) {  // past 3:30pm — lineup refresh missed?
+  // Fire any scheduled bets that came due while server was down
+  await firePendingBets()
+  if (hm >= 15 * 60 + 30 && hm < 16 * 60 + 30) {  // 3:30–4:30pm window only — prevents re-running on late redeploys
     console.log('[scheduler] startup catch-up: MLB lineup refresh')
     mlbRun('MLB lineup refresh (catch-up)', '--lineups')
   }
@@ -107,8 +140,8 @@ export async function startScheduler() {
 
   // NBA morning run disabled
 
-  // 12:30 PM ET — midday re-scan: fresh market prices, fill rate check, new edges
-  cron.schedule('30 12 * * *', () => mlbRun('MLB midday re-scan', '--midday'), { timezone: 'America/New_York' })
+  // Every 5 min — fire any scheduled bets whose T-2.5h window has arrived
+  cron.schedule('*/5 * * * *', () => firePendingBets(), { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh
   cron.schedule('30 15 * * *', () => mlbRun('MLB lineup refresh', '--lineups'), { timezone: 'America/New_York' })
@@ -124,5 +157,5 @@ export async function startScheduler() {
     mlbRun('MLB settle + EOD', '--settle')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 9:00am morning run | 12:30pm midday re-scan | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
+  console.log('[scheduler] daily jobs (ET): 9:00am data+schedule | */5min bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
 }

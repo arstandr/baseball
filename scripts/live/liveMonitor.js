@@ -566,6 +566,97 @@ async function managePreGameOrders(game) {
   }
 }
 
+// ── 30-min stale maker → taker conversion ────────────────────────────────────
+//
+// Runs every poll cycle. Any resting maker order that hasn't filled within
+// 30 minutes of posting is cancelled and re-placed as a taker — provided edge
+// still exists at the current market price (same half-threshold as T-45).
+//
+// Triggered by time-since-posting (filled_at), not time-to-game.
+// T-90 and T-45 checks remain as safety nets but will typically find nothing.
+
+const _convertedBetIds = new Set()
+
+async function convertStaleMakers() {
+  if (!LIVE) return
+
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+
+  const stale = await db.all(
+    `SELECT * FROM ks_bets
+      WHERE bet_date = ? AND order_status = 'resting' AND result IS NULL
+        AND paper = 0
+        AND COALESCE(filled_at, logged_at) <= ?`,
+    [TODAY, cutoff],
+  )
+
+  for (const bet of stale) {
+    if (_convertedBetIds.has(bet.id)) continue
+    if (!bet.order_id || !bet.ticker) { _convertedBetIds.add(bet.id); continue }
+
+    try {
+      const order  = await getOrder(bet.order_id)
+      const filled = order?.status === 'executed' ||
+                     Number(order?.remaining_count_fp ?? order?.remaining_count ?? 0) === 0
+
+      if (filled) {
+        _convertedBetIds.add(bet.id)
+        const priceDollars   = order?.yes_price_dollars ?? order?.no_price_dollars ?? null
+        const fillPriceCents = priceDollars
+          ? Math.round(parseFloat(priceDollars) * 100)
+          : (order?.yes_price ?? order?.no_price ?? null)
+        const filledCount = Math.round(parseFloat(order?.fill_count_fp ?? '0'))
+        await db.run(
+          `UPDATE ks_bets SET order_status='filled', fill_price=COALESCE(?, fill_price), filled_contracts=? WHERE id=?`,
+          [fillPriceCents, filledCount || null, bet.id],
+        )
+        console.log(`\n[live] ✓ stale-check: ${bet.pitcher_name} ${bet.side} ${bet.strike}+ filled ${filledCount}c @ ${fillPriceCents ?? '?'}¢ (maker)`)
+        continue
+      }
+
+      // Not filled after 30 min — cancel and re-evaluate
+      await cancelOrder(bet.order_id)
+      console.log(`\n[live] ⏱ stale maker: ${bet.pitcher_name} ${bet.side} ${bet.strike}+ (${bet.ticker}) — 30min unfilled, cancelling`)
+
+      const mkt = await getMarketPrice(bet.ticker)
+      if (!mkt) {
+        _convertedBetIds.add(bet.id)
+        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
+        console.log(`  → no market data, skipping`)
+        continue
+      }
+
+      const currentAsk  = bet.side === 'YES' ? mkt.ask : (1 - mkt.bid)
+      const modelProb   = bet.model_prob ?? 0.5
+      const currentEdge = modelProb - currentAsk
+
+      if (currentEdge < LIVE_EDGE / 2) {
+        _convertedBetIds.add(bet.id)
+        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
+        console.log(`  → edge gone (${(currentEdge * 100).toFixed(1)}¢ at ${(currentAsk * 100).toFixed(0)}¢ ask), skipping`)
+        continue
+      }
+
+      // Edge still good — take the market
+      const takerCents = Math.min(99, Math.round(currentAsk * 100) + 1)
+      const contracts  = Math.max(1, Math.round(bet.bet_size ?? 100))
+      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents)
+      const order2     = result?.order ?? result
+      const newOrderId = order2?.order_id ?? null
+      const newStatus  = order2?.status ?? 'placed'
+
+      _convertedBetIds.add(bet.id)
+      await db.run(
+        `UPDATE ks_bets SET order_id=?, fill_price=?, order_status=?, market_mid=?, filled_at=? WHERE id=?`,
+        [newOrderId, takerCents, newStatus, Math.round(currentAsk * 100), new Date().toISOString(), bet.id],
+      )
+      console.log(`  → TAKER placed ${contracts}c @ ${takerCents}¢  edge=${(currentEdge * 100).toFixed(1)}¢  id=${newOrderId}`)
+    } catch (err) {
+      console.error(`  [stale-maker] error for ${bet.pitcher_name}: ${err.message}`)
+    }
+  }
+}
+
 // ── In-game queue position + order amend management ──────────────────────────
 //
 // Called each poll cycle for every live bet still in 'resting' state.
@@ -811,6 +902,9 @@ async function main() {
     }
 
     let allDone = true
+
+    // Convert any maker orders that have sat unfilled for 30+ minutes
+    await convertStaleMakers()
 
     for (const game of games) {
       try {

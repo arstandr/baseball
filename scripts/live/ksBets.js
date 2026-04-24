@@ -25,12 +25,13 @@ import { parseArgs } from '../../lib/cli-args.js'
 const MODE = process.argv[2] || 'report'
 
 const opts = parseArgs({
-  date:     { default: new Date().toISOString().slice(0, 10) },
-  days:     { type: 'number', default: 30 },
-  minEdge:  { flag: 'min-edge', type: 'number', default: 0.05 },
-  betSize:  { flag: 'bet-size', type: 'number', default: 100 },
-  riskPct:  { flag: 'risk-pct', type: 'number', default: null },
-  dryRun:   { flag: 'dry-run', type: 'boolean', default: false },
+  date:      { default: new Date().toISOString().slice(0, 10) },
+  days:      { type: 'number', default: 30 },
+  minEdge:   { flag: 'min-edge', type: 'number', default: 0.05 },
+  betSize:   { flag: 'bet-size', type: 'number', default: 100 },
+  riskPct:   { flag: 'risk-pct', type: 'number', default: null },
+  dryRun:    { flag: 'dry-run', type: 'boolean', default: false },
+  pitcherId: { flag: 'pitcher-id', default: null },
 })
 
 const TODAY    = opts.date
@@ -51,58 +52,11 @@ const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 // ── Table setup ───────────────────────────────────────────────────────────────
 
 async function ensureTable() {
-  await db.run(`
-    CREATE TABLE IF NOT EXISTS ks_bets (
-      id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      bet_date      TEXT NOT NULL,
-      logged_at     TEXT NOT NULL,
-      pitcher_id    TEXT,
-      pitcher_name  TEXT NOT NULL,
-      team          TEXT,
-      game          TEXT,
-      strike        INTEGER NOT NULL,
-      side          TEXT NOT NULL,
-      model_prob    REAL NOT NULL,
-      market_mid    REAL,
-      edge          REAL NOT NULL,
-      lambda        REAL,
-      k9_career     REAL,
-      k9_season     REAL,
-      k9_l5         REAL,
-      opp_k_pct     REAL,
-      adj_factor    REAL,
-      n_starts      INTEGER,
-      confidence    TEXT,
-      savant_k_pct  REAL,
-      savant_whiff  REAL,
-      savant_fbv    REAL,
-      whiff_flag    TEXT,
-      ticker        TEXT,
-      bet_size      REAL DEFAULT 100,
-      kelly_fraction REAL,
-      capital_at_risk REAL,
-      paper         INTEGER DEFAULT 1,
-      live_bet      INTEGER DEFAULT 0,
-      actual_ks     INTEGER,
-      result        TEXT,
-      settled_at    TEXT,
-      pnl           REAL,
-      -- Analysis columns (added for weekly review)
-      park_factor   REAL,                    -- park K-rate multiplier applied
-      weather_mult  REAL,                    -- weather multiplier applied
-      ump_factor    REAL,                    -- umpire K-rate multiplier
-      ump_name      TEXT,                    -- HP umpire name
-      velo_adj      REAL,                    -- velocity trend adjustment
-      velo_trend_mph REAL,                   -- fb_velo vs career avg (mph)
-      bb_penalty    REAL,                    -- BB% penalty applied (1.0 = none)
-      raw_adj_factor REAL,                   -- raw opp adj before selectivity filter
-      spread        REAL,                    -- market spread in cents
-      UNIQUE(bet_date, pitcher_name, strike, side, live_bet)
-    )
-  `)
-  await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_date ON ks_bets(bet_date)`)
-  await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_pitcher ON ks_bets(pitcher_id)`)
-  await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_result ON ks_bets(result)`)
+  // CREATE TABLE is in db/schema.sql — run via db.migrate() before this is called.
+  // These are safe no-ops on existing databases.
+  await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_date      ON ks_bets(bet_date)`)
+  await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_pitcher   ON ks_bets(pitcher_id)`)
+  await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_result    ON ks_bets(result)`)
   await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_composite ON ks_bets(bet_date, live_bet, paper, user_id)`)
 
   // Backfill new columns for existing rows (safe no-ops if columns already exist)
@@ -147,6 +101,18 @@ async function logEdges() {
     console.error('[ks-bets] Edge finder failed:', err.message)
     await db.close()
     return
+  }
+
+  // --pitcher-id: filter to a single starter (used by per-game polling job)
+  if (opts.pitcherId) {
+    const pid = String(opts.pitcherId)
+    edgesJson = edgesJson.filter(e => e.pitcher_id && String(e.pitcher_id) === pid)
+    if (!edgesJson.length) {
+      console.log(`[ks-bets] No edges found for pitcher ${pid} — nothing to log`)
+      await db.close()
+      return
+    }
+    console.log(`[ks-bets] Filtered to pitcher ${pid}: ${edgesJson.length} edges`)
   }
 
   if (!edgesJson.length) {
@@ -521,6 +487,64 @@ async function logEdges() {
     const discordEdges = edgesJson.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
     await notifyEdges(discordEdges, TODAY, await getAllWebhooks(db))
   }
+}
+
+// ── BUILD-SCHEDULE mode: write T-2.5h entries for all of today's starters ────
+
+async function buildSchedule() {
+  const OFFSET_MS = 2.5 * 60 * 60 * 1000  // 150 minutes
+
+  const games = await db.all(
+    `SELECT g.id, g.game_time, g.team_home, g.team_away, g.pitcher_home_id, g.pitcher_away_id
+     FROM games g
+     WHERE g.date = ? AND g.status NOT IN ('final','postponed')
+       AND (g.pitcher_home_id IS NOT NULL OR g.pitcher_away_id IS NOT NULL)`,
+    [TODAY],
+  )
+
+  if (!games.length) {
+    console.log('[build-schedule] No games with probable starters found for', TODAY)
+    await db.close()
+    return
+  }
+
+  let added = 0
+  for (const g of games) {
+    const gameTime = new Date(g.game_time)
+    if (isNaN(gameTime.getTime())) {
+      console.log(`[build-schedule] Bad game_time for ${g.id}: ${g.game_time} — skipping`)
+      continue
+    }
+    const scheduledAt = new Date(gameTime.getTime() - OFFSET_MS)
+    const gameLabel   = `${g.team_away}@${g.team_home}`
+
+    for (const [side, pitcherId] of [['home', g.pitcher_home_id], ['away', g.pitcher_away_id]]) {
+      if (!pitcherId) continue
+
+      const ps = await db.one(
+        `SELECT player_name FROM pitcher_statcast WHERE player_id = ? ORDER BY fetch_date DESC LIMIT 1`,
+        [pitcherId],
+      )
+      const pitcherName = ps?.player_name || `ID${pitcherId}`
+
+      const inserted = await db.run(
+        `INSERT OR IGNORE INTO bet_schedule
+           (bet_date, game_id, game_label, pitcher_id, pitcher_name, pitcher_side, game_time, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        [TODAY, g.id, gameLabel, pitcherId, pitcherName, side, g.game_time, scheduledAt.toISOString()],
+      )
+      if (inserted?.changes ?? 1) {
+        const etTime = scheduledAt.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })
+        console.log(`[build-schedule] ${pitcherName.padEnd(22)} (${side.padEnd(4)}) ${gameLabel}  → bet at ${etTime} ET`)
+        added++
+      } else {
+        console.log(`[build-schedule] ${pitcherName} — already scheduled, skipping`)
+      }
+    }
+  }
+
+  console.log(`\n[build-schedule] Done: ${added} new entries. Polling job fires bets at T-2.5h.`)
+  await db.close()
 }
 
 // ── CANCEL helpers ────────────────────────────────────────────────────────────
@@ -960,13 +984,14 @@ async function main() {
   await db.migrate()
   await ensureTable()
 
-  if (MODE === 'log')    await logEdges()
-  else if (MODE === 'settle') await settleBets()
-  else if (MODE === 'report') await report()
+  if (MODE === 'log')             await logEdges()
+  else if (MODE === 'settle')          await settleBets()
+  else if (MODE === 'report')          await report()
+  else if (MODE === 'build-schedule')  { await buildSchedule(); return }
   else if (MODE === 'cancel-scratched') { await runCancelScratched(); return db.close() }
   else if (MODE === 'cancel-all')       { await runCancelAll();       return db.close() }
   else {
-    console.error(`Unknown mode: ${MODE}. Use log | settle | report | cancel-scratched | cancel-all`)
+    console.error(`Unknown mode: ${MODE}. Use log | settle | report | build-schedule | cancel-scratched | cancel-all`)
     process.exit(1)
   }
 

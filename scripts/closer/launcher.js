@@ -168,13 +168,16 @@ async function main() {
 
   _currentHash = git('rev-parse HEAD')
   const commitDate = git('log -1 --format=%cd --date=format:"%b %d %Y %I:%M %p"')
-  console.log(`[closer] last updated: ${commitDate}`)
+  console.log(`[closer] commit: ${_currentHash.slice(0, 7)}  (${commitDate})`)
 
-  await writeHeartbeat('idle')
+  await writeHeartbeat('idle', { commit: _currentHash.slice(0, 7) })
 
-  // Heartbeat every 60s
+  // Heartbeat every 60s — include running commit so dashboard can detect stale code
   setInterval(() => {
-    writeHeartbeat(_running ? 'running' : 'idle', _date ? { date: _date } : {})
+    writeHeartbeat(_running ? 'running' : 'idle', {
+      ...(_date ? { date: _date } : {}),
+      commit: _currentHash?.slice(0, 7) ?? 'unknown',
+    })
   }, 60_000)
 
   // Check for updates every 2 minutes

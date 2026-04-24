@@ -43,6 +43,10 @@ if [ "$SETTLE_MODE" = true ]; then
   echo "════════════════════════════════════════"
 
   echo ""
+  echo "── Pre-settle fill sync ──"
+  node scripts/live/syncFills.js --date "$DATE" || true
+
+  echo ""
   echo "── Settle bets ──"
   node scripts/live/ksBets.js settle --date "$DATE"
 
@@ -77,6 +81,10 @@ if [ "$MIDDAY_MODE" = true ]; then
       process.exit(0)
     }).catch(e => { console.error(e.message); process.exit(1) })
   "
+
+  echo ""
+  echo "── Sync Kalshi fills ──"
+  node scripts/live/syncFills.js --date "$DATE" || true
 
   echo ""
   echo "── Refresh recent starts (updated pitch counts) ──"
@@ -147,6 +155,10 @@ if [ "$PRIOR_COUNT" -lt 100 ] 2>/dev/null; then
 fi
 
 echo ""
+echo "── 2b. Patch statcast gaps for today's starters ──"
+node scripts/live/patchStarterStatcast.js --date "$DATE"
+
+echo ""
 echo "── 3. Team K% splits (live 2026) ──"
 node scripts/live/fetchTeamKpct.js
 
@@ -159,8 +171,12 @@ echo "── 5. Edge finder (lineup fallback: team K%) ──"
 node scripts/live/strikeoutEdge.js --date "$DATE" --json
 
 echo ""
-echo "── 6. Log edges to ks_bets ──"
-node scripts/live/ksBets.js log --date "$DATE"
+echo "── 6. Build bet schedule (bets fire at T-2.5h via polling job) ──"
+node scripts/live/ksBets.js build-schedule --date "$DATE"
+
+echo ""
+echo "── 6b. Sync initial Kalshi fills ──"
+node scripts/live/syncFills.js --date "$DATE" || true
 
 echo ""
 echo "── 7. Snapshot Kalshi F5 opening prices ──"
