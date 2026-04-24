@@ -300,6 +300,16 @@ export async function startScheduler() {
   }
   // NOTE: liveMonitor is managed by The Closer (Windows agent) — not started here
   // NBA morning run disabled
+
+  // If we're in the 9:30am–3:30pm window on startup, run a schedule refresh + bet_schedule
+  // rebuild immediately so any postponed-blip games get corrected right away.
+  if (hm >= 9 * 60 + 30 && hm < 15 * 60 + 30) {
+    run('Schedule refresh (startup)', `node scripts/live/fetchSchedule.js --date ${date} --days 1`)
+    setTimeout(() => {
+      run('bet_schedule rebuild (startup)', `node scripts/live/ksBets.js build-schedule --date ${date}`)
+    }, 60_000)
+  }
+
   // Fire any scheduled bets that came due while server was down
   await firePendingBets()
   if (hm >= 15 * 60 + 30 && hm < 16 * 60 + 30) {  // 3:30–4:30pm window only — prevents re-running on late redeploys
@@ -313,6 +323,20 @@ export async function startScheduler() {
   }, { timezone: 'America/New_York' })
 
   // NBA morning run disabled
+
+  // Every 30 min, 9:30am–3:30pm ET — re-fetch schedule + rebuild bet_schedule.
+  // Corrects MLB API blips that mark live games as 'postponed' at morning fetch time,
+  // which would otherwise cause buildSchedule() to skip them (it filters out 'postponed').
+  // fetchSchedule.js is a full upsert — idempotent, safe to run repeatedly.
+  // build-schedule uses INSERT OR IGNORE — only adds rows for games not yet scheduled.
+  cron.schedule('30 9-15 * * *', async () => {
+    const d = etDate()
+    run('Schedule refresh', `node scripts/live/fetchSchedule.js --date ${d} --days 1`)
+    // Short delay to let fetchSchedule finish before rebuilding bet_schedule
+    setTimeout(() => {
+      run('bet_schedule rebuild', `node scripts/live/ksBets.js build-schedule --date ${d}`)
+    }, 60_000)
+  }, { timezone: 'America/New_York' })
 
   // Every 5 min — fire any scheduled bets whose T-2.5h window has arrived
   cron.schedule('*/5 * * * *', () => firePendingBets(), { timezone: 'America/New_York' })
@@ -337,5 +361,5 @@ export async function startScheduler() {
     run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 9:00am data+schedule | */5min bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
+  console.log('[scheduler] daily jobs (ET): 9:00am data+schedule | :30 9am-3pm schedule refresh | */5min bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
 }
