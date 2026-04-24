@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { one as dbOne, all as dbAll, run as dbRun } from '../lib/db.js'
 import { runPreflightCheck } from '../lib/preflightCheck.js'
 import { notifyPreflightResult, getAllWebhooks, notifyAlert } from '../lib/discord.js'
+import { recordPipelineStep } from '../lib/pipelineLog.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(__dirname, '..')
@@ -190,6 +191,37 @@ async function firePendingBets() {
       `UPDATE bet_schedule SET preflight=?, notes=? WHERE id=?`,
       [check.action, check.reason || null, entry.id],
     ).catch(() => {})
+
+    // Pipeline: record preflight result
+    {
+      const isSkip  = check.action === 'skip'
+      const isBoost = check.action === 'boost'
+      recordPipelineStep({
+        bet_date: date,
+        pitcher_id: String(entry.pitcher_id),
+        pitcher_name: entry.pitcher_name,
+        game_id: entry.game_id,
+        game_label: entry.game_label,
+        pitcher_side: entry.pitcher_side,
+        game_time: entry.game_time,
+        step: 'preflight',
+        payload: {
+          action: check.action,
+          reason: check.reason || null,
+          confidence: check.confidence ?? null,
+          sources: check.sources ?? [],
+          k_prop_gap: check.k_prop_gap ?? null,
+          dk_line: check.dk_line ?? null,
+        },
+        summary: isSkip ? {
+          final_action: 'preflight_skip',
+          status: 'skipped',
+          skip_reason: check.reason?.slice(0, 200) ?? 'preflight skip',
+        } : isBoost ? {
+          final_action: 'preflight_boost',
+        } : {},
+      }).catch(() => {})
+    }
 
     if (check.action === 'skip') {
       dbRun(`UPDATE bet_schedule SET status='skipped' WHERE id=?`, [entry.id]).catch(() => {})

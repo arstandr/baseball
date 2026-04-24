@@ -7,6 +7,7 @@ import { initTrendsPeriodBar, refreshTrendsView } from './app/views/trends.js'
 import { refreshTestingView }            from './app/views/testing.js'
 import { refreshLogView }                from './app/views/log.js'
 import { refreshSettings }               from './app/views/settings.js'
+import { refreshPipelineView }               from './app/views/pipeline.js'
 import {
   refreshTodayView, stopLivePolling, buildBettorDrawer,
 } from './app/views/today.js'
@@ -175,11 +176,12 @@ async function refreshAll() {
   _resolveLiveBettor(bettors)
 
   const viewRefresh =
-    state.view === 'today'    ? refreshTodayView()   :
-    state.view === 'trends'   ? refreshTrendsView()  :
-    state.view === 'testing'  ? refreshTestingView() :
-    state.view === 'log'      ? refreshLogView()     :
-    state.view === 'settings' ? refreshSettings()    : null
+    state.view === 'today'    ? refreshTodayView()    :
+    state.view === 'trends'   ? refreshTrendsView()   :
+    state.view === 'testing'  ? refreshTestingView()  :
+    state.view === 'log'      ? refreshLogView()      :
+    state.view === 'pipeline' ? refreshPipelineView() :
+    state.view === 'settings' ? refreshSettings()     : null
 
   await Promise.all([
     refreshHero(bettors),

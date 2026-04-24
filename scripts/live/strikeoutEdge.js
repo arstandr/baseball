@@ -64,6 +64,7 @@ import {
   nbCDF, pAtLeast, ipToDecimal,
 } from '../../lib/strikeout-model.js'
 import { parseArgs } from '../../lib/cli-args.js'
+import { recordPipelineStep } from '../../lib/pipelineLog.js'
 
 const opts     = parseArgs({
   date:    { default: new Date().toISOString().slice(0, 10) },
@@ -841,6 +842,62 @@ async function main() {
         `${parkStr}${wxStr}${umpStr}${veloStr}${bbStr}${ttoStr}${splitNote}${savantStr}${careerStr}`
       )
 
+      // ── Pipeline: emit model_input + lambda_calc ──────────────────────────
+      const _gameLabel = label || `${game.team_away}@${game.team_home}`
+      recordPipelineStep({
+        bet_date: TODAY, pitcher_id: String(id), pitcher_name: meta.name,
+        game_id: game.id, game_label: _gameLabel,
+        pitcher_side: team === game.team_home ? 'home' : 'away',
+        game_time: game.game_time,
+        step: 'model_input',
+        payload: {
+          k_pct_career: career?.k_pct ?? null,
+          k9_career:    k9_career ?? null,
+          k_pct_l5:     savant?.k_pct ?? null,
+          k9_l5,
+          bb9_l5:       null,
+          avg_ip_l5:    avgIp ?? null,
+          velo_trend_mph: veloTrendMph ?? null,
+          savant_fbv:   savant?.fb_velo ?? null,
+          savant_whiff: savant?.swstr_pct ?? null,
+          opp_team:     oppTeam,
+          opp_k_pct:    oppKpct,
+          opp_kpct_source: kpctSource,
+          expected_bf:  expectedBF,
+          bf_source:    bfSource,
+          confidence,
+          n_starts:     nStarts,
+          hand:         meta.hand,
+        },
+        summary: { confidence },
+      }).catch(() => {})
+      recordPipelineStep({
+        bet_date: TODAY, pitcher_id: String(id), pitcher_name: meta.name,
+        game_id: game.id, game_label: _gameLabel,
+        step: 'lambda_calc',
+        payload: {
+          lambda_base: lambdaBase,
+          lambda_final: lambda,
+          p_k_blended: pK_blended,
+          velo_adj: veloAdj ?? 1.0,
+          bb_penalty: bbPenalty,
+          tto_penalty: ttoPenalty ?? 1.0,
+          tto_note: ttoNote ?? null,
+          split_adj: splitAdj,
+          opp_adj: effectiveAdj,
+          raw_adj_factor: adjFactor,
+          park_factor: parkFactor,
+          park_team: game.team_home,
+          weather_mult: weatherMult,
+          weather_note: weatherNote ?? null,
+          ump_factor: umpFactor,
+          ump_name: umpName,
+          leash_flag: leashFlag,
+          avg_pitches: avgPitches ?? null,
+        },
+        summary: { lambda, n_markets: group?.markets?.length ?? 0 },
+      }).catch(() => {})
+
       const kalshiTeam = toKalshiAbbr(team)
       let group = null
       for (const [key, g] of pitcherGroups) {
@@ -850,8 +907,16 @@ async function main() {
       if (!group) {
         console.log(`    [no market] no Kalshi group for ${meta.name} (${kalshiTeam})`)
         console.log('')
+        recordPipelineStep({
+          bet_date: TODAY, pitcher_id: String(id), pitcher_name: meta.name,
+          step: 'edges',
+          payload: [],
+          summary: { n_markets: 0, n_edges: 0, best_edge: null, final_action: 'no_markets', status: 'processed', skip_reason: 'no Kalshi group' },
+        }).catch(() => {})
         continue
       }
+
+      const _pipelineEdges = []
 
       for (const mkt of group.markets) {
         const rawModelProb = pAtLeast(lambda, mkt.strike)
@@ -903,6 +968,24 @@ async function main() {
           ` | vol=${mkt.volume != null ? Math.round(mkt.volume) : 'n/a'}` +
           (isLocked ? ' [locked]' : hasEdge ? ' ← EDGE' : noCapKills ? ' [NO-cap>80¢]' : tooThin ? ' [thin<10]' : yesFiltered ? ' [YES-prob<25%]' : hasRawEdge ? ' [spread-kills-edge]' : '')
         )
+
+        _pipelineEdges.push({
+          strike: mkt.strike,
+          yes_ask: mkt.yes_ask,
+          yes_bid: mkt.yes_bid,
+          mid,
+          spread,
+          model_prob: modelProb,
+          raw_model_prob: rawModelProb,
+          edge_yes: edge.yesEdge,
+          edge_no: edge.noEdge,
+          best_edge: edge.bestEdge,
+          side: edge.side,
+          threshold_cents: edgeThreshold * 100,
+          passed: hasEdge,
+          reason: isLocked ? 'locked' : noCapKills ? 'NO-cap>80¢' : tooThin ? 'thin<10vol' : yesFiltered ? 'YES-prob<25%' : !hasEdge ? 'below threshold' : null,
+          ticker: mkt.ticker,
+        })
 
         if (hasEdge) {
           pitcherEdgesThisGame.push({
@@ -958,6 +1041,23 @@ async function main() {
           })
         }
       }
+
+      // ── Pipeline: emit edges step ──────────────────────────────────────────
+      const _passedEdges = _pipelineEdges.filter(e => e.passed)
+      const _bestEdge = _passedEdges.length > 0 ? Math.max(..._passedEdges.map(e => e.best_edge)) : null
+      recordPipelineStep({
+        bet_date: TODAY, pitcher_id: String(id), pitcher_name: meta.name,
+        game_id: game.id, game_label: _gameLabel,
+        step: 'edges',
+        payload: _pipelineEdges,
+        summary: {
+          n_markets: _pipelineEdges.length,
+          n_edges: _passedEdges.length,
+          best_edge: _bestEdge,
+          final_action: _passedEdges.length === 0 ? 'no_edge' : null,
+          skip_reason: _passedEdges.length === 0 ? 'edge below threshold' : null,
+        },
+      }).catch(() => {})
 
       console.log('')
     }

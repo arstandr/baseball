@@ -21,6 +21,7 @@ import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders,
 import { mlbGet } from '../../lib/mlb-live.js'
 import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
+import { recordPipelineStep } from '../../lib/pipelineLog.js'
 
 const MODE = process.argv[2] || 'report'
 
@@ -208,6 +209,68 @@ async function logEdges() {
   const guardsRemoved = withFill.length - guardedEdges.length
   if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/C/D: removed ${guardsRemoved} bet(s)`)
 
+  // ── Pipeline: emit rule_filters per pitcher ─────────────────────────────
+  // Group edges by pitcher to record one pipeline row per pitcher
+  const _ruleFiltersByPitcher = new Map()
+  for (const e of (edgesJson || [])) {
+    const pid = String(e.pitcher_id || e.pitcher)
+    if (!_ruleFiltersByPitcher.has(pid)) {
+      _ruleFiltersByPitcher.set(pid, {
+        pitcher_name: e.pitcher,
+        pitcher_id: pid,
+        inputs: [],
+        passed: [],
+        dropped_yes_cap: [],
+        dropped_rule_a: [],
+        dropped_rule_d: [],
+        total_input: 0,
+      })
+    }
+    const entry = _ruleFiltersByPitcher.get(pid)
+    entry.inputs.push({ strike: e.strike, side: e.side, edge: e.edge, model_prob: e.model_prob })
+    entry.total_input++
+  }
+  for (const e of withFill) {
+    const entry = _ruleFiltersByPitcher.get(String(e.pitcher_id || e.pitcher))
+    if (entry) entry.passed.push({ strike: e.strike, side: e.side, edge: e.edge })
+  }
+  // Record drops for each pitcher
+  for (const e of deduped) {
+    if (!withFill.includes(e)) {
+      const entry = _ruleFiltersByPitcher.get(String(e.pitcher_id || e.pitcher))
+      if (entry) entry.dropped_yes_cap.push({ strike: e.strike, side: e.side })
+    }
+  }
+  for (const e of withFill) {
+    if (!guardedEdges.includes(e)) {
+      const entry = _ruleFiltersByPitcher.get(String(e.pitcher_id || e.pitcher))
+      if (entry) {
+        const reason = e.side === 'NO' ? 'rule_a' : 'rule_d'
+        if (reason === 'rule_a') entry.dropped_rule_a.push({ strike: e.strike, side: e.side })
+        else entry.dropped_rule_d.push({ strike: e.strike, side: e.side })
+      }
+    }
+  }
+  for (const [pid, entry] of _ruleFiltersByPitcher) {
+    const allPassedPitcher = guardedEdges.filter(e => String(e.pitcher_id || e.pitcher) === pid)
+    const noPassedAtAll = allPassedPitcher.length === 0 && entry.total_input > 0
+    recordPipelineStep({
+      bet_date: TODAY, pitcher_id: pid, pitcher_name: entry.pitcher_name,
+      step: 'rule_filters',
+      payload: {
+        yes_per_pitcher_cap: { dropped: entry.dropped_yes_cap },
+        rule_a_no_ban: { dropped: entry.dropped_rule_a },
+        rule_d_yes_low_prob: { dropped: entry.dropped_rule_d },
+        inputs_count: entry.total_input,
+        passed_count: allPassedPitcher.length,
+      },
+      summary: noPassedAtAll ? {
+        final_action: 'filtered_out',
+        skip_reason: entry.dropped_rule_a.length > 0 ? 'rule_a' : entry.dropped_rule_d.length > 0 ? 'rule_d' : 'yes_cap',
+      } : {},
+    }).catch(() => {})
+  }
+
   // Side multipliers: NOs get 1.25x capital weight (structural edge, validated forward)
   // YES stays at 1.0x — don't reduce good YES bets, just overweight NOs
   // Re-evaluate after +300 bets before any further adjustment
@@ -218,6 +281,8 @@ async function logEdges() {
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────
   const STAGGER_MS = 45_000   // 45s between users on live orders
   let logged = 0
+
+  const _betsPlacedByPitcher = new Map()
 
   for (let bi = 0; bi < bettors.length; bi++) {
     const bettor = bettors[bi]
@@ -395,6 +460,25 @@ async function logEdges() {
       bettorLogged++
       logged++
 
+      // Track for pipeline bets_placed emission
+      {
+        const pid = String(e.pitcher_id || e.pitcher)
+        if (!_betsPlacedByPitcher.has(pid)) {
+          _betsPlacedByPitcher.set(pid, { pitcher_name: e.pitcher, rows: [], total_risk: 0 })
+        }
+        const pbp = _betsPlacedByPitcher.get(pid)
+        pbp.rows.push({
+          strike: e.strike,
+          side: e.side,
+          bet_size: e._face,
+          fill: e._fill,
+          edge: e.edge,
+          model_prob: e.model_prob,
+          ticker: e.ticker ?? null,
+        })
+        pbp.total_risk += e._face * e._fill
+      }
+
       if (isLive && e.ticker && !existing?.order_id) {
         try {
           const mid        = e.market_mid ?? 50
@@ -480,6 +564,21 @@ async function logEdges() {
     })
   } catch (err) {
     console.warn('[ks-bets] Price cache step failed (non-fatal):', err.message?.slice(0, 100))
+  }
+
+  // ── Pipeline: emit bets_placed per pitcher ─────────────────────────────
+  for (const [pid, pbp] of _betsPlacedByPitcher) {
+    if (!pbp.rows.length) continue
+    recordPipelineStep({
+      bet_date: TODAY, pitcher_id: pid, pitcher_name: pbp.pitcher_name,
+      step: 'bets_placed',
+      payload: { rows: pbp.rows, total_risk_usd: Math.round(pbp.total_risk * 100) / 100 },
+      summary: {
+        n_bets_logged: pbp.rows.length,
+        final_action: 'bet_placed',
+        status: 'scheduled',
+      },
+    }).catch(() => {})
   }
 
   // Log model config for this run

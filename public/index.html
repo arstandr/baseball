@@ -4,9 +4,9 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Money Tree 2.0</title>
-  <link rel="stylesheet" href="/style.css?v=6"/>
+  <link rel="stylesheet" href="/style.css?v=7"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
-  <script type="module" src="/app.js?v=6" defer></script>
+  <script type="module" src="/app.js?v=7" defer></script>
 </head>
 <body>
 
@@ -19,6 +19,7 @@
       <button class="mode active" data-view="today"    role="tab">Today</button>
       <button class="mode"        data-view="trends"   role="tab">How We're Doing</button>
       <button class="mode"        data-view="log"      role="tab">History</button>
+      <button class="mode"        data-view="pipeline" role="tab">Pipeline</button>
       <button class="mode"        data-view="settings" role="tab">Settings</button>
       <button class="mode"        data-view="testing"  role="tab">Advanced</button>
     </nav>
@@ -265,6 +266,30 @@
         <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
       </div>
       <div class="log-pagination" id="log-pagination"></div>
+    </section>
+
+    <!-- ══════════════ PIPELINE VIEW ══════════════ -->
+    <section class="view" id="view-pipeline" hidden>
+      <div class="pipe-toolbar">
+        <div class="pipe-date-bar" id="pipe-date-bar"></div>
+        <div class="pipe-legend">
+          <span class="pipe-legend-item"><span class="pipe-dot pipe-dot-won"></span>Won</span>
+          <span class="pipe-legend-item"><span class="pipe-dot pipe-dot-lost"></span>Lost</span>
+          <span class="pipe-legend-item"><span class="pipe-dot pipe-dot-pending"></span>Pending</span>
+          <span class="pipe-legend-item"><span class="pipe-dot pipe-dot-skip-rule"></span>Rule skip</span>
+          <span class="pipe-legend-item"><span class="pipe-dot pipe-dot-skip-preflight"></span>Preflight skip</span>
+          <span class="pipe-legend-item"><span class="pipe-dot pipe-dot-no-edge"></span>No edge</span>
+          <span class="pipe-legend-item"><span class="pipe-dot pipe-dot-no-markets"></span>No markets</span>
+        </div>
+      </div>
+      <div class="pipe-layout">
+        <aside class="pipe-rail" id="pipe-rail">
+          <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+        </aside>
+        <section class="pipe-detail" id="pipe-detail">
+          <div class="pipe-detail-empty">Pick a pitcher on the left to see the full decision pipeline.</div>
+        </section>
+      </div>
     </section>
 
     <!-- ══════════════ TESTING VIEW ══════════════ -->

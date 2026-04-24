@@ -545,7 +545,7 @@ router.get('/ks/bets', wrap(async (req, res) => {
 
   const [rows, countRow] = await Promise.all([
     db.all(
-      `SELECT id, bet_date, pitcher_name, team, game, strike, side,
+      `SELECT id, pitcher_id, bet_date, pitcher_name, team, game, strike, side,
               model_prob, market_mid, spread, edge, lambda, actual_ks, result, pnl, bet_size, capital_at_risk, ticker
        FROM ks_bets WHERE ${where}
        ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
@@ -565,6 +565,85 @@ router.get('/ks/bets', wrap(async (req, res) => {
     page, limit,
     pages: Math.ceil(Number(countRow?.n || 0) / limit),
   })
+}))
+
+// ── Decision Pipeline routes ──────────────────────────────────────────────────
+
+function parsePipelineRow(row) {
+  if (!row) return null
+  const parsed = { ...row }
+  for (const col of ['model_input_json','lambda_calc_json','edges_json',
+                     'rule_filters_json','preflight_json','bets_placed_json']) {
+    if (parsed[col]) { try { parsed[col] = JSON.parse(parsed[col]) } catch { parsed[col] = null } }
+  }
+  return parsed
+}
+
+router.get('/ks/pipeline/dates', wrap(async (req, res) => {
+  const rows = await db.all(
+    `SELECT bet_date, COUNT(*) AS n FROM decision_pipeline
+      GROUP BY bet_date ORDER BY bet_date DESC LIMIT 60`,
+  )
+  res.json({ dates: rows.map(r => ({ date: r.bet_date, n: Number(r.n) })) })
+}))
+
+router.get('/ks/pipeline/by-bet/:ks_bet_id', wrap(async (req, res) => {
+  const bet = await db.one(
+    `SELECT bet_date, pitcher_id FROM ks_bets WHERE id=?`, [req.params.ks_bet_id],
+  )
+  if (!bet) return res.status(404).json({ error: 'bet_not_found' })
+  const row = await db.one(
+    `SELECT * FROM decision_pipeline WHERE bet_date=? AND pitcher_id=?`,
+    [bet.bet_date, String(bet.pitcher_id)],
+  )
+  const parsed = parsePipelineRow(row)
+  if (!parsed) return res.status(404).json({ error: 'no_pipeline_data' })
+  res.json(parsed)
+}))
+
+router.get('/ks/pipeline', wrap(async (req, res) => {
+  const date = req.query.date || todayISO()
+  const rows = await db.all(
+    `SELECT id, bet_date, pitcher_id, pitcher_name, game_id, game_label,
+            pitcher_side, game_time, status, final_action, n_markets, n_edges,
+            n_bets_logged, best_edge, lambda, confidence, skip_reason,
+            created_at, updated_at
+       FROM decision_pipeline
+      WHERE bet_date = ?
+      ORDER BY game_time ASC, pitcher_name ASC`,
+    [date],
+  )
+  const pitcherIds = rows.map(r => String(r.pitcher_id))
+  let outcomes = new Map()
+  if (pitcherIds.length) {
+    const ph = pitcherIds.map(() => '?').join(',')
+    const bets = await db.all(
+      `SELECT pitcher_id,
+              SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
+              SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+              SUM(COALESCE(pnl,0)) AS pnl
+         FROM ks_bets WHERE bet_date=? AND live_bet=0 AND paper=0
+           AND pitcher_id IN (${ph})
+         GROUP BY pitcher_id`,
+      [date, ...pitcherIds],
+    )
+    outcomes = new Map(bets.map(b => [String(b.pitcher_id), b]))
+  }
+  res.json({
+    date,
+    pitchers: rows.map(r => ({ ...r, outcome: outcomes.get(String(r.pitcher_id)) || null })),
+  })
+}))
+
+router.get('/ks/pipeline/:bet_date/:pitcher_id', wrap(async (req, res) => {
+  const { bet_date, pitcher_id } = req.params
+  const row = await db.one(
+    `SELECT * FROM decision_pipeline WHERE bet_date=? AND pitcher_id=?`,
+    [bet_date, String(pitcher_id)],
+  )
+  const parsed = parsePipelineRow(row)
+  if (!parsed) return res.status(404).json({ error: 'not_found' })
+  res.json(parsed)
 }))
 
 router.get('/ks/stats', wrap(async (req, res) => {

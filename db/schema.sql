@@ -907,3 +907,40 @@ CREATE TABLE IF NOT EXISTS dk_k_props (
   fetched_at   TEXT DEFAULT (datetime('now')),
   UNIQUE(prop_date, pitcher_name)
 );
+
+-- ========================================================================
+-- decision_pipeline: one row per (pitcher, bet_date).
+-- Captures every model step — even when no bet was placed.
+-- JSON blobs keep step payloads flexible. Flat columns allow fast filtering.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS decision_pipeline (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  bet_date        TEXT NOT NULL,
+  pitcher_id      TEXT NOT NULL,
+  pitcher_name    TEXT NOT NULL,
+  game_id         TEXT,
+  game_label      TEXT,
+  pitcher_side    TEXT,
+  game_time       TEXT,
+  status          TEXT NOT NULL DEFAULT 'processed',
+  final_action    TEXT,
+  n_markets       INTEGER,
+  n_edges         INTEGER,
+  n_bets_logged   INTEGER DEFAULT 0,
+  best_edge       REAL,
+  lambda          REAL,
+  confidence      TEXT,
+  skip_reason     TEXT,
+  model_input_json   TEXT,
+  lambda_calc_json   TEXT,
+  edges_json         TEXT,
+  rule_filters_json  TEXT,
+  preflight_json     TEXT,
+  bets_placed_json   TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(bet_date, pitcher_id)
+);
+CREATE INDEX IF NOT EXISTS idx_decision_pipeline_date    ON decision_pipeline(bet_date);
+CREATE INDEX IF NOT EXISTS idx_decision_pipeline_pitcher ON decision_pipeline(pitcher_id, bet_date);
+CREATE INDEX IF NOT EXISTS idx_decision_pipeline_action  ON decision_pipeline(bet_date, final_action);

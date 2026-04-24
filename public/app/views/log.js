@@ -1,6 +1,7 @@
 import { state } from '../state.js'
 import { fmt$, esc } from '../utils.js'
 import { fetchJson } from '../api.js'
+import { renderPipelineSteps } from '../pipelineRender.js'
 
 export async function refreshLogView() {
   wireLogFilters()
@@ -65,6 +66,39 @@ function wireLogFilters() {
       state.log.page = 1; loadBets()
     })
   })
+
+  const logBody = document.getElementById('log-body')
+  if (!logBody.dataset.accordionWired) {
+    logBody.dataset.accordionWired = '1'
+    logBody.addEventListener('click', async (e) => {
+      if (e.target.closest('a,button,input,select')) return
+      const card = e.target.closest('.sc-bet-card[data-bet-id]')
+      if (!card) return
+      const drawer = card.querySelector('.sc-bet-drawer')
+      const chev   = card.querySelector('.sc-bet-chev')
+      if (!drawer) return
+      const opening = drawer.hidden
+      drawer.hidden = !opening
+      card.classList.toggle('sc-bet-card-open', opening)
+      if (chev) chev.textContent = opening ? '▴' : '▾'
+      if (opening && !drawer.dataset.loaded) {
+        drawer.innerHTML = '<div class="sc-bet-drawer-loading">Loading decision pipeline…</div>'
+        try {
+          const data = await fetchJson(`/api/ks/pipeline/by-bet/${card.dataset.betId}`)
+          drawer.innerHTML = `<div class="sc-pipe-drawer-head">DECISION PIPELINE · ${esc(data.pitcher_name || '')} · ${data.bet_date || ''}</div>` + renderPipelineSteps(data)
+          drawer.dataset.loaded = '1'
+        } catch (err) {
+          const is404 = err?.status === 404 || String(err?.message || '').includes('404') || String(err?.message || '').includes('no_pipeline')
+          if (is404) {
+            drawer.innerHTML = '<div class="sc-bet-drawer-empty">Pipeline data not available for this bet (pre-feature).</div>'
+            drawer.dataset.loaded = '1'
+          } else {
+            drawer.innerHTML = '<div class="sc-bet-drawer-error">Failed to load pipeline — click to retry.</div>'
+          }
+        }
+      }
+    })
+  }
 }
 
 async function loadBets() {
@@ -111,6 +145,7 @@ async function loadBets() {
 
     const card = document.createElement('div')
     card.className = `sc-bet-card ${cls}`
+    card.dataset.betId = b.id
     card.innerHTML = `
       <div class="sc-bet-header">
         <div>
@@ -121,8 +156,10 @@ async function loadBets() {
         </div>
         <div class="sc-bet-right">
           <div class="sc-bet-amount ${pnlCls}">${pnlText}</div>
+          <div class="sc-bet-chev" aria-hidden="true">▾</div>
         </div>
-      </div>`
+      </div>
+      <div class="sc-bet-drawer" hidden></div>`
     body.appendChild(card)
   }
   renderLogPagination(data)
