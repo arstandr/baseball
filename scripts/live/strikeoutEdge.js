@@ -454,6 +454,18 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
     bfSource   = `career_ip×PA/IP`
   }
 
+  // ── Leash cap: short-leash pitchers face fewer batters ───────────────────
+  // If avgPitches < 85, the pitcher is being pulled early. Cap expectedBF at
+  // what their actual pitch rate implies (avgPitches / LEAGUE_PITCHES_PER_BF).
+  const LEAGUE_PITCHES_PER_BF = 3.8
+  if (leashFlag && avgPitches != null) {
+    const bfCap = avgPitches / LEAGUE_PITCHES_PER_BF
+    if (bfCap < expectedBF) {
+      expectedBF = bfCap
+      bfSource   += `→capped(${bfCap.toFixed(1)}BF)`
+    }
+  }
+
   const avgIp = expectedBF / LEAGUE_PA_PER_IP  // kept for display / legacy logging
   const earlyExitRate = nStarts > 0
     ? last5.filter(r => Math.floor(r.ip) < 3).length / nStarts : null
@@ -549,7 +561,24 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
   if (savant?.bb_pct != null && savant.bb_pct > 0.09) {
     bbPenalty = Math.max(0.80, 1 - (savant.bb_pct - 0.08) * 1.5)
   }
-  const pK_final   = pK_afterVelo * bbPenalty
+
+  // ── TTO (Times Through Order) penalty ───────────────────────────────────
+  // K rate drops ~18% on the 3rd pass through the lineup — hitters adjust.
+  // Only meaningful when pitcher is projected to face ≥19 batters (TTO3+ zone).
+  // Apply proportionally: fraction of expectedBF in TTO3+ gets ×0.82.
+  const TTO_LINEUP = 9          // batters in a lineup
+  const TTO3_BF    = TTO_LINEUP * 2  // BF threshold where TTO3 begins (18)
+  const TTO3_DECAY = 0.82        // K rate multiplier in TTO3+
+  let ttoPenalty = 1.0, ttoNote = null
+
+  if (expectedBF > TTO3_BF) {
+    const bfInTTO3   = expectedBF - TTO3_BF
+    const fracTTO3   = bfInTTO3 / expectedBF
+    ttoPenalty = 1 - fracTTO3 * (1 - TTO3_DECAY)
+    ttoNote = `TTO3=${bfInTTO3.toFixed(1)}BF(${(fracTTO3*100).toFixed(0)}%)→×${ttoPenalty.toFixed(3)}`
+  }
+
+  const pK_final   = pK_afterVelo * bbPenalty * ttoPenalty
   const k9         = pK_final * LEAGUE_PA_PER_IP * 9
   const lambdaBase = expectedBF * pK_final
 
@@ -565,6 +594,7 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
     whiffFlag, savantNote, careerNote,
     veloTrendMph, veloAdj,
     bbPenalty,
+    ttoPenalty, ttoNote,
   }
 }
 
@@ -776,7 +806,8 @@ async function main() {
               expectedBF, avgIp, bfSource, avgPitches, leashFlag,
               nStarts, confidence, earlyExitRate,
               whiffFlag, savantNote, careerNote,
-              veloTrendMph, veloAdj, bbPenalty } =
+              veloTrendMph, veloAdj, bbPenalty,
+              ttoPenalty, ttoNote } =
         computeLambdaBase(log, TODAY, savant, career, recentStarts, careerAvgFbVelo)
 
       const { kpct: oppKpct, source: kpctSource } =
@@ -824,13 +855,14 @@ async function main() {
       const veloStr = veloTrendMph != null
         ? ` | velo${veloTrendMph >= 0 ? '+' : ''}${veloTrendMph.toFixed(1)}mph→×${veloAdj.toFixed(2)}`
         : ''
-      const bbStr = bbPenalty < 1.0 ? ` | bb%×${bbPenalty.toFixed(3)}` : ''
+      const bbStr  = bbPenalty  < 1.0 ? ` | bb%×${bbPenalty.toFixed(3)}`  : ''
+      const ttoStr = ttoNote         ? ` | ${ttoNote}`                     : ''
 
       console.log(
         `  ${meta.name} (${team} ${meta.hand}HP) | λ=${lambda.toFixed(2)} (base=${lambdaBase.toFixed(2)})` +
         `${blendStr} |${bfStr} | starts=${nStarts} [${confidence}]` +
         `${earlyExitRate != null ? ` | exit%=${(earlyExitRate*100).toFixed(0)}%` : ''}${adjStr}` +
-        `${parkStr}${wxStr}${umpStr}${veloStr}${bbStr}${savantStr}${careerStr}`
+        `${parkStr}${wxStr}${umpStr}${veloStr}${bbStr}${ttoStr}${savantStr}${careerStr}`
       )
 
       const kalshiTeam = toKalshiAbbr(team)
@@ -846,21 +878,16 @@ async function main() {
       }
 
       for (const mkt of group.markets) {
-        // ── High-threshold shrinkage (backtest fix) ──────────────────────────
-        // Model over-predicts P(8+) by ~2-3%, P(9+) by ~2-3%.
-        // Backtest calibration: slightly too spread distribution.
-        // Apply conservative shrinkage before edge calc.
         const rawModelProb = pAtLeast(lambda, mkt.strike)
-        const modelProb = mkt.strike >= 9 ? rawModelProb * 0.93
-                        : mkt.strike >= 8 ? rawModelProb * 0.95
-                        : mkt.strike >= 7 ? rawModelProb * 0.97
-                        : rawModelProb
+        const mid    = mkt.yes_ask != null && mkt.yes_bid != null ? (mkt.yes_ask + mkt.yes_bid) / 2 : null
+        const spread = mkt.yes_ask != null && mkt.yes_bid != null ? mkt.yes_ask - mkt.yes_bid : null
+
+        // Live data shows model UNDER-predicts the upper tail (K≥7+ wins at 44-45%
+        // when model says 30-40%); shrinkage was making it worse. Use raw probability.
+        const modelProb = rawModelProb
 
         const edge = calcEdge(modelProb, mkt.yes_ask, mkt.yes_bid, mkt.no_ask, mkt.no_bid)
         if (!edge) continue
-
-        const mid    = mkt.yes_ask != null && mkt.yes_bid != null ? (mkt.yes_ask + mkt.yes_bid) / 2 : null
-        const spread = mkt.yes_ask != null && mkt.yes_bid != null ? mkt.yes_ask - mkt.yes_bid : null
 
         // Skip in-game locked prices (resolved markets push to 0¢ or 99¢+)
         const isLocked = (mkt.yes_ask != null && mkt.yes_ask >= 99) ||
@@ -913,6 +940,7 @@ async function main() {
             opp_k_pct: oppKpct, adj_factor: effectiveAdj, raw_adj_factor: adjFactor,
             bb_penalty: bbPenalty,
             park_factor: parkFactor,
+            weather_mult: weatherMult,
             weather_note: weatherNote,
             ump_name: umpName, ump_factor: umpFactor,
             velo_trend_mph: veloTrendMph, velo_adj: veloAdj,

@@ -12,11 +12,13 @@
 //   node scripts/live/ksBets.js log    [--date YYYY-MM-DD] [--min-edge 0.05]
 //   node scripts/live/ksBets.js settle [--date YYYY-MM-DD]
 //   node scripts/live/ksBets.js report [--days 30]
+//   node scripts/live/ksBets.js cancel-scratched [--date YYYY-MM-DD] [--dry-run]
+//   node scripts/live/ksBets.js cancel-all       [--date YYYY-MM-DD]
 
 import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, getOrder, getBalance as getKalshiBalance, getSettlements, getFills } from '../../lib/kalshi.js'
+import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getBalance as getKalshiBalance, getSettlements, getFills, getOrderbook, availableDepth } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -28,6 +30,7 @@ const opts = parseArgs({
   minEdge:  { flag: 'min-edge', type: 'number', default: 0.05 },
   betSize:  { flag: 'bet-size', type: 'number', default: 100 },
   riskPct:  { flag: 'risk-pct', type: 'number', default: null },
+  dryRun:   { flag: 'dry-run', type: 'boolean', default: false },
 })
 
 const TODAY    = opts.date
@@ -100,6 +103,7 @@ async function ensureTable() {
   await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_date ON ks_bets(bet_date)`)
   await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_pitcher ON ks_bets(pitcher_id)`)
   await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_result ON ks_bets(result)`)
+  await db.run(`CREATE INDEX IF NOT EXISTS idx_ks_bets_composite ON ks_bets(bet_date, live_bet, paper, user_id)`)
 
   // Backfill new columns for existing rows (safe no-ops if columns already exist)
   for (const col of [
@@ -163,6 +167,33 @@ async function logEdges() {
     return
   }
 
+  // ── Capture opening balance snapshots before placing any bets ────────────
+  // ET date (America/New_York) is the canonical date for all daily tracking.
+  const etDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+  for (const bettor of bettors) {
+    if (!bettor.kalshi_key_id) continue
+    try {
+      const existing = await db.one(
+        `SELECT id FROM balance_snapshots WHERE user_id = ? AND date = ?`,
+        [bettor.id, etDate],
+      )
+      if (existing) {
+        console.log(`[ks-bets] ${bettor.name} · opening snapshot already captured for ${etDate}`)
+        continue
+      }
+      const creds = { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
+      const kb = await getKalshiBalance(creds)
+      await db.run(
+        `INSERT OR IGNORE INTO balance_snapshots (user_id, date, balance_usd, cash_usd, exposure_usd, captured_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [bettor.id, etDate, kb.balance_usd, kb.cash_usd, kb.exposure_usd, new Date().toISOString()],
+      )
+      console.log(`[ks-bets] ${bettor.name} · opening snapshot captured: $${kb.balance_usd?.toFixed(2)} (cash $${kb.cash_usd?.toFixed(2)} + exposure $${kb.exposure_usd?.toFixed(2)})`)
+    } catch (err) {
+      console.error(`[ks-bets] ${bettor.name} · opening snapshot failed: ${err.message}`)
+    }
+  }
+
   // ── Pre-compute fill fractions (shared across all users) ──────────────────
   const rawEdges = edgesJson.map(e => {
     const mid    = (e.market_mid ?? 50) / 100
@@ -198,13 +229,12 @@ async function logEdges() {
   const yesCapRemoved = deduped.length - withFill.length
   if (yesCapRemoved > 0) console.log(`[ks-bets] Capped ${yesCapRemoved} YES bet(s) (max ${MAX_YES_PER_PITCHER} per pitcher)`)
 
-  // ── Protection rules (A / C / D) ─────────────────────────────────────────────
-  // Rule C: Skip strike=3 markets (structurally mispriced by K-first models)
+  // ── Protection rules (A / D) ─────────────────────────────────────────────
   // Rule A: Ban NO bets where market_mid ≥ 65 AND model_prob ≤ 0.75
   //         Market is already pricing the event as likely; our NO edge is noise
   // Rule D: Ban YES bets where model_prob < 0.30 (not enough conviction)
+  // Rule C (strike=3 skip) removed — live data shows K≤3 bets have 47% ROI
   const guardedEdges = withFill.filter(e => {
-    if (e.strike === 3) return false
     if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob <= 0.75) return false
     if (e.side === 'YES' && e.model_prob < 0.30) return false
     return true
@@ -243,7 +273,7 @@ async function logEdges() {
           : {}
         const kb = await getKalshiBalance(creds)
         bankroll = kb.balance_usd
-        console.log(`[ks-bets] ${bettor.name} · Kalshi balance: $${bankroll.toFixed(2)}`)
+        console.log(`[ks-bets] ${bettor.name} · Kalshi portfolio: $${bankroll.toFixed(2)} (cash $${kb.cash_usd?.toFixed(2)} + exposure $${kb.exposure_usd?.toFixed(2)})`)
       } catch (err) {
         console.error(`[ks-bets] ${bettor.name} · Kalshi balance fetch failed: ${err.message} — skipping bets`)
         continue
@@ -271,6 +301,16 @@ async function logEdges() {
       console.log(`[ks-bets] ${bettor.name}: daily budget $${dailyBudget.toFixed(0)} already fully deployed ($${spentToday.toFixed(0)} out) — skipping`)
       continue
     }
+
+    // Count existing YES bets per pitcher today for this user — cap re-runs from stacking
+    const existingYesRows = await db.all(
+      `SELECT pitcher_name, COUNT(*) AS cnt FROM ks_bets
+         WHERE bet_date=? AND live_bet=0 AND side='YES' AND user_id=?
+         GROUP BY pitcher_name`,
+      [TODAY, bettor.id],
+    )
+    const existingYesCounts = {}
+    for (const r of existingYesRows) existingYesCounts[r.pitcher_name] = r.cnt
 
     // Size each bet proportionally, then enforce hard budget cap by taking
     // highest-edge bets first and stopping once the budget is spent.
@@ -305,6 +345,39 @@ async function logEdges() {
       : {}
 
     for (const e of sized) {
+      // Enforce per-pitcher YES cap accounting for bets already in DB from prior runs
+      if (e.side === 'YES') {
+        const alreadyYes = existingYesCounts[e.pitcher] || 0
+        if (alreadyYes >= MAX_YES_PER_PITCHER) {
+          console.log(`  [skip] ${e.pitcher} ${e.strike}+ YES — already have ${alreadyYes} YES bets (cap ${MAX_YES_PER_PITCHER})`)
+          continue
+        }
+        existingYesCounts[e.pitcher] = alreadyYes + 1  // reserve slot for this bet
+      }
+
+      // Skip pitchers whose game has already started per the games table
+      if (e.pitcher_id) {
+        const gameRow = await db.one(
+          `SELECT status FROM games WHERE date=? AND (pitcher_home_id=? OR pitcher_away_id=?)`,
+          [TODAY, String(e.pitcher_id), String(e.pitcher_id)],
+        )
+        if (gameRow && (gameRow.status === 'live' || gameRow.status === 'final')) {
+          console.log(`  [skip] ${e.pitcher} — game already live/final (${gameRow.status})`)
+          continue
+        }
+      }
+
+      // Fallback: skip if any settled bet exists for this pitcher today
+      const alreadySettled = await db.one(
+        `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND live_bet=0 AND result IS NOT NULL
+           AND (user_id=? OR (user_id IS NULL AND ? IS NULL))`,
+        [TODAY, e.pitcher, bettor.id, bettor.id],
+      )
+      if (alreadySettled) {
+        console.log(`  [skip] ${e.pitcher} — game already in progress (settled bet exists)`)
+        continue
+      }
+
       const existing = await db.one(
         `SELECT order_id FROM ks_bets
          WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0
@@ -343,7 +416,7 @@ async function logEdges() {
         raw_model_prob:  e.raw_model_prob  ?? null,
         capital_at_risk: Math.round(e._face * e._fill * 100) / 100,
         park_factor:     e.park_factor     ?? null,
-        weather_mult:    e.weather_note    ? (e.weather_mult ?? null) : null,
+        weather_mult:    e.weather_mult    ?? null,
         ump_factor:      e.ump_factor      ?? null,
         ump_name:        e.ump_name        ?? null,
         velo_adj:        e.velo_adj        ?? null,
@@ -352,7 +425,7 @@ async function logEdges() {
         raw_adj_factor:  e.raw_adj_factor  ?? null,
         spread:          e.spread          ?? null,
         live_bet:        0,
-      }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
+      }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])
       bettorLogged++
       logged++
 
@@ -360,20 +433,35 @@ async function logEdges() {
         try {
           const mid        = e.market_mid ?? 50
           const halfSpread = (e.spread ?? 4) / 2
-          const askCents   = e.side === 'YES'
+          let askCents     = e.side === 'YES'
             ? Math.min(99, Math.round(mid + halfSpread))
             : Math.min(99, Math.round(100 - mid + halfSpread))
           // Post 1¢ below ask = maker order (75% fee discount vs taker)
           // This rests on the book; liveMonitor cancels + takes market at T-45min if unfilled
           const makerCents = Math.max(1, askCents - 1)
-          const contracts  = Math.max(1, Math.round(e._face))
+          // Orderbook depth check — cap contracts at available liquidity
+          let contracts = Math.max(1, Math.round(e._face))
+          try {
+            const ob = await getOrderbook(e.ticker, 10, creds)
+            if (ob) {
+              // Use real best ask from orderbook instead of mid+halfSpread estimate
+              if (e.side === 'YES' && ob.best_yes_ask != null) askCents = ob.best_yes_ask
+              if (e.side === 'NO'  && ob.best_no_ask  != null) askCents = ob.best_no_ask
+              // For maker orders: cap at depth available at the ask (what we'd need if jumped)
+              const depth = availableDepth(ob, e.side.toLowerCase(), askCents)
+              if (depth > 0 && contracts > depth) {
+                console.log(`  [depth] ${e.pitcher} ${e.strike}+ ${e.side}: capping ${contracts}→${depth}c (only ${depth} available at ask)`)
+                contracts = depth
+              }
+            }
+          } catch { /* non-fatal — proceed with original sizing */ }
 
           const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, makerCents, creds)
           const order  = result?.order ?? result
 
           const orderId     = order?.order_id    ?? null
           const fillPrice   = order?.yes_price   ?? order?.no_price ?? makerCents
-          const filledConts = order?.count       ?? contracts
+          const filledConts = order?.filled_count ?? 0   // 0 until Kalshi confirms fills
           const placedAt    = order?.created_time ?? new Date().toISOString()
           const status      = order?.status      ?? 'resting'
 
@@ -433,6 +521,77 @@ async function logEdges() {
     const discordEdges = edgesJson.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
     await notifyEdges(discordEdges, TODAY, await getAllWebhooks(db))
   }
+}
+
+// ── CANCEL helpers ────────────────────────────────────────────────────────────
+
+async function cancelScratchedPitcherOrders(pitcherName, date, { reason = 'scratched', dryRun = false } = {}) {
+  // Find all resting morning orders for this pitcher
+  const rows = await db.all(
+    `SELECT id, user_id, ticker, order_id, order_status, filled_contracts
+       FROM ks_bets
+      WHERE bet_date = ? AND pitcher_name = ?
+        AND live_bet = 0 AND paper = 0
+        AND order_id IS NOT NULL
+        AND order_status IN ('resting', 'partial')
+        AND result IS NULL`,
+    [date, pitcherName],
+  )
+  if (!rows.length) {
+    console.log(`[cancel] ${pitcherName}: no resting orders found`)
+    return { pitcher: pitcherName, orders_found: 0, orders_cancelled: 0 }
+  }
+
+  // Group by user_id + ticker
+  const byUserTicker = new Map()
+  for (const r of rows) {
+    const key = `${r.user_id}|${r.ticker}`
+    if (!byUserTicker.has(key)) byUserTicker.set(key, { userId: r.user_id, ticker: r.ticker, ids: [] })
+    byUserTicker.get(key).ids.push(r.id)
+  }
+
+  // Load creds for affected users
+  const userIds = [...new Set(rows.map(r => r.user_id))]
+  const users = await db.all(
+    `SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE id IN (${userIds.map(() => '?').join(',')})`,
+    userIds,
+  )
+  const credsMap = new Map(users.map(u => [u.id, u.kalshi_key_id ? { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key } : {}]))
+
+  let totalCancelled = 0
+  const allIds = []
+  for (const { userId, ticker, ids } of byUserTicker.values()) {
+    const creds = credsMap.get(userId) ?? {}
+    console.log(`[cancel] ${pitcherName} (user ${userId}): ${dryRun ? '[DRY RUN] would cancel' : 'cancelling'} ${ids.length} orders on ${ticker}`)
+    if (!dryRun) {
+      try {
+        const result = await cancelAllOrders({ ticker, status: 'resting' }, creds)
+        totalCancelled += result.cancelled_count
+        allIds.push(...ids)
+      } catch (err) {
+        console.error(`[cancel] cancelAllOrders failed for ${ticker}: ${err.message}`)
+      }
+    }
+  }
+
+  if (!dryRun && allIds.length) {
+    // Partial fills: leave result=NULL so settleBets handles the filled portion
+    // Full resting: mark void
+    for (const id of allIds) {
+      const row = rows.find(r => r.id === id)
+      if (row?.filled_contracts > 0) {
+        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [id])
+      } else {
+        await db.run(
+          `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=? WHERE id=?`,
+          [new Date().toISOString(), id],
+        )
+      }
+    }
+    console.log(`[cancel] ${pitcherName}: cancelled ${totalCancelled} orders, marked ${allIds.length} DB rows`)
+  }
+
+  return { pitcher: pitcherName, orders_found: rows.length, orders_cancelled: totalCancelled }
 }
 
 // ── SETTLE mode: look up actual Ks and mark results ──────────────────────────
@@ -517,7 +676,7 @@ async function settleBets() {
   const kalshiSettlements = new Map()
   for (const [userId, creds] of userCreds) {
     try {
-      const settlements = await getSettlements({ limit: 200 }, creds)
+      const { settlements } = await getSettlements({ limit: 200 }, creds)
       const byTicker = new Map(settlements.map(s => [s.ticker, s]))
       kalshiSettlements.set(userId, byTicker)
       console.log(`[ks-bets] Loaded ${settlements.length} Kalshi settlements for user ${userId}`)
@@ -581,23 +740,25 @@ async function settleBets() {
 
     const won = bet.side === 'YES' ? hit : !hit
 
-    // P&L: use Kalshi's actual settlement figure when available (includes real fill + fees)
-    // Fall back to math using entry mid price
+    // P&L: use Kalshi's actual settlement revenue minus our cost basis (most accurate).
+    // Kalshi revenue = gross payout (contracts × $1 for wins, $0 for losses).
+    // profit_loss is always 0 in their API — use revenue instead.
     let pnl
     const userSettlements = kalshiSettlements.get(bet.user_id)
     const kalshiRecord    = bet.ticker ? userSettlements?.get(bet.ticker) : null
-    if (kalshiRecord?.profit_loss != null) {
-      pnl = kalshiRecord.profit_loss / 100  // Kalshi returns cents
-      console.log(`  [kalshi-pnl] ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: $${pnl.toFixed(2)} (from Kalshi)`)
+    const contracts       = bet.filled_contracts != null ? bet.filled_contracts : Math.round(bet.bet_size)
+    const fillPrice       = bet.fill_price ?? bet.market_mid ?? 50  // cents
+    if (kalshiRecord?.revenue != null) {
+      const revenue   = kalshiRecord.revenue / 100               // dollars
+      const costBasis = contracts * (fillPrice / 100)            // dollars
+      pnl = revenue - costBasis
+      console.log(`  [kalshi-pnl] ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: revenue=$${revenue.toFixed(2)} cost=$${costBasis.toFixed(2)} pnl=$${pnl.toFixed(2)}`)
     } else {
-      const spread     = bet.spread ?? 4
-      const halfSpread = spread / 2 / 100
-      const mid        = bet.market_mid != null ? bet.market_mid / 100 : (bet.model_prob ?? 0.5)
-      const fillFraction = bet.side === 'YES' ? mid + halfSpread : (1 - mid) + halfSpread
-      const KALSHI_FEE = 0.07
+      const fillFraction = fillPrice / 100
+      const KALSHI_FEE   = 0.07
       pnl = won
-        ? bet.bet_size * (1 - fillFraction) * (1 - KALSHI_FEE * fillFraction)
-        : -bet.bet_size * fillFraction
+        ? contracts * (1 - fillFraction) * (1 - KALSHI_FEE * fillFraction)
+        : -contracts * fillFraction
     }
 
     await db.run(
@@ -723,6 +884,76 @@ async function report() {
   }
 }
 
+// ── CANCEL-SCRATCHED mode ─────────────────────────────────────────────────────
+
+async function runCancelScratched() {
+  const dryRun = opts.dryRun ?? false
+  console.log(`[cancel-scratched] Checking for scratched pitchers on ${TODAY}${dryRun ? ' (DRY RUN)' : ''}`)
+
+  // Get pitchers we bet on today
+  const betPitchers = await db.all(
+    `SELECT DISTINCT pitcher_name, pitcher_id FROM ks_bets
+      WHERE bet_date=? AND live_bet=0 AND paper=0
+        AND order_status IN ('resting','partial') AND result IS NULL`,
+    [TODAY],
+  )
+  if (!betPitchers.length) {
+    console.log('[cancel-scratched] No open resting orders today')
+    return
+  }
+
+  // Check current MLB probable pitchers
+  const schedRes = await axios.get(`${MLB_BASE}/schedule`, {
+    params: { sportId: 1, date: TODAY, hydrate: 'probablePitcher', language: 'en' },
+  }).catch(() => null)
+  const games = schedRes?.data?.dates?.[0]?.games || []
+
+  const currentPitcherIds = new Set()
+  for (const g of games) {
+    const hp = g.teams?.home?.probablePitcher?.id
+    const ap = g.teams?.away?.probablePitcher?.id
+    if (hp) currentPitcherIds.add(String(hp))
+    if (ap) currentPitcherIds.add(String(ap))
+  }
+
+  let anyCancelled = false
+  for (const { pitcher_name, pitcher_id } of betPitchers) {
+    if (!pitcher_id || currentPitcherIds.has(String(pitcher_id))) continue
+    console.log(`[cancel-scratched] ${pitcher_name} (${pitcher_id}) no longer probable — cancelling`)
+    const summary = await cancelScratchedPitcherOrders(pitcher_name, TODAY, { dryRun })
+    if (summary.orders_cancelled > 0) anyCancelled = true
+  }
+
+  if (anyCancelled) {
+    const webhooks = await getAllWebhooks(db)
+    await notifyEdges([{ text: `⚠️ Pitcher scratched — resting orders cancelled` }], webhooks).catch(() => {})
+  }
+  if (!anyCancelled && !dryRun) console.log('[cancel-scratched] No scratched pitchers found')
+}
+
+// ── CANCEL-ALL mode ───────────────────────────────────────────────────────────
+
+async function runCancelAll() {
+  console.log(`[cancel-all] Cancelling ALL resting orders for ${TODAY}`)
+  const users = await db.all(
+    `SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor=1 AND kalshi_key_id IS NOT NULL AND id != 1`,
+  )
+  for (const u of users) {
+    const creds = { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key }
+    const result = await cancelAllOrders({ status: 'resting' }, creds).catch(err => {
+      console.error(`[cancel-all] ${u.name}: ${err.message}`)
+      return { cancelled_count: 0 }
+    })
+    console.log(`[cancel-all] ${u.name}: cancelled ${result.cancelled_count} orders`)
+  }
+  await db.run(
+    `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=?
+      WHERE bet_date=? AND order_status IN ('resting','partial') AND result IS NULL AND paper=0`,
+    [new Date().toISOString(), TODAY],
+  )
+  console.log('[cancel-all] Done')
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -732,8 +963,10 @@ async function main() {
   if (MODE === 'log')    await logEdges()
   else if (MODE === 'settle') await settleBets()
   else if (MODE === 'report') await report()
+  else if (MODE === 'cancel-scratched') { await runCancelScratched(); return db.close() }
+  else if (MODE === 'cancel-all')       { await runCancelAll();       return db.close() }
   else {
-    console.error(`Unknown mode: ${MODE}. Use log | settle | report`)
+    console.error(`Unknown mode: ${MODE}. Use log | settle | report | cancel-scratched | cancel-all`)
     process.exit(1)
   }
 
