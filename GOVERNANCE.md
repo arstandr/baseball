@@ -1,5 +1,7 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
+**Last updated: 2026-04-23**
+
 ## System Overview
 
 MLBIE (MLB Innings/Batters Edge) is a quantitative edge-finding system for
@@ -8,8 +10,16 @@ expected strikeout count (λ) using a multi-source blended model, compares that
 to Kalshi YES/NO prices, and sizes bets using a correlated quarter-Kelly
 criterion.
 
-The system is used daily during the MLB season. Edge output feeds into
-`scripts/live/ksBets.js` which handles order submission.
+Two betting pipelines share one `ks_bets` database table:
+
+| Pipeline | Script | Trigger | Mode |
+|----------|--------|---------|------|
+| **Morning picks** | `scripts/live/ksBets.js` | ~9am + ~12:30pm refresh | Pre-game |
+| **The Closer** | `scripts/live/liveMonitor.js` | Continuous during games (Windows machine) | In-game |
+
+Edge generation for morning picks flows through `scripts/live/strikeoutEdge.js`.
+The Closer uses a live model (`computeLiveModel`) that re-computes λ_remaining
+using real-time pitch count, innings pitched, and batters faced.
 
 ---
 
@@ -97,15 +107,28 @@ Weather fetched concurrently at startup via `lib/weather.js` (OpenWeather
 #### ump_factor — HP Umpire Tendencies
 
 Source: `lib/umpireFactors.js`. Multipliers from Umpire Scorecards /
-Baseball Savant umpire data (2021-2025, min 300 games). Covers ~30 known
-expanded-zone umps and ~20 tight-zone umps.
+Baseball Savant umpire data (2023-2026, min 200 games).
 
-Expanded-zone example: Angel Hernandez (1.08), Ted Barrett (1.06).
-Tight-zone example: CB Bucknor (0.96), Jerry Meals (0.96).
+**Updated 2026-04-23:** 13 retired/suspended/deceased umps removed:
+Angel Hernandez (retired Jul 2023), Joe West (retired Nov 2021),
+Dana DeMuth (retired 2018), Tom Hallion (retired 2017),
+John Hirschbeck (retired 2017), Jerry Meals (retired 2020),
+Eric Cooper (died 2015), Bill Miller (retired 2022),
+Paul Emmel (retired 2022), Mike Everitt (retired 2021),
+Gerry Davis (retired 2018), Pat Hoberg (suspended 2024),
+Bruce Dreckman (retired 2022).
+
+**Magnitude cap: ±0.05.** Prior table had values up to ±0.08 which
+over-adjusted and produced negative ROI on expanded-zone bets in live trading.
+
+Expanded-zone example: Ted Barrett (1.05), Dan Iassogna (1.04).
+Tight-zone example: Clint Fagan (0.95), CB Bucknor (0.97).
 
 HP ump fetched via `scripts/live/fetchUmpire.js` → MLB Stats API
 `/schedule?gamePk=X&hydrate=officials`. All game umps fetched concurrently at
 startup. Unknown umps default to 1.00.
+
+**Review ump table annually before Opening Day.**
 
 #### velo_adj — Velocity Trend Signal
 
@@ -127,8 +150,7 @@ Batting order positions weight by expected plate appearances in a typical
 5-6 IP start. Weights [1.0, 0.97, 0.95, 0.93, 0.92, 0.91, 0.88, 0.86, 0.84]
 for positions 1-9, re-normalized to sum to 1. A leadoff hitter facing an
 ace starter gets roughly 3 PAs; the cleanup hitter in position 4 gets ~2.8;
-the #9 hitter may only see 2.5 PAs. This is especially impactful for
-early-exit pitchers where the bottom of the order may not bat a third time.
+the #9 hitter may only see 2.5 PAs.
 
 #### NB(λ, r=30) Distribution
 
@@ -139,8 +161,14 @@ variance/Poisson_variance ≈ 1.17, implying dispersion parameter
 r = mean_λ / (variance_ratio - 1) ≈ 30.
 
 At r=30, the NB is nearly Poisson for low λ but meaningfully wider-tailed
-for high λ, which is appropriate since upside outcomes (8+ Ks) are
+for high λ. This is appropriate since upside outcomes (8+ Ks) are
 systematically underpriced in Poisson-based models.
+
+**No shrinkage applied to upper-tail probabilities.** A shrinkage block
+(×0.93-0.97 for K≥7-9) was removed 2026-04-23 after live data showed the
+model *under*-predicts the upper tail: K≥7+ bets won at 44-45% when the
+raw model predicted 30-40%. The shrinkage was making predictions worse.
+Use raw `pAtLeast(lambda, n)` output directly.
 
 Re-run calibration yearly: `backtest.js` produces calibration plots.
 
@@ -159,76 +187,98 @@ Re-run calibration yearly: `backtest.js` produces calibration plots.
 
 ---
 
-## The 8 Improvements
+## Live Performance — Apr 2026
 
-### 1. Park Factors (`lib/parkFactors.js`)
-**What**: K-rate multiplier by home team, applied to λ.  
-**Why**: Park environment has a material effect on pitcher K-rate independent
-of the pitcher and opponent. Coors Field thin air measurably reduces pitch
-break (0.92×), while Petco Park's heavy marine air adds ~6% K-rate (1.06×).
-Ignoring park in a K-prop model means systematically overpricing K-heavy
-pitchers at Coors and underpricing at Petco.
+### Morning bets (live, real Kalshi money — both accounts)
 
-### 2. Correlated Kelly Fix (`lib/kelly.js` — `correlatedKellyDivide`)
-**What**: When a pitcher has edges at 5+, 6+, 7+ Ks simultaneously, treat all
-bets as one correlated unit (total exposure = max single-threshold Kelly).  
-**Why**: These bets have near-perfect positive correlation — if the pitcher
-throws 8K, every YES bet below 8 wins. Sizing each at full Kelly would 3-4×
-the actual capital exposure for a single pitcher outcome. The correlated fix
-caps total exposure at max single-threshold Kelly and divides proportionally.
+| Date | Bets | Capital at Risk | P&L | Win Rate |
+|------|------|-----------------|-----|----------|
+| Apr 22 | 47 | $707 | -$174 | 43% |
+| Apr 23 | 28 | $542 | +$114 | 54% |
 
-### 3. Spread-Adjusted Edge Threshold
-**What**: `edge > spread/2 + MIN_EDGE_FLOOR (4¢)` instead of flat 5¢.  
-**Why**: A 10¢ spread market has a 5¢ half-spread "no man's land" around the
-mid. A model edge of 5¢ in that market is entirely within the vig band — you
-can't reliably execute at the mid. The new formula requires clearance above
-the half-spread, so we only flag genuine directional edges.
+### In-game bets — The Closer (paper simulation through Apr 23)
 
-### 4. Weather Adjustment
-**What**: Wind, temperature, and humidity multipliers applied to λ for outdoor
-parks.  
-**Why**: Cold temperatures reduce spin rate (less break on sliders/curves →
-fewer Ks). Strong winds disrupt pitch location. High humidity is slightly
-favorable for whiff. Real effect sizes are small (2-4%) but systematic. Domes
-are correctly excluded since environment is constant.
+Simulation uses unique positions only (duplicates from the logging bug excluded).
+2× sizing applied to all edge ≥ 15¢ bets per the live rule.
 
-### 5. Umpire K% Adjustment (`lib/umpireFactors.js`)
-**What**: HP umpire K-rate multiplier applied to λ. Fetched live from MLB Stats
-API at startup.  
-**Why**: Umpire zone tendencies are among the most predictable game-day
-factors. Angel Hernandez calling balls that are strikes inflates K% by 8% vs
-league. CB Bucknor's tight zone suppresses K% by 4%. These are consistent,
-empirically documented tendencies that the market often doesn't fully price in.
+| Date | Unique Bets | Simulated P&L | Win Rate | Notes |
+|------|-------------|---------------|----------|-------|
+| Apr 21 | 185 | +$4,980 | 61% | Best day: Jacob Lopez 1K, Simeon Woods Richardson 2K |
+| Apr 22 | 7 | -$149 | — | Small slate; Tyler Mahle 5NO cost $130 |
+| Apr 23 | 43 | -$58 | — | Joe Ryan only 2Ks; deGrom open bets unsettled |
 
-### 6. Batting Order Position Weighting
-**What**: Lineup K% weighted by expected plate appearances per batting order
-position, rather than equal-weight average.  
-**Why**: A pitcher facing a lineup where the top 3 (who get the most PAs) are
-high-K batters is meaningfully more dangerous than one where only the 8-9
-slots are high-K. The old equal-weight average treats the leadoff hitter
-identically to the #9 hitter, which misprices the opportunity by ~2-4%.
+**Key findings from in-game simulation:**
+- **Best segment: NO at high market_mid (70-90¢)** — 109% ROI. Market over-prices favorites; cheap NOs with huge upside.
+- **2× sizing on edge ≥ 15¢ bets added +$1,909** vs flat-size across 100 bets.
+- **In-game win rate (61%) beats morning (43-54%)** because The Closer only fires at ≥75% model_prob YES or ≤15% model_prob NO with ≥15-20¢ edge.
 
-### 7. Velocity Trend Signal
-**What**: Compare current-season fb_velo to career average (2023-2025). Apply
-1.03× boost for velo up >1 mph; 0.96× penalty for down >1.5 mph.  
-**Why**: Velocity is the leading indicator of stuff. When a pitcher gains
-velocity, swing-and-miss tends to follow weeks later. When velo is down
-significantly, the pitcher's off-speed pitches move differently and hitters
-make more contact. This is an early-warning signal the K% blend may be stale.
+---
 
-### 8. This Governance Document
-**What**: Full documentation of the model, every component, calibration, and
-risk management.  
-**Why**: As the model grows in complexity, a written spec prevents
-model drift — the risk that a future edit changes a component without
-understanding its interaction with other components. Also useful for
-explaining bets post-hoc.
+## The Closer — In-Game System
+
+### Overview
+
+`scripts/live/liveMonitor.js` runs continuously on a dedicated Windows machine
+during MLB games. Every 20 seconds it:
+1. Fetches live box score (MLB API) for each game with active K-prop bets
+2. Updates a live model (`computeLiveModel`) using current K count, IP, pitches, BF
+3. Computes updated P(K≥n) for all remaining thresholds
+4. Compares against current Kalshi prices — fires only on high-conviction edges
+5. Manages resting orders (queue position, amend, cancel+retake)
+6. Settles bets at game-end using Kalshi's actual revenue data
+
+### Entry Filters (both must pass)
+
+| Side | Model Prob | Edge Floor | Notes |
+|------|-----------|------------|-------|
+| YES | ≥ 75% | ≥ 20¢ (or halfSpread + 4¢) | High-conviction only |
+| NO | ≤ 15% | ≥ 15¢ (or halfSpread + 4¢) | Pitcher must be clearly under-performing |
+
+Additional guards: min 6 BF faced, min 3rd inning, skip pitchers already pulled.
+
+### Sizing
+
+Correlated Kelly across all qualifying thresholds per pitcher (same as morning).
+**High-edge multiplier: 2× bet size when edge ≥ 15¢** (validated +$1,909 on
+100 bets in Apr 21-23 simulation). Budget cap: 20% of live Kalshi balance per
+session.
+
+### Order Execution — Maker First
+
+1. **Initial placement:** Maker at `ask - 1¢` (fetch real ask from orderbook;
+   fall back to `mid + 2¢` if unavailable). 75% fee discount vs taker.
+2. **Queue management** (when pitcher hits 85+ pitches AND 4+ IP):
+   - Queue ≤ 10: leave it
+   - Queue ≤ 30: amend to `ask - 1¢` (improve position without losing slot)
+   - Queue > 30: cancel + taker at `ask + 1¢`
+3. **Pre-game resting orders** (morning bets, T-45 min before first pitch):
+   - If filled: done
+   - If unfilled: cancel + taker at `ask + 1¢` if edge still holds
+
+### Settlement
+
+- **YES wins:** Settled immediately when `actual_ks >= strike` (covered)
+- **YES losses:** Settled when starter is pulled with `actual_ks < strike` and `IP ≥ 3`
+- **NO bets (both wins and losses):** Settled at game-end only via
+  `settleAndNotifyGame()` using Kalshi's actual settlement revenue.
+  **No mid-game early settlement for NO bets** — box scores can briefly lag
+  and an early loss lock is permanent and irreversible.
+
+### Duplicate Prevention
+
+The Closer uses a two-layer dedup:
+1. **Application-level:** `executeBet` queries for an existing row before
+   inserting. Returns immediately if found.
+2. **DB-level:** `upsert('ks_bets', ..., ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet'])`
+   conflict keys match the actual `UNIQUE` constraint. **Do not add `user_id`
+   to the conflict key list** — the table's UNIQUE constraint does not include
+   it, and SQLite would silently insert duplicates if the keys don't match.
 
 ---
 
 ## Kelly Sizing Rationale
 
-**Quarter-Kelly (KELLY_MULT = 0.25)**  
+**Quarter-Kelly (KELLY_MULT = 0.25)**
 Full Kelly maximizes long-run growth but produces drawdowns that are
 psychologically unsustainable and practically dangerous when model estimates
 have error. Quarter-Kelly gives ~56% of the geometric growth rate at roughly
@@ -245,25 +295,43 @@ the formula legitimately suggests large fractions.
 
 ---
 
+## Budget Structure (as of 2026-04-23)
+
+| Pipeline | Daily Budget | Notes |
+|----------|-------------|-------|
+| Morning picks | 15% of live Kalshi balance | Fetched at run time from Kalshi API |
+| Afternoon refresh (same script) | Remaining morning budget only | Re-run of ksBets.js uses already-spent subtraction |
+| The Closer (in-game) | 20% of live Kalshi balance | Separate cap tracked via `capital_at_risk` sum |
+
+**Total daily max risk: ~35% of balance per account.**
+
+At current balances: Adam $1,350 → $473/day max, Isaiah $1,547 → $542/day max.
+
+The morning script already subtracts capital deployed in the current day before
+sizing new bets, so running it twice (9am + 12:30pm) cannot stack beyond the
+daily cap.
+
+---
+
 ## Risk Management
 
-### Protection Rules (implemented Apr 23, 2026 — Opus analysis)
+### Protection Rules (current as of 2026-04-23)
 
-Five rules derived from backtesting the Apr 22 -$641 loss. Implemented in
-`scripts/live/ksBets.js` (Rules A/B/C/D) and `scripts/live/liveMonitor.js`
-(Rule E). Simulation: Apr 22 -$641 → +$5.58 under all 5 rules.
+| Rule | Description | Location | Status |
+|------|-------------|----------|--------|
+| **A** | Ban NO bets where `market_mid ≥ 65 AND model_prob ≤ 0.75` — market already prices the event as likely | `ksBets.js` | **Active** |
+| **B** | ~~Per-pitcher CAR cap at 2%~~ | removed | **Removed** — cuts too much upside |
+| **C** | ~~Skip `strike=3` markets~~ | removed | **Removed 2026-04-23** — live data shows K≤3 bets at 47% ROI, rule was costing money |
+| **D** | Require YES `model_prob ≥ 0.30` | `ksBets.js` | **Active** |
+| **E** | Auto-halt live trading after **-15% daily drawdown** | `liveMonitor.js` | **Active** |
 
-| Rule | Description | Location |
-|------|-------------|----------|
-| **A** | Ban NO bets where `market_mid ≥ 65 AND model_prob ≤ 0.75` — market already prices the event as likely | `ksBets.js` filter |
-| **B** | ~~Per-pitcher CAR cap at 2%~~ — **REMOVED Apr 23**. Cuts too much upside (+$879 → $229 on Apr 20). Rules A/C/D/E carry the protection load. | removed |
-| **C** | Skip `strike=3` markets — structurally mispriced by K-first models | `ksBets.js` filter |
-| **D** | Require YES `model_prob ≥ 0.30` — 0.25 was too loose, 0-for-14 at model_prob < 0.25 historically | `ksBets.js` filter |
-| **E** | Auto-halt live trading after **-15% daily drawdown** (net across all bets) | `liveMonitor.js` main loop |
-
-Rule B trade-off: at 2% it significantly limits upside on winning days (+$3,681 → +$1,479 on Apr 21). Consider raising to 5% if Rules A/C/D alone provide adequate protection after 50+ bets of sample.
+**Rule C removal rationale:** The rule assumed K=3 markets are "structurally mispriced
+by K-first models." Analysis of 3 days of live bets showed K≤3 positions had
+47% ROI — more profitable than the overall average. Rule removed from both
+`ksBets.js` and confirmed absent from `liveMonitor.js`.
 
 ### Daily Loss Limit
+
 Automated — `DAILY_LOSS_LIMIT` env var (default $500). Tracked in `_dailyLoss`
 variable in `liveMonitor.js`. Live trading stops immediately when hit.
 
@@ -271,26 +339,29 @@ Rule E extends this: -15% net drawdown halt also stops new bets. Whichever
 triggers first wins.
 
 ### Correlated Kelly (Pitcher-Level Cap)
+
 When multiple K-prop thresholds have edge for the same pitcher, total
 exposure = max single-threshold Kelly. Implementation in
 `correlatedKellyDivide()` in `lib/kelly.js`. This prevents 3-4× over-exposure
 to one pitcher outcome.
 
 ### Spread Test Gate
+
 Markets with wide spreads (typically thin liquidity) require larger raw edges
 to qualify. Formula: `edge > spread/2 + 4¢`. A 12¢ spread market requires a
 10¢ raw edge to qualify; a 4¢ spread market requires only a 6¢ raw edge.
 
 ### Lock Detection
+
 Markets where `yes_ask >= 99¢` or `yes_bid <= 1¢` with `yes_ask <= 2¢` are
 treated as resolved/locked and skipped. These are in-game markets that have
 already settled.
 
 ### Leash Flag
+
 When a pitcher's recent average pitch count < 85, they are flagged `⚠leash`.
-These bets should be sized more conservatively (consider halving bet_size
-manually) since the E[BF] estimate may be high if the team is actively
-managing their starter's workload.
+These bets should be sized more conservatively since the E[BF] estimate may be
+high if the team is actively managing their starter's workload.
 
 ---
 
@@ -307,97 +378,157 @@ import from there; no duplication allowed.
 | `lib/analytics.js` | `computeModeSummary`, `computeCalibration`, `computeBankrollRollup`, `runningBankroll` |
 | `lib/mlb-live.js` | `mlbFetch` (25s TTL cache), `extractStarterFromBoxscore` |
 | `lib/db.js` | Turso/libSQL client |
-| `lib/kalshi.js` | `getAuthHeaders`, `toKalshiAbbr` |
-| `lib/kelly.js` | `correlatedKellyDivide` |
+| `lib/kalshi.js` | Full Kalshi REST + WS client: `getAuthHeaders`, `placeOrder`, `getOrderbook`, `amendOrder`, `cancelAllOrders`, `getSettlements` etc. |
+| `lib/kelly.js` | `kellySizing`, `correlatedKellyDivide`, `capitalAtRisk` |
 | `lib/parkFactors.js` | Park K-rate multipliers |
-| `lib/umpireFactors.js` | HP umpire K% multipliers |
+| `lib/umpireFactors.js` | HP umpire K% multipliers (updated 2026-04-23) |
 | `lib/weather.js` | Game-day weather multipliers |
-
-`server/api.js` was slimmed from ~1,933 → ~1,735 lines by removing the six
-local definitions now provided by the lib modules.
+| `lib/kalshiWs.js` | WebSocket fill stream daemon |
+| `lib/wsFillApplier.js` | WS event → DB update |
+| `lib/sseBus.js` | Server-Sent Events bus for dashboard real-time updates |
 
 ---
 
-## Live Calibration — Apr 20, 2026 (73 bets settled)
+## Known Bugs Fixed — 2026-04-23
 
-First real-money day with the full system. Summary of findings:
+Seven bugs identified and fixed from analysis of all historical transactions:
 
-| Segment | W/L | WR | P&L |
-|---------|-----|----|-----|
-| All bets | 37/36 | 51% | +$879 |
-| Medium confidence only | 29/23 | 56% | +$900 |
-| Edge ≥ 0.15 | 15/5 | 75% | +$782 |
-| Edge ≥ 0.10 | 21/12 | 64% | +$904 |
-| NO side | 19/7 | 73% | +$606 |
-| YES side | 18/29 | 38% | +$274 |
-| Edge 0.05–0.10 | 16/24 | 40% | -$24 |
+1. **Shrinkage removed** — `strikeoutEdge.js` was discounting raw model probability
+   by 7% at K≥7, 5% at K≥8, 3% at K≥9. Live data showed the opposite: the model
+   under-predicts the upper tail. Removed; raw `pAtLeast()` used directly.
 
-**Key findings from first 73 bets:**
+2. **Rule C removed** — K=3 markets had 47% ROI in live data. Skipping them was
+   costing money. Filter removed from `ksBets.js`.
 
-1. **YES bets at low model_prob are the drag** — YES bets with model_prob
-   10–20% went 0-for-9 (0% actual). The model is overestimating low-end
-   YES probability, likely because the Kalshi market already prices very-low-K
-   outcomes efficiently and the spread/vig absorbs our edge.
+3. **Duplicate logging (upsert conflict key mismatch)** — `db.upsert()` was called
+   with conflict keys `['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id']`
+   but the table's UNIQUE constraint is on the first 5 columns only (no `user_id`).
+   SQLite requires conflict keys to exactly match an existing constraint — if they
+   don't match, it inserts a fresh row on every call. This produced 33× duplicate
+   rows for deGrom K≥8 YES on Apr 23. Fixed: `user_id` removed from conflict keys
+   in both `ksBets.js` and `liveMonitor.js`.
 
-2. **Edge ≥ 0.15 is the sweet spot** — 75% WR, $782 P&L from only 20 bets.
-   The 0.05–0.10 bucket is consistently unprofitable; these bets sit inside
-   or near the half-spread vig band.
+4. **NO bet mid-game lock** — `liveMonitor.js` was settling NO bets as losses the
+   moment `currentKs >= bet.strike` mid-game. Box scores can briefly lag or correct,
+   and this lock was permanent (no reverse path). Removed; NO bets now settle only
+   at game-end via `settleAndNotifyGame()` using Kalshi's actual revenue data.
 
-3. **NO side significantly outperforms YES** — 73% vs 38%. The model
-   systematically underestimates when K totals fall short of threshold, meaning
-   NO edges are more reliable than YES edges at the same raw edge size.
+5. **filled_contracts falsy-zero** — `bet.filled_contracts ?? fallback` treated
+   `filled_contracts = 0` as falsy and used the wrong fallback for P&L math.
+   Fixed to `bet.filled_contracts != null ? bet.filled_contracts : fallback`.
+   Applied in `ksBets.js`, `liveMonitor.js` (cover and dead settlement blocks,
+   and `settleAndNotifyGame`).
 
-4. **Low-confidence bets hurt ROI** — dropping low-confidence to medium-only
-   eliminates 21 bets with 38% WR. Given the small sample, this directional
-   signal is worth watching.
+6. **2× sizing for edge ≥ 15¢ in-game bets** — Historical simulation showed
+   +$1,909 gain across 100 bets (Apr 21-23) by doubling position when edge ≥ 15¢.
+   Implemented in `liveMonitor.js executeBet` as `edgeMult = q.edge >= 0.15 ? 2 : 1`.
 
-5. **Brier score 0.281** (73 predictions) — higher than the 0.183 OOS target,
-   but small-sample variance is large. Revisit after 500+ bets.
+7. **Umpire table stale** — 13 retired/suspended/deceased umps removed. Magnitude
+   cap reduced to ±0.05 (was ±0.08, causing negative ROI on expanded-zone bets).
 
-**Recommended adjustments (provisional — n=73):**
-- Raise minimum edge from `0.05` to `0.10` in `strikeoutEdge.js`
-- Consider separate YES/NO edge floors: YES requires ≥ 0.15, NO requires ≥ 0.10
-- Do not auto-bet YES when model_prob < 0.25 (0-for-14 at these prob levels)
-- Medium-confidence gate is already implemented; confirm it's being applied consistently
+---
+
+## The 8 Improvements
+
+### 1. Park Factors (`lib/parkFactors.js`)
+**What**: K-rate multiplier by home team, applied to λ.
+**Why**: Park environment has a material effect on pitcher K-rate independent
+of the pitcher and opponent. Coors Field thin air measurably reduces pitch
+break (0.92×), while Petco Park's heavy marine air adds ~6% K-rate (1.06×).
+Ignoring park in a K-prop model means systematically overpricing K-heavy
+pitchers at Coors and underpricing at Petco.
+
+### 2. Correlated Kelly Fix (`lib/kelly.js` — `correlatedKellyDivide`)
+**What**: When a pitcher has edges at 5+, 6+, 7+ Ks simultaneously, treat all
+bets as one correlated unit (total exposure = max single-threshold Kelly).
+**Why**: These bets have near-perfect positive correlation — if the pitcher
+throws 8K, every YES bet below 8 wins. Sizing each at full Kelly would 3-4×
+the actual capital exposure for a single pitcher outcome. The correlated fix
+caps total exposure at max single-threshold Kelly and divides proportionally.
+
+### 3. Spread-Adjusted Edge Threshold
+**What**: `edge > spread/2 + MIN_EDGE_FLOOR (4¢)` instead of flat 5¢.
+**Why**: A 10¢ spread market has a 5¢ half-spread "no man's land" around the
+mid. A model edge of 5¢ in that market is entirely within the vig band. The
+new formula requires clearance above the half-spread, so we only flag genuine
+directional edges.
+
+### 4. Weather Adjustment
+**What**: Wind, temperature, and humidity multipliers applied to λ for outdoor
+parks.
+**Why**: Cold temperatures reduce spin rate (less break on sliders/curves →
+fewer Ks). Strong winds disrupt pitch location. High humidity is slightly
+favorable for whiff. Real effect sizes are small (2-4%) but systematic.
+
+### 5. Umpire K% Adjustment (`lib/umpireFactors.js`)
+**What**: HP umpire K-rate multiplier applied to λ. Fetched live from MLB Stats
+API at startup.
+**Why**: Umpire zone tendencies are among the most predictable game-day
+factors. Consistent, empirically documented tendencies that the market often
+doesn't fully price in.
+
+### 6. Batting Order Position Weighting
+**What**: Lineup K% weighted by expected plate appearances per batting order
+position, rather than equal-weight average.
+**Why**: A pitcher facing a lineup where the top 3 (who get the most PAs) are
+high-K batters is meaningfully more dangerous than one where only the 8-9
+slots are high-K.
+
+### 7. Velocity Trend Signal
+**What**: Compare current-season fb_velo to career average (2023-2025). Apply
+1.03× boost for velo up >1 mph; 0.96× penalty for down >1.5 mph.
+**Why**: Velocity is the leading indicator of stuff. When a pitcher gains
+velocity, swing-and-miss tends to follow weeks later.
+
+### 8. In-Game Live Model (The Closer)
+**What**: Re-computes λ_remaining every 20 seconds using actual game state
+(current Ks, IP, pitches thrown, BF). Only bets at ≥75% model_prob YES or
+≤15% model_prob NO with ≥15-20¢ edge.
+**Why**: Kalshi's in-game prices update slowly relative to actual game state.
+A pitcher with 6 Ks through 4 innings will have K≥8 YES mis-priced for
+several minutes while our live model already shows 80%+ probability. This
+is the highest-ROI segment of the entire system.
 
 ---
 
 ## Improvement Roadmap
 
-### Near-Term (Next Season)
+### Near-Term
+- **Kelly sizing for morning bets**: currently uses edge-proportional budget
+  allocation. Should call `correlatedKellyDivide()` per-pitcher group instead
+  of flat proportional split. In-game already uses proper Kelly.
+- **lineup_source flag**: add `lineup_source` column to `ks_bets` to track
+  whether each bet used posted lineups vs historical fallback. Needed to
+  separate performance by lineup quality.
 - **Platoon adjustment within lineup**: current implementation averages K% for
   the pitcher's hand; a deeper model would track which batters will actually
-  face the pitcher in the first 2-3 times through the order
+  face the pitcher in the first 2-3 times through the order.
 - **Starter vs bullpen usage model**: some teams increasingly use starters as
-  "bulk" 4-inning openers; a pitch-count survival model would give better E[BF]
-- **Home/Away split for pitcher**: some pitchers have material home/away K%
-  differences independent of park factors (comfort, travel fatigue)
-- **Days of rest adjustment**: pitchers on normal rest (4-5 days) vs short rest
-  vs extended rest have documented performance differences
+  "bulk" 4-inning openers; a pitch-count survival model would give better E[BF].
 
 ### Medium-Term
 - **Calibration refresh**: re-run r parameter calibration annually with newest
-  season data; r=30 was calibrated on 2023-2025
+  season data; r=30 was calibrated on 2023-2025.
 - **Umpire table refresh**: update `lib/umpireFactors.js` with new umps and
-  refresh existing factors with 2025+ data
-- **Live in-game updates**: `inGameEdge.js` already exists; integrate the full
-  λ model with live pitch count updates
+  refresh existing factors with 2025+ data annually before Opening Day.
+- **Home/Away split for pitcher**: some pitchers have material home/away K%
+  differences independent of park factors (comfort, travel fatigue).
+- **Days of rest adjustment**: pitchers on normal rest (4-5 days) vs short rest
+  vs extended rest have documented performance differences.
 
 ### Long-Term
 - **Opposing lineup vs pitcher history**: some batters have strong individual
-  matchup K% vs specific pitchers independent of platoon split
-- **Weather sub-conditions**: precipitation probability as a K-rate suppressor
-  (pitchers lose grip in drizzle regardless of temperature)
-- **Market microstructure model**: instead of mid-price, model the true
-  execution price accounting for fill probability at different price levels
+  matchup K% vs specific pitchers independent of platoon split.
+- **Weather sub-conditions**: precipitation probability as a K-rate suppressor.
+- **Market microstructure model**: model the true execution price accounting for
+  fill probability at different price levels rather than using ask-1¢ flat.
 
 ---
 
 ## Known Limitations
 
 1. **Career velocity requires 2023-2025 Savant data** — rookies and pitchers
-   with limited MLB history will have no career velo baseline; velo_adj = 1.0
-   for these pitchers.
+   with limited MLB history will have no career velo baseline; velo_adj = 1.0.
 
 2. **Umpire assignments not posted until day-of** — if running the model early
    (before ~11 AM ET), ump assignments may not be in the MLB API yet. The
@@ -411,14 +542,17 @@ First real-money day with the full system. Summary of findings:
    `historical_team_offense`. Run `fetchLineups.js` again after lineups post.
 
 5. **Park factors are static 3-year averages** — they don't capture year-to-year
-   park condition changes (e.g. a fence moved in, new humidor installed). Review
-   annually against current-year park factor estimates.
+   park condition changes (fence moved, new humidor). Review annually.
 
 6. **Correlated Kelly only handles intra-pitcher correlation** — cross-pitcher
-   correlated exposure (e.g. two pitchers in the same game on opposite sides
-   of the same threshold) is not modeled. Unlikely to be material but worth
-   noting.
+   correlated exposure (two pitchers in the same game) is not modeled.
 
 7. **NB r=30 calibrated on 2023-2025** — as pitch design, analytics, and
    bullpen usage evolve, the variance structure of starter K-counts may shift.
    Re-calibrate annually via `backtest.js`.
+
+8. **In-game confidence = data completeness, not prediction quality** —
+   the `confidence` label (`high/medium/low`) reflects how many starts are
+   in the dataset, NOT how accurate the model is for that pitcher. Do not use
+   confidence as a bet filter. Morning-bet `high` confidence showed 0% WR in
+   early live data — the label is informational only.
