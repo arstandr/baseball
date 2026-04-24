@@ -16,9 +16,9 @@
 //   node scripts/live/ksBets.js cancel-all       [--date YYYY-MM-DD]
 
 import 'dotenv/config'
-import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { toKalshiAbbr, getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getBalance as getKalshiBalance, getSettlements, getFills, listOrders, getOrderbook, availableDepth } from '../../lib/kalshi.js'
+import { mlbGet } from '../../lib/mlb-live.js'
 import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
 
@@ -641,14 +641,8 @@ async function cancelScratchedPitcherOrders(pitcherName, date, { reason = 'scrat
 // ── SETTLE mode: look up actual Ks and mark results ──────────────────────────
 
 async function isGameFinal(gamePk) {
-  try {
-    const res = await axios.get(`${MLB_BASE}/schedule`, {
-      params: { gamePk, sportId: 1 },
-      timeout: 8000, validateStatus: s => s >= 200 && s < 500,
-    })
-    const state = res.data?.dates?.[0]?.games?.[0]?.status?.abstractGameState || ''
-    return state === 'Final'
-  } catch { return false }
+  const data = await mlbGet(`${MLB_BASE}/schedule`, { params: { gamePk, sportId: 1 } })
+  return data?.dates?.[0]?.games?.[0]?.status?.abstractGameState === 'Final'
 }
 
 async function fetchActualKs(pitcherId, pitcherName, gameDate, { requireFinal = true } = {}) {
@@ -668,10 +662,8 @@ async function fetchActualKs(pitcherId, pitcherName, gameDate, { requireFinal = 
       if (!side) continue
 
       try {
-        const box = await axios.get(`${MLB_BASE}/game/${g.id}/boxscore`, {
-          timeout: 10000, validateStatus: s => s >= 200 && s < 500,
-        })
-        const playerStats = box.data?.teams?.[side]?.players || {}
+        const box = await mlbGet(`${MLB_BASE}/game/${g.id}/boxscore`)
+        const playerStats = box?.teams?.[side]?.players || {}
 
         // Look up by exact player ID first
         const player = playerStats[`ID${pitcherId}`]
@@ -947,10 +939,10 @@ async function runCancelScratched() {
   }
 
   // Check current MLB probable pitchers
-  const schedRes = await axios.get(`${MLB_BASE}/schedule`, {
+  const schedData = await mlbGet(`${MLB_BASE}/schedule`, {
     params: { sportId: 1, date: TODAY, hydrate: 'probablePitcher', language: 'en' },
-  }).catch(() => null)
-  const games = schedRes?.data?.dates?.[0]?.games || []
+  })
+  const games = schedData?.dates?.[0]?.games || []
 
   const currentPitcherIds = new Set()
   for (const g of games) {

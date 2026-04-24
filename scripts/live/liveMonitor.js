@@ -19,6 +19,7 @@ import 'dotenv/config'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getMarketPrice, getSettlements, getBalance as getKalshiBalance, getQueuePosition, amendOrder, getOrderbook, availableDepth, listOrders, getFills } from '../../lib/kalshi.js'
+import { mlbGet } from '../../lib/mlb-live.js'
 import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
 import { notifyLiveBet, notifyFreeMoney, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
 import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
@@ -886,13 +887,13 @@ async function main() {
   console.log('[live] Checking for games that finished before monitor started...')
   for (const game of games) {
     try {
-      const [lsRes, boxRes] = await Promise.all([
-        axios.get(`${MLB_BASE}/game/${game.id}/linescore?fields=${LS_FIELDS}`, { timeout: 8000 }),
-        axios.get(`${MLB_BASE}/game/${game.id}/boxscore?fields=${BOX_FIELDS}`, { timeout: 8000 }),
+      const [ls, box] = await Promise.all([
+        mlbGet(`${MLB_BASE}/game/${game.id}/linescore?fields=${LS_FIELDS}`),
+        mlbGet(`${MLB_BASE}/game/${game.id}/boxscore?fields=${BOX_FIELDS}`),
       ])
-      if (lsRes.data.abstractGameState === 'Final' && !settledGames.has(game.id)) {
+      if (ls?.abstractGameState === 'Final' && !settledGames.has(game.id)) {
         settledGames.add(game.id)
-        await settleAndNotifyGame(game, boxRes.data)
+        await settleAndNotifyGame(game, box)
       }
     } catch (err) {
       console.error(`[live] backfill check failed for game ${game.id}: ${err.message}`)
@@ -940,11 +941,11 @@ async function main() {
     for (const game of games) {
       try {
         // Get live box score
-        const [lsRes, boxRes] = await Promise.all([
-          axios.get(`${MLB_BASE}/game/${game.id}/linescore`, { timeout: 8000 }),
-          axios.get(`${MLB_BASE}/game/${game.id}/boxscore`, { timeout: 8000 }),
+        const [ls, box] = await Promise.all([
+          mlbGet(`${MLB_BASE}/game/${game.id}/linescore`),
+          mlbGet(`${MLB_BASE}/game/${game.id}/boxscore`),
         ])
-        const state = lsRes.data.abstractGameState
+        const state = ls?.abstractGameState
 
         if (state === 'Preview') {
           if (LIVE && game.game_time) {
@@ -965,7 +966,7 @@ async function main() {
         if (state === 'Final') {
           if (!settledGames.has(game.id)) {
             settledGames.add(game.id)
-            await settleAndNotifyGame(game, boxRes.data)
+            await settleAndNotifyGame(game, box)
           }
           continue
         }
@@ -981,8 +982,8 @@ async function main() {
           const ctx = pitcherContext.get(pitcherId)
           if (!ctx) continue
 
-          const team    = boxRes.data.teams[side]
-          const player  = team.players?.[`ID${pitcherId}`]
+          const team    = box?.teams?.[side]
+          const player  = team?.players?.[`ID${pitcherId}`]
           if (!player) continue
 
           const currentKs      = Number(player.stats?.pitching?.strikeOuts || 0)
@@ -991,10 +992,9 @@ async function main() {
           const currentPitches = Number(player.stats?.pitching?.numberOfPitches || 0)
           const currentBF      = Number(player.stats?.pitching?.battersFaced || 0)
           const isCurrent      = player.gameStatus?.isCurrentPitcher
-          const ls             = lsRes.data
-          const currentInning  = ls.currentInning != null ? `${ls.inningHalf?.slice(0,3) ?? ''}${ls.currentInning}` : null
-          const awayScore      = ls.teams?.away?.runs ?? null
-          const homeScore      = ls.teams?.home?.runs ?? null
+          const currentInning  = ls?.currentInning != null ? `${ls.inningHalf?.slice(0,3) ?? ''}${ls.currentInning}` : null
+          const awayScore      = ls?.teams?.away?.runs ?? null
+          const homeScore      = ls?.teams?.home?.runs ?? null
           const currentScore   = awayScore != null ? `${awayScore}-${homeScore}` : null
           // Score diff from pitcher's team perspective (positive = pitcher's team winning)
           const pitcherScore   = side === 'away' ? awayScore : homeScore

@@ -50,6 +50,7 @@
 
 import 'dotenv/config'
 import axios from 'axios'
+import { mlbGet } from '../../lib/mlb-live.js'
 import * as db from '../../lib/db.js'
 import { toKalshiAbbr, getAuthHeaders } from '../../lib/kalshi.js'
 import { getParkFactor } from '../../lib/parkFactors.js'
@@ -314,37 +315,28 @@ async function loadLineups(date) {
 // ── MLB API fetches ───────────────────────────────────────────────────────────
 
 async function fetchGameLog(pitcherId) {
-  try {
-    const res = await axios.get(`${MLB_BASE}/people/${pitcherId}/stats`, {
-      params: { stats: 'gameLog', group: 'pitching', season: 2026, sportId: 1 },
-      timeout: 15000,
-      validateStatus: s => s >= 200 && s < 500,
-    })
-    if (res.status >= 400) return []
-    return (res.data.stats?.[0]?.splits || []).map(s => ({
-      date:    s.date,
-      ip:      ipToDecimal(Number(s.stat?.inningsPitched || 0)),
-      k:       Number(s.stat?.strikeOuts || 0),
-      bf:      Number(s.stat?.battersFaced || 0),
-      pitches: Number(s.stat?.numberOfPitches || 0),
-      bb:      Number(s.stat?.baseOnBalls || 0),
-      started: s.stat?.gamesStarted === 1,
-    }))
-  } catch { return [] }
+  const data = await mlbGet(`${MLB_BASE}/people/${pitcherId}/stats`, {
+    params: { stats: 'gameLog', group: 'pitching', season: 2026, sportId: 1 },
+  })
+  if (!data) return []
+  return (data.stats?.[0]?.splits || []).map(s => ({
+    date:    s.date,
+    ip:      ipToDecimal(Number(s.stat?.inningsPitched || 0)),
+    k:       Number(s.stat?.strikeOuts || 0),
+    bf:      Number(s.stat?.battersFaced || 0),
+    pitches: Number(s.stat?.numberOfPitches || 0),
+    bb:      Number(s.stat?.baseOnBalls || 0),
+    started: s.stat?.gamesStarted === 1,
+  }))
 }
 
 async function fetchPitcherMeta(pitcherId) {
-  try {
-    const res = await axios.get(`${MLB_BASE}/people/${pitcherId}`, {
-      timeout: 8000,
-      validateStatus: s => s >= 200 && s < 500,
-    })
-    const p = res.data?.people?.[0]
-    return {
-      name: p?.fullName || String(pitcherId),
-      hand: p?.pitchHand?.code || 'R',  // R or L
-    }
-  } catch { return { name: String(pitcherId), hand: 'R' } }
+  const data = await mlbGet(`${MLB_BASE}/people/${pitcherId}`)
+  const p = data?.people?.[0]
+  return {
+    name: p?.fullName || String(pitcherId),
+    hand: p?.pitchHand?.code || 'R',
+  }
 }
 
 // ── Opponent K% lookup ────────────────────────────────────────────────────────
@@ -377,19 +369,16 @@ async function fetchOpponentKpct(teamAbbr, gameDate, pitcherHand, gameId, lineup
   }
 
   // MLB API season totals (no platoon split, but better than league avg)
-  try {
-    const season = new Date(gameDate).getFullYear()
-    const res = await axios.get(`${MLB_BASE}/teams/${teamId}/stats`, {
-      params: { stats: 'season', group: 'hitting', season },
-      timeout: 8000,
-      validateStatus: s => s >= 200 && s < 500,
-    })
-    const stat = res.data?.stats?.[0]?.splits?.[0]?.stat
+  const season = new Date(gameDate).getFullYear()
+  const teamData = await mlbGet(`${MLB_BASE}/teams/${teamId}/stats`, {
+    params: { stats: 'season', group: 'hitting', season },
+  })
+  if (teamData) {
+    const stat = teamData.stats?.[0]?.splits?.[0]?.stat
     if (stat?.strikeOuts && stat?.plateAppearances && stat.plateAppearances > 0) {
-      const kpct = stat.strikeOuts / stat.plateAppearances
-      return { kpct, source: `mlb_api(${season})` }
+      return { kpct: stat.strikeOuts / stat.plateAppearances, source: `mlb_api(${season})` }
     }
-  } catch {}
+  }
 
   return { kpct: LEAGUE_K_PCT, source: 'league_avg' }
 }

@@ -574,13 +574,36 @@ router.get('/ks/stats', wrap(async (req, res) => {
   if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
   if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
   if (to)      { clauses.push('bet_date <= ?'); args.push(to) }
-  const rows = await db.all(
-    `SELECT bet_date, result, pnl, bet_size, edge, model_prob, side
-     FROM ks_bets WHERE ${clauses.join(' AND ')}
-     ORDER BY bet_date ASC, id ASC`,
-    args
-  )
-  if (!rows.length) {
+  const where = clauses.join(' AND ')
+
+  const [[agg], [days], seqRows] = await Promise.all([
+    db.all(
+      `SELECT
+         COUNT(CASE WHEN result='win'  THEN 1 END)                          AS wins,
+         COUNT(CASE WHEN result='loss' THEN 1 END)                          AS losses,
+         COALESCE(SUM(pnl), 0)                                              AS total_pnl,
+         COALESCE(SUM(bet_size), 0)                                         AS total_wagered,
+         COALESCE(SUM(CASE WHEN side='YES' THEN model_prob ELSE 1-model_prob END), 0) AS expected_wins,
+         AVG(CASE WHEN result='win'  AND edge IS NOT NULL THEN edge END)    AS avg_edge_wins,
+         AVG(CASE WHEN result='loss' AND edge IS NOT NULL THEN edge END)    AS avg_edge_losses
+       FROM ks_bets WHERE ${where}`,
+      args,
+    ),
+    db.all(
+      `SELECT
+         COUNT(*)                                              AS total_days,
+         SUM(CASE WHEN day_pnl > 0 THEN 1 ELSE 0 END)        AS winning_days
+       FROM (SELECT SUM(pnl) AS day_pnl FROM ks_bets WHERE ${where} GROUP BY bet_date)`,
+      args,
+    ),
+    // Only fetch what's needed for sequential drawdown + streak computation
+    db.all(
+      `SELECT pnl, result FROM ks_bets WHERE ${where} ORDER BY bet_date ASC, id ASC`,
+      args,
+    ),
+  ])
+
+  if (!agg || (agg.wins === 0 && agg.losses === 0)) {
     return res.json({
       empty: true, wins: 0, losses: 0, total_pnl: 0, total_wagered: 0,
       win_rate: 0, roi: 0, ev_per_bet: 0, max_drawdown: 0, max_drawdown_pct: 0,
@@ -592,39 +615,29 @@ router.get('/ks/stats', wrap(async (req, res) => {
     })
   }
 
-  let totalPnl = 0, totalWagered = 0, wins = 0, losses = 0
-  let edgeSumWins = 0, edgeNWins = 0, edgeSumLosses = 0, edgeNLosses = 0
-  let expectedWins = 0
+  // Sequential pass — only drawdown + streaks require ordered rows
   let running = STARTING_BANKROLL, peak = STARTING_BANKROLL
   let maxDd = 0, streak = 0, maxWinStreak = 0, maxLossStreak = 0
-  const dayPnl = {}
-
-  for (const r of rows) {
-    const pnl = Number(r.pnl || 0)
-    totalPnl    += pnl
-    totalWagered += Number(r.bet_size || 0)
-    running      += pnl
-    peak          = Math.max(peak, running)
-    maxDd         = Math.min(maxDd, running - peak)
-    dayPnl[r.bet_date] = (dayPnl[r.bet_date] || 0) + pnl
-    const mp = Number(r.model_prob || 0.5)
-    expectedWins += r.side === 'YES' ? mp : (1 - mp)
+  for (const r of seqRows) {
+    running += Number(r.pnl || 0)
+    peak     = Math.max(peak, running)
+    maxDd    = Math.min(maxDd, running - peak)
     if (r.result === 'win') {
-      wins++
-      if (r.edge != null) { edgeSumWins += Number(r.edge); edgeNWins++ }
       streak = streak >= 0 ? streak + 1 : 1
       maxWinStreak = Math.max(maxWinStreak, streak)
     } else {
-      losses++
-      if (r.edge != null) { edgeSumLosses += Number(r.edge); edgeNLosses++ }
       streak = streak <= 0 ? streak - 1 : -1
       maxLossStreak = Math.min(maxLossStreak, streak)
     }
   }
 
+  const wins         = Number(agg.wins         || 0)
+  const losses       = Number(agg.losses       || 0)
+  const totalPnl     = Number(agg.total_pnl    || 0)
+  const totalWagered = Number(agg.total_wagered || 0)
   const totalSettled = wins + losses
-  const totalDays    = Object.keys(dayPnl).length
-  const winningDays  = Object.values(dayPnl).filter(v => v > 0).length
+  const totalDays    = Number(days?.total_days    || 0)
+  const winningDays  = Number(days?.winning_days  || 0)
   const currentDd    = running - peak
 
   res.json({
@@ -644,9 +657,9 @@ router.get('/ks/stats', wrap(async (req, res) => {
     winning_days:         winningDays,
     total_days:           totalDays,
     winning_days_pct:     totalDays > 0 ? roundTo(winningDays / totalDays, 4) : 0,
-    avg_edge_wins:        edgeNWins   > 0 ? roundTo(edgeSumWins   / edgeNWins,   4) : null,
-    avg_edge_losses:      edgeNLosses > 0 ? roundTo(edgeSumLosses / edgeNLosses, 4) : null,
-    expected_wins:        roundTo(expectedWins, 1),
+    avg_edge_wins:        agg.avg_edge_wins  != null ? roundTo(Number(agg.avg_edge_wins),  4) : null,
+    avg_edge_losses:      agg.avg_edge_losses != null ? roundTo(Number(agg.avg_edge_losses), 4) : null,
+    expected_wins:        roundTo(Number(agg.expected_wins || 0), 1),
     actual_wins:          wins,
     bankroll:             roundTo(running, 2),
     start_bankroll:       STARTING_BANKROLL,
@@ -654,41 +667,35 @@ router.get('/ks/stats', wrap(async (req, res) => {
 }))
 
 router.get('/ks/edge-breakdown', wrap(async (req, res) => {
-  const rows = await db.all(
-    `SELECT result, pnl, bet_size, capital_at_risk, edge, side, strike
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL`,
-  )
-  const mk  = () => ({ wins: 0, losses: 0, pnl: 0, wagered: 0 })
-  const fin = (b, label) => {
-    const total = b.wins + b.losses
+  const fin = (rows, labelField) => rows.map(r => {
+    const total = Number(r.wins || 0) + Number(r.losses || 0)
     return {
-      label, bets: total, wins: b.wins, losses: b.losses,
-      win_rate: total > 0 ? roundTo(b.wins / total, 4) : 0,
-      pnl: roundTo(b.pnl, 2),
-      roi: b.wagered > 0 ? roundTo(b.pnl / b.wagered, 4) : 0,
+      label:    r[labelField],
+      bets:     total,
+      wins:     Number(r.wins    || 0),
+      losses:   Number(r.losses  || 0),
+      win_rate: total > 0 ? roundTo(Number(r.wins || 0) / total, 4) : 0,
+      pnl:      roundTo(Number(r.pnl     || 0), 2),
+      roi:      Number(r.wagered || 0) > 0 ? roundTo(Number(r.pnl || 0) / Number(r.wagered), 4) : 0,
     }
-  }
-  const buckets = { '5–7¢': mk(), '7–10¢': mk(), '10¢+': mk() }
-  const sides   = { YES: mk(), NO: mk() }
-  const strikes = { '4+': mk(), '5+': mk(), '6+': mk(), '7+': mk(), '8+': mk() }
+  })
 
-  for (const r of rows) {
-    const edgeCents = Number(r.edge || 0) * 100
-    const pnl       = Number(r.pnl || 0)
-    const wagered   = Number(r.capital_at_risk || r.bet_size || 0)
-    const win       = r.result === 'win'
-    const bump      = b => { if (win) b.wins++; else b.losses++; b.pnl += pnl; b.wagered += wagered }
-    if      (edgeCents < 7)  bump(buckets['5–7¢'])
-    else if (edgeCents < 10) bump(buckets['7–10¢'])
-    else                     bump(buckets['10¢+'])
-    if (sides[r.side])       bump(sides[r.side])
-    const sk = `${r.strike}+`
-    if (strikes[sk])         bump(strikes[sk])
-  }
+  const base = `FROM ks_bets WHERE live_bet=0 AND result IS NOT NULL AND paper=0`
+  const agg  = `SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+                SUM(pnl) AS pnl,
+                SUM(COALESCE(capital_at_risk, bet_size, 0)) AS wagered`
+
+  const [byBucket, bySide, byStrike] = await Promise.all([
+    db.all(`SELECT CASE WHEN edge*100 < 7 THEN '5–7¢' WHEN edge*100 < 10 THEN '7–10¢' ELSE '10¢+' END AS label, ${agg} ${base} GROUP BY label`),
+    db.all(`SELECT side AS label, ${agg} ${base} GROUP BY side`),
+    db.all(`SELECT CAST(strike AS TEXT) || '+' AS label, ${agg} ${base} GROUP BY strike ORDER BY strike`),
+  ])
+
   res.json({
-    by_bucket: Object.entries(buckets).map(([k, v]) => fin(v, k)),
-    by_side:   Object.entries(sides).map(([k, v])   => fin(v, k)),
-    by_strike: Object.entries(strikes).map(([k, v]) => fin(v, k)),
+    by_bucket: fin(byBucket, 'label'),
+    by_side:   fin(bySide,   'label'),
+    by_strike: fin(byStrike, 'label'),
   })
 }))
 
