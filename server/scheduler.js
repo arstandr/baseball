@@ -100,7 +100,7 @@ async function checkBetSanity() {
   try {
     bets = await dbAll(
       `SELECT result FROM ks_bets
-       WHERE result IS NOT NULL AND paper = 0 AND live_bet = 0
+       WHERE result IN ('win','loss') AND paper = 0 AND live_bet = 0
        ORDER BY settled_at DESC LIMIT 20`,
     )
   } catch { return }

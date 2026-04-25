@@ -32,7 +32,7 @@ async function loadContext() {
            lambda, k9_l5, k9_season, k9_career, opp_k_pct, adj_factor,
            savant_k_pct, savant_whiff, savant_fbv, whiff_flag,
            actual_ks, result, pnl
-    FROM ks_bets WHERE result IS NOT NULL
+    FROM ks_bets WHERE result IN ('win','loss')
     ORDER BY bet_date DESC LIMIT 40
   `, [])
 
@@ -52,7 +52,7 @@ async function loadContext() {
       SUM(pnl) as total_pnl,
       AVG(model_prob) as avg_model_prob,
       AVG(market_mid / 100.0) as avg_market_price
-    FROM ks_bets WHERE result IS NOT NULL
+    FROM ks_bets WHERE result IN ('win','loss')
   `, [])
 
   await db.close()

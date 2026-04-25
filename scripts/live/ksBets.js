@@ -368,7 +368,7 @@ async function logEdges() {
     } else {
       // Paper/shadow accounts use computed bankroll (no real money involved)
       const settledRow = await db.one(
-        `SELECT SUM(pnl) as total FROM ks_bets WHERE result IS NOT NULL AND bet_date < ? AND user_id = ?`,
+        `SELECT SUM(pnl) as total FROM ks_bets WHERE result IN ('win','loss') AND bet_date < ? AND user_id = ?`,
         [TODAY, bettor.id],
       )
       bankroll = (bettor.starting_bankroll ?? STARTING_BANKROLL) + Number(settledRow?.total || 0)
@@ -1046,9 +1046,9 @@ async function settleBets() {
 
   // Discord end-of-day report
   // P7: exclude paper bets from daily + season totals (paper = 0 OR paper IS NULL = real-money only)
-  const allSettled = await db.all(`SELECT * FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL AND live_bet = 0 AND (paper = 0 OR paper IS NULL)`, [TODAY])
+  const allSettled = await db.all(`SELECT * FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)`, [TODAY])
   const season = await db.all(
-    `SELECT SUM(pnl) as pnl, COUNT(*) as n, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(bet_size) as wagered FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND (paper = 0 OR paper IS NULL)`,
+    `SELECT SUM(pnl) as pnl, COUNT(*) as n, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(bet_size) as wagered FROM ks_bets WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)`,
   )
   const sp = season[0] || {}
 

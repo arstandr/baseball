@@ -72,7 +72,7 @@ async function gatherData() {
             SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
             SUM(pnl) as pnl,
             AVG(edge) as avg_edge,
-            AVG(CASE WHEN result IS NOT NULL THEN ABS(actual_ks - strike) END) as avg_lambda_err
+            AVG(ABS(actual_ks - strike))                                       as avg_lambda_err
      FROM ks_bets
      WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)
        AND bet_date >= date(?, '-30 days')

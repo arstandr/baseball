@@ -25,8 +25,8 @@ async function main() {
     `SELECT pitcher_id, pitcher_name, game, actual_ks, lambda, n_starts,
             live_ip_at_bet, live_bf_at_bet
      FROM ks_bets
-     WHERE live_bet = 0 AND actual_ks IS NOT NULL AND result IS NOT NULL
-       AND result != 'void' AND lambda IS NOT NULL
+     WHERE live_bet = 0 AND actual_ks IS NOT NULL AND result IN ('win','loss')
+       AND lambda IS NOT NULL
      ORDER BY pitcher_id, bet_date`,
   )
 

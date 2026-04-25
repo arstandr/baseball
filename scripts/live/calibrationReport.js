@@ -58,8 +58,7 @@ async function main() {
   const rows = await db.all(
     `SELECT model_prob, result, side, strike, bet_mode, fill_price, market_mid, bet_size
      FROM ks_bets
-     WHERE result IS NOT NULL
-       AND result != 'void'
+     WHERE result IN ('win','loss')
        AND live_bet = 0
        AND paper = 0
        AND model_prob IS NOT NULL

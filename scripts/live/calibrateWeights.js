@@ -13,7 +13,7 @@ async function main() {
     `SELECT model_prob, raw_model_prob, result, edge, strike, side,
             k9_career, k9_season, k9_l5, n_starts, lambda
      FROM ks_bets
-     WHERE result NOT IN ('void') AND result IS NOT NULL
+     WHERE result IN ('win','loss')
        AND live_bet = 0 AND model_prob IS NOT NULL
      ORDER BY bet_date ASC`,
   )

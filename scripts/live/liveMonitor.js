@@ -193,7 +193,7 @@ let _dailyReportSent = false  // gate to prevent duplicate EOD Discord reports o
 async function loadDailyLoss() {
   const rows = await db.all(
     `SELECT SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses
-       FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL`,
+       FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss')`,
     [TODAY],
   )
   _dailyLoss = rows[0]?.losses || 0
@@ -202,7 +202,7 @@ async function loadDailyLoss() {
 
 async function reloadDailyNetPnl() {
   const row = await db.one(
-    `SELECT COALESCE(SUM(pnl), 0) as net FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL`,
+    `SELECT COALESCE(SUM(pnl), 0) as net FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss')`,
     [TODAY],
   )
   _dailyNetPnl = row?.net || 0
@@ -732,7 +732,7 @@ async function sendDailyReport() {
     `SELECT SUM(pnl) as pnl, COUNT(*) as n,
             SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w,
             SUM(bet_size) as wagered
-       FROM ks_bets WHERE result IS NOT NULL AND (paper = 0 OR paper IS NULL)`,
+       FROM ks_bets WHERE result IN ('win','loss') AND (paper = 0 OR paper IS NULL)`,
   )
   const sp = season[0] || {}
 

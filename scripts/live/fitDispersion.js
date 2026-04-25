@@ -80,8 +80,7 @@ async function main() {
     `SELECT pitcher_id, pitcher_name, actual_ks, lambda, bet_date
      FROM ks_bets
      WHERE actual_ks IS NOT NULL
-       AND result NOT IN ('void')
-       AND result IS NOT NULL
+       AND result IN ('win','loss')
        AND live_bet = 0
        AND lambda IS NOT NULL
        AND lambda > 0
