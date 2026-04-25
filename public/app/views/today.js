@@ -382,6 +382,11 @@ export async function loadDay(date) {
     if (betList) betList.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are scheduled at 8:30 AM ET and fire automatically when lineups are posted.</div>'
     const scSummary = document.getElementById('sc-summary')
     if (scSummary) scSummary.hidden = true
+    // Clear stale header elements so yesterday's data doesn't persist on an empty day
+    const verdictEl = document.getElementById('sh-verdict')
+    const recordEl  = document.getElementById('sh-record')
+    if (verdictEl) verdictEl.textContent = ''
+    if (recordEl)  recordEl.textContent  = ''
     return
   }
 

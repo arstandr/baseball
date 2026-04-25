@@ -530,6 +530,75 @@ async function settleAndNotifyGame(game, boxData) {
   db.saveLog({ tag: 'SETTLED', msg: `${gameLabel}  ${wins}W/${losses}L  ${gamePnl >= 0 ? '+' : ''}$${gamePnl.toFixed(2)}`, pnl: gamePnl })
 
   await notifyGameResult({ game: gameLabel, bets: settled, gamePnl }, await getAllWebhooks(db))
+
+  // Rebalance pending allocations now that the account balance has changed
+  await rebalancePendingAllocations().catch(() => {})
+}
+
+// ── Post-settlement allocation rebalance ──────────────────────────────────────
+// After each game settles, the account balance changes (wins add cash, losses remove it).
+// Re-compute each user's remaining daily budget and redistribute it proportionally
+// across pending bet_schedule entries so late-game allocations reflect real P&L.
+async function rebalancePendingAllocations() {
+  try {
+    const pending = await db.all(
+      `SELECT bs.id, bs.pitcher_id, bs.pitcher_name, bs.game_label,
+              dp.best_edge, dp.n_edges
+       FROM bet_schedule bs
+       LEFT JOIN decision_pipeline dp
+             ON dp.bet_date = bs.bet_date AND dp.pitcher_id = bs.pitcher_id
+       WHERE bs.bet_date = ? AND bs.status = 'pending'`,
+      [TODAY],
+    )
+    if (!pending.length) return
+
+    const users = await db.all(`SELECT * FROM users WHERE active_bettor = 1`)
+
+    for (const user of users) {
+      // Fetch live Kalshi balance
+      let bankroll = user.starting_bankroll || 1000
+      if (user.kalshi_key_id) {
+        try {
+          const creds = { keyId: user.kalshi_key_id, privateKey: user.kalshi_private_key }
+          const kb = await getKalshiBalance(creds)
+          bankroll = kb.balance_usd
+        } catch {}
+      }
+
+      const dailyBudget = bankroll * (user.live_daily_risk_pct ?? user.daily_risk_pct ?? 0.20)
+
+      // Subtract capital already committed to fired pre-game bets
+      const spentRow = await db.one(
+        `SELECT COALESCE(SUM(capital_at_risk), 0) AS spent
+         FROM ks_bets
+         WHERE bet_date = ? AND user_id = ? AND live_bet = 0 AND paper = 0
+           AND order_status NOT IN ('cancelled', 'void')`,
+        [TODAY, user.id],
+      ).catch(() => ({ spent: 0 }))
+      const spent = spentRow?.spent ?? 0
+
+      const remaining = Math.max(0, dailyBudget - spent)
+      if (remaining <= 0) continue
+
+      // Edge-weighted split across pending pitchers
+      const totalEdge = pending.reduce((s, p) => s + Math.max(0, p.best_edge ?? 0), 0)
+
+      for (const entry of pending) {
+        const share = totalEdge > 0
+          ? Math.max(0, entry.best_edge ?? 0) / totalEdge
+          : 1 / pending.length
+        const alloc = Math.round(share * remaining * 100) / 100
+        await db.run(
+          `UPDATE bet_schedule SET allocated_usd = ? WHERE id = ?`,
+          [alloc, entry.id],
+        ).catch(() => {})
+      }
+
+      console.log(`[rebalance] ${user.name}: balance=$${bankroll.toFixed(0)} spent=$${spent.toFixed(0)} remaining=$${remaining.toFixed(0)} → split across ${pending.length} pending pitchers`)
+    }
+  } catch (err) {
+    console.error(`[rebalance] error: ${err.message}`)
+  }
 }
 
 // ── End-of-day report ─────────────────────────────────────────────────────────
