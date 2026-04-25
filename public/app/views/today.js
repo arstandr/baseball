@@ -75,7 +75,7 @@ function calcPitcherStatus(p, live) {
   const pulled      = live?.still_in === false
   const gameFinal   = live?.is_final === true
   const allSettled  = pending.length === 0
-  const hasLiveData = live != null && (live.ip > 0 || (live.ks != null && live.ks > 0))
+  const hasLiveData = live != null && (live.ip > 0 || live.ks > 0 || live.inning_state != null || live.pitches > 0)
   const earlyGame   = hasLiveData && (live.ip ?? 0) < 1.0
 
   let status
@@ -137,13 +137,25 @@ function calcPitcherStatus(p, live) {
       ? `Got pulled after ${ks ?? '?'} Ks — key bets already locked in.`
       : `Got pulled after ${ks ?? '?'} Ks without reaching the ${target}+ target.`
   } else if (!hasLiveData || earlyGame) {
-    if (nextYes) {
-      const proj = projectedRange ? ` Model projects ~${projectedRange} Ks.` : ''
-      storySentence = `Needs ${nextYes.strike}+ strikeouts. Game hasn't started yet.${proj}`
-    } else if (pendingNoBets.length) {
-      storySentence = `Betting he stays under ${pendingNoBets[0].strike} Ks. Game hasn't started yet.`
+    const proj = projectedRange ? ` Model projects ~${projectedRange} Ks.` : ''
+    if (hasLiveData) {
+      // Game is live but very early — pitcher has 0 or 1 IP
+      const ksStr = (ks ?? 0) === 0 ? 'No Ks yet' : `${ks} K${ks !== 1 ? 's' : ''} so far`
+      if (nextYes) {
+        storySentence = `Game underway — ${ksStr}, needs ${nextYes.strike - (ks ?? 0)} more for ${nextYes.strike}+.${proj}`
+      } else if (pendingNoBets.length) {
+        storySentence = `Game underway — ${ksStr}. Watching the NO on ${pendingNoBets[0].strike}+.`
+      } else {
+        storySentence = `Game underway — ${ksStr}.`
+      }
     } else {
-      storySentence = `Game hasn't started yet.`
+      if (nextYes) {
+        storySentence = `Needs ${nextYes.strike}+ strikeouts. Game hasn't started yet.${proj}`
+      } else if (pendingNoBets.length) {
+        storySentence = `Betting he stays under ${pendingNoBets[0].strike} Ks. Game hasn't started yet.`
+      } else {
+        storySentence = `Game hasn't started yet.`
+      }
     }
   } else {
     if (nextYes) {
@@ -457,8 +469,23 @@ export async function loadDay(date) {
 
     try {
       const lbUid = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
-      const liveBetsData = await fetchJson(`/api/ks/live-bets?date=${date}${lbUid}`).catch(() => null)
+      const [liveBetsData, liveData] = await Promise.all([
+        fetchJson(`/api/ks/live-bets?date=${date}${lbUid}`).catch(() => null),
+        fetchJson(`/api/ks/live?date=${date}${uidParam}`).catch(() => null),
+      ])
       shared.liveBetsPitchers = liveBetsData?.pitchers || []
+      // Warm up liveOverlay immediately so cards don't show "Game hasn't started yet"
+      // while waiting for the first SSE live_update (which fires every 20s)
+      if (liveData?.pitchers?.length) {
+        for (const p of liveData.pitchers) {
+          shared.liveOverlay[String(p.pitcher_id)] = {
+            ks: p.ks, still_in: p.still_in, is_final: p.is_final,
+            ip: p.ip, pitches: p.pitches, inning: p.inning,
+            home_score: p.home_score, away_score: p.away_score,
+            inning_state: p.inning_state, is_pitching: p.is_pitching,
+          }
+        }
+      }
       renderGameCards(sorted, shared.liveBetsPitchers)
       const heroMax = computeMaxTheoretical(sorted)
       updateBestCaseCard(heroMax, 1, 0)
@@ -907,6 +934,10 @@ document.getElementById('sc-search')?.addEventListener('input', _applySearch)
 
 export function buildPitcherCard(p) {
   const KALSHI_FEE = 0.07
+  // Must be declared before first use — const is not hoisted
+  const pendingBetsEarly = p.bets.filter(b => !b.result)
+  const hasFreeMoney = pendingBetsEarly.some(b => b.bet_mode === 'pulled' || (b.model_prob != null && b.model_prob <= 0.03 && b.side === 'NO'))
+
   const card = document.createElement('article')
   let colorCls = 'pending'
   if (p.pending === 0) {
@@ -945,8 +976,7 @@ export function buildPitcherCard(p) {
   const overallPct = totalBets > 0 ? Math.round(p.wins / totalBets * 100) : 0
   const overallClr = overallPct >= 60 ? 'good' : overallPct >= 30 ? '' : (p.losses > 0 ? 'bad' : '')
 
-  const pendingBets  = p.bets.filter(b => !b.result)
-  const hasFreeMoney = pendingBets.some(b => b.bet_mode === 'pulled' || (b.model_prob != null && b.model_prob <= 0.03 && b.side === 'NO'))
+  const pendingBets  = pendingBetsEarly  // already computed above (needed before card.className)
   const coverProb    = b => b.side === 'NO' ? 1 - (b.model_prob ?? 0.5) : (b.model_prob ?? 0.5)
   const avgCoverage  = pendingBets.length > 0
     ? pendingBets.reduce((s, b) => s + coverProb(b), 0) / pendingBets.length

@@ -384,6 +384,45 @@ function repairBatFile() {
   } catch {}
 }
 
+// ── File logging with rotation ────────────────────────────────────────────────
+// Intercepts console.log/warn/error and mirrors output to logs/closer.log.
+// Rotates when the file exceeds 10 MB, keeping one backup (.log.1).
+// liveMonitor output isn't captured here (stdio:'inherit' bypasses console),
+// but all launcher-level state messages are logged for local debugging.
+
+const LOG_PATH      = path.join(ROOT, 'logs', 'closer.log')
+const LOG_MAX_BYTES = 10 * 1024 * 1024  // 10 MB
+
+function setupFileLogging() {
+  try {
+    fs.mkdirSync(path.join(ROOT, 'logs'), { recursive: true })
+    try {
+      if (fs.existsSync(LOG_PATH) && fs.statSync(LOG_PATH).size > LOG_MAX_BYTES) {
+        const bak = LOG_PATH + '.1'
+        if (fs.existsSync(bak)) fs.unlinkSync(bak)
+        fs.renameSync(LOG_PATH, bak)
+      }
+    } catch {}
+
+    const stream = fs.createWriteStream(LOG_PATH, { flags: 'a' })
+
+    const wrap = (orig, level) => (...args) => {
+      orig(...args)
+      try {
+        const ts   = new Date().toISOString().slice(0, 19).replace('T', ' ')
+        const text = args.map(a => (typeof a === 'string' ? a : String(a))).join(' ')
+        stream.write(`[${ts}] [${level}] ${text}\n`)
+      } catch {}
+    }
+
+    console.log   = wrap(console.log.bind(console),   'INFO')
+    console.warn  = wrap(console.warn.bind(console),  'WARN')
+    console.error = wrap(console.error.bind(console), 'ERROR')
+  } catch (err) {
+    process.stderr.write(`[closer] file logging setup failed: ${err.message}\n`)
+  }
+}
+
 // ── Crash-loop guard ──────────────────────────────────────────────────────────
 // Tracks recent launcher start timestamps in logs/restart_count.json.
 // If >5 restarts happen within 5 minutes, alert Discord and pause 5 minutes.
@@ -425,6 +464,8 @@ async function checkCrashLoop() {
 }
 
 async function main() {
+  setupFileLogging()
+
   console.log('THE CLOSER - Money Tree 2.0')
   console.log('============================')
 

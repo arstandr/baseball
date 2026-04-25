@@ -384,7 +384,8 @@ export async function startScheduler() {
   const hm = etHHMM()
   const date = etDate()
 
-  // Cleanup stale 'fired' rows from crashed sessions (older than 4h → error)
+  // Cleanup stale 'fired' rows from crashed sessions
+  // 1. Any 'fired' row older than 4h → error unconditionally (process never finished)
   const fourHoursAgo = new Date(Date.now() - 4 * 3600 * 1000).toISOString()
   await dbRun(
     `UPDATE bet_schedule SET status='error',
@@ -392,6 +393,26 @@ export async function startScheduler() {
      WHERE status='fired' AND fired_at IS NOT NULL AND fired_at < ?`,
     [fourHoursAgo],
   ).catch(() => {})
+
+  // 2. 'Fired' rows older than 5 min with no matching ks_bets → error immediately.
+  //    These are rows that were claimed but ksBets never ran (process crash mid-loop).
+  //    5-minute window avoids racing with in-flight ksBets runs.
+  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+  const { rowsAffected: strandedFixed } = await dbRun(
+    `UPDATE bet_schedule SET status='error',
+      notes=COALESCE(notes,'') || ' [no-bets-fired ' || datetime('now') || ']'
+     WHERE status='fired' AND fired_at IS NOT NULL AND fired_at < ?
+       AND NOT EXISTS (
+         SELECT 1 FROM ks_bets k
+         WHERE k.bet_date = bet_schedule.bet_date
+           AND k.pitcher_id = bet_schedule.pitcher_id
+           AND k.live_bet = 0 AND k.paper = 0
+       )`,
+    [fiveMinAgo],
+  ).catch(() => ({ rowsAffected: 0 }))
+  if (strandedFixed > 0) {
+    console.log(`[cleanup] Recovered ${strandedFixed} stranded fired bet_schedule rows with no ks_bets`)
+  }
 
   if (hm >= 8 * 60 + 30) {   // past 8:30am — MLB morning run missed?
     // Skip if either bets OR schedule entries exist for today (morning run writes to bet_schedule now)
@@ -576,6 +597,28 @@ export async function startScheduler() {
       `DELETE FROM monitor_state WHERE bet_date < ?`, [cutoff],
     ).catch(() => ({ rowsAffected: 0 }))
     console.log(`[cleanup] Pruned stale game_lineups and ${rowsAffected} old monitor_state rows`)
+  }, { timezone: 'America/New_York' })
+
+  // Hourly at :15 — recover stranded 'fired' rows that never produced ks_bets.
+  // Covers the case where the Railway process crashes between claiming a row and
+  // completing ksBets, leaving the row stuck in 'fired' forever.
+  cron.schedule('15 * * * *', async () => {
+    const ago = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    const { rowsAffected } = await dbRun(
+      `UPDATE bet_schedule SET status='error',
+        notes=COALESCE(notes,'') || ' [no-bets-fired ' || datetime('now') || ']'
+       WHERE status='fired' AND fired_at IS NOT NULL AND fired_at < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM ks_bets k
+           WHERE k.bet_date = bet_schedule.bet_date
+             AND k.pitcher_id = bet_schedule.pitcher_id
+             AND k.live_bet = 0 AND k.paper = 0
+         )`,
+      [ago],
+    ).catch(() => ({ rowsAffected: 0 }))
+    if (rowsAffected > 0) {
+      console.log(`[cleanup] Hourly: recovered ${rowsAffected} stranded fired bet_schedule rows`)
+    }
   }, { timezone: 'America/New_York' })
 
   // Every Monday 8:00 AM ET — NB model calibration check (alerts on drift > 7%)

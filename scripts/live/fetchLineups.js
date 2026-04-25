@@ -175,11 +175,13 @@ async function main() {
         lineupsSaved++
       }
 
+      const { lineup_k_pct: kR, batter_count: bcR } = aggregateLineupKPct(splits, 'R')
+      const { lineup_k_pct: kL }                     = aggregateLineupKPct(splits, 'L')
       console.log(
         `  ${teamAbbr} (${order.length} batters): ` +
-        `vsR=${(aggregateLineupKPct(splits, 'R').lineup_k_pct * 100).toFixed(1)}% ` +
-        `vsL=${(aggregateLineupKPct(splits, 'L').lineup_k_pct * 100).toFixed(1)}% ` +
-        `(${aggregateLineupKPct(splits, 'R').batter_count}/${order.length} with real data)`
+        `vsR=${(kR * 100).toFixed(1)}% ` +
+        `vsL=${(kL * 100).toFixed(1)}% ` +
+        `(${bcR}/${order.length} with real data)`
       )
       gameSaved = true
     }
