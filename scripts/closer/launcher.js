@@ -25,6 +25,7 @@ let _heartbeatFailures     = 0
 let _heartbeatDiscordAlerted = false  // latch so we only alert once per outage (Fix 10)
 let _currentHash           = null
 let _stopPromise           = null   // serialize concurrent stop calls (Fix 1)
+let _logStream             = null   // shared write stream for closer.log (module-level so startMonitor can also write)
 
 // ── Cached helpers ────────────────────────────────────────────────────────────
 
@@ -202,9 +203,20 @@ async function startMonitor() {
   const child = spawn(
     process.execPath,  // absolute path to current Node binary — immune to PATH shifts
     ['scripts/live/liveMonitor.js', '--date', date],
-    { cwd: ROOT, stdio: 'inherit', shell: false }
+    // stdio: stdin inherits (interactive kill signals work), stdout/stderr piped so
+    // we can tee them to _logStream (closer.log) while still writing to process.stdout.
+    { cwd: ROOT, stdio: ['inherit', 'pipe', 'pipe'], shell: false }
   )
   _child = child
+
+  child.stdout.on('data', chunk => {
+    process.stdout.write(chunk)
+    if (_logStream) try { _logStream.write(chunk) } catch {}
+  })
+  child.stderr.on('data', chunk => {
+    process.stderr.write(chunk)
+    if (_logStream) try { _logStream.write(chunk) } catch {}
+  })
 
   child.on('close', async code => {
     const elapsed = Date.now() - spawnedAt
@@ -374,10 +386,10 @@ function repairBatFile() {
   try {
     const bat = path.join(ROOT, 'start-closer.bat')
     // Always restart on any exit with a 10s backoff — no pause, no keypress needed.
-    // Check for 'timeout /t 10' as the marker that this is the correct version.
-    const correct = `@echo off\r\n:loop\r\ntitle The Closer - Money Tree 2.0\r\ncd /d "${ROOT}"\r\necho.\r\necho  THE CLOSER - Money Tree 2.0\r\necho.\r\nnode scripts/closer/launcher.js\r\necho.\r\necho  The Closer restarting in 10s...\r\ntimeout /t 10 /nobreak >nul\r\ngoto loop\r\n`
+    // Marker: 'COMMIT_SHA=%%i' — presence means bat is up-to-date with git hash export.
+    const correct = `@echo off\r\n:loop\r\ntitle The Closer - Money Tree 2.0\r\ncd /d "${ROOT}"\r\nFOR /F "tokens=*" %%i IN ('git rev-parse HEAD 2^>nul') DO SET COMMIT_SHA=%%i\r\necho.\r\necho  THE CLOSER - Money Tree 2.0\r\necho.\r\nnode scripts/closer/launcher.js\r\necho.\r\necho  The Closer restarting in 10s...\r\ntimeout /t 10 /nobreak >nul\r\ngoto loop\r\n`
     const current = fs.existsSync(bat) ? fs.readFileSync(bat, 'ascii') : ''
-    if (!current.includes('timeout /t 10')) {
+    if (!current.includes('COMMIT_SHA=%%i')) {
       fs.writeFileSync(bat, correct, 'ascii')
       console.log('[closer] bat file updated: now restarts on any exit with 10s backoff')
     }
@@ -385,15 +397,25 @@ function repairBatFile() {
 }
 
 // ── File logging with rotation ────────────────────────────────────────────────
-// Intercepts console.log/warn/error and mirrors output to logs/closer.log.
-// Rotates when the file exceeds 10 MB, keeping one backup (.log.1).
-// liveMonitor output isn't captured here (stdio:'inherit' bypasses console),
-// but all launcher-level state messages are logged for local debugging.
+// Intercepts console.log/warn/error and mirrors to logs/closer.log.
+// Also captures liveMonitor child output via the shared _logStream (since child
+// uses stdio:['inherit','pipe','pipe'] so its output flows through the launcher).
+// Rotates at 10 MB, keeps one backup (.log.1).
+//
+// EBUSY guard: if stdout is already redirected to a file (e.g. by a watchdog bat
+// with `>> logs\closer.log 2>&1`), we skip opening closer.log ourselves — two
+// independent writers on the same file on Windows causes EBUSY crash-loops.
+// In that case liveMonitor child output still flows to process.stdout → the bat's
+// redirect file, so nothing is lost.
 
 const LOG_PATH      = path.join(ROOT, 'logs', 'closer.log')
 const LOG_MAX_BYTES = 10 * 1024 * 1024  // 10 MB
 
 function setupFileLogging() {
+  // If stdout is already being redirected by a wrapper script, skip our own file
+  // writer — two writers on the same path on Windows = EBUSY crash-loop.
+  if (!process.stdout.isTTY) return
+
   try {
     fs.mkdirSync(path.join(ROOT, 'logs'), { recursive: true })
     try {
@@ -404,16 +426,17 @@ function setupFileLogging() {
       }
     } catch {}
 
-    const stream = fs.createWriteStream(LOG_PATH, { flags: 'a' })
+    _logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' })
 
-    const wrap = (orig, level) => (...args) => {
-      orig(...args)
+    const write = (level, args) => {
       try {
         const ts   = new Date().toISOString().slice(0, 19).replace('T', ' ')
         const text = args.map(a => (typeof a === 'string' ? a : String(a))).join(' ')
-        stream.write(`[${ts}] [${level}] ${text}\n`)
+        _logStream.write(`[${ts}] [${level}] ${text}\n`)
       } catch {}
     }
+
+    const wrap = (orig, level) => (...args) => { orig(...args); write(level, args) }
 
     console.log   = wrap(console.log.bind(console),   'INFO')
     console.warn  = wrap(console.warn.bind(console),  'WARN')
@@ -481,16 +504,21 @@ async function main() {
     }
   } catch {}
 
-  _currentHash = git('rev-parse HEAD')
-  const commitDate = git('log -1 --format=%cd --date=format:"%b %d %Y %I:%M %p"')
-  console.log(`[closer] commit: ${_currentHash.slice(0, 7)}  (${commitDate})`)
+  try {
+    _currentHash = git('rev-parse HEAD')
+  } catch {
+    _currentHash = process.env.COMMIT_SHA || null
+  }
+  let commitDate = ''
+  try { commitDate = git('log -1 --format=%cd --date=format:"%b %d %Y %I:%M %p"') } catch {}
+  console.log(`[closer] commit: ${_currentHash?.slice(0, 7) ?? 'unknown'}  ${commitDate ? `(${commitDate})` : '(git unavailable)'}` )
 
   const today = etDate()
 
   // Fix 5: enriched initial heartbeat
   const initStats = await fetchHeartbeatStats(today)
   await writeHeartbeat('idle', {
-    commit: _currentHash.slice(0, 7),
+    commit: _currentHash?.slice(0, 7) ?? 'unknown',
     ...(initStats || {}),
   })
 
@@ -502,7 +530,7 @@ async function main() {
     await notifyAlert({
       title:       '🚀 THE CLOSER — started',
       description:
-        `Commit: \`${_currentHash.slice(0, 7)}\` (${commitDate})\n` +
+        `Commit: \`${_currentHash?.slice(0, 7) ?? 'unknown'}\`${commitDate ? ` (${commitDate})` : ''}\n` +
         `Date: ${today}\n` +
         `Pending scheduled bets: ${pending < 0 ? 'unknown (DB error)' : pending}\n` +
         `Game hours now: ${isGameHours() ? 'yes' : 'no'}`,

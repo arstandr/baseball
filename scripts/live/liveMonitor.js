@@ -5,8 +5,6 @@
 // pitch count) and checks Kalshi for live prices. When a new in-game edge
 // ≥ LIVE_EDGE_MIN is found, it bets (paper or real) sized by Kelly.
 //
-// Trading toggle: LIVE_TRADING=false in .env → paper trade only
-//                 LIVE_TRADING=true          → place real Kalshi orders
 //
 // Daily loss limit: DAILY_LOSS_LIMIT (default $500) — stops all trading if hit.
 //
@@ -31,7 +29,7 @@ const opts     = parseArgs({
 })
 const TODAY       = opts.date
 const POLL_SEC    = opts.poll
-let   LIVE        = process.env.LIVE_TRADING === 'true'
+const LIVE        = true  // always live — use users.paper=1 to paper-trade a specific user
 const LIVE_EDGE   = Number(process.env.LIVE_EDGE_MIN || 0.08)
 const LOSS_LIMIT  = Number(process.env.DAILY_LOSS_LIMIT || 500)
 
@@ -1280,7 +1278,7 @@ async function main() {
   const noLost  = new Set()   // NO bets already at/past threshold — settled as loss mid-game
   const oneAway = new Set()
   const lastKsMap = new Map()  // pitcherId → last confirmed K count (delta detection)
-  const freeMoneySentPerPitcher = new Map()  // pitcherId → total USD risked on free-money takers
+  const freeMoneySentByUserPitcher = new Map()  // userId → Map(pitcherId → USD risked on free-money takers)
   const _scratchCandidates = new Map()       // `${pitcherId}:${gameId}` → { seenAt } (2-poll scratch confirmation)
   const _scratchFired = new Set()            // `${pitcherId}:${gameId}` — scratch NO orders already placed
 
@@ -2002,6 +2000,22 @@ async function main() {
 
           if (!qualifying.length) continue
 
+          // ── Free-money sub-cap allocation: 70% to best edge, 15% each to next two ──
+          // Ranks free-money modes (pulled/crossed-yes/blowout) by edge descending and
+          // assigns a per-threshold spending cap so budget concentrates on the best opportunity.
+          {
+            const FM_MODES = new Set(['pulled', 'crossed-yes', 'blowout'])
+            const FM_WEIGHTS = [0.70, 0.15, 0.15]
+            const fmItems = qualifying
+              .map((q, i) => ({ q, i }))
+              .filter(({ q }) => FM_MODES.has(q.mode))
+              .sort((a, b) => b.q.edge - a.q.edge)
+            for (let rank = 0; rank < fmItems.length; rank++) {
+              const weight = rank === 0 && fmItems.length === 1 ? 1.0 : (FM_WEIGHTS[rank] ?? 0)
+              qualifying[fmItems[rank].i].freeMoneySubCap = FREE_MONEY_PITCHER_CAP * weight
+            }
+          }
+
           // ── Pass 2: correlated Kelly across all qualifying thresholds for this pitcher ──
           const sized = correlatedKellyDivide(
             qualifying.map(q => ({
@@ -2041,15 +2055,7 @@ async function main() {
               }
             }
 
-            // Per-pitcher free-money cap: stop firing takers once limit reached
-            // Applies to all in-game structural taker modes (pulled, crossed-yes, blowout).
-            if (q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout') {
-              const alreadySent = freeMoneySentPerPitcher.get(pitcherId) ?? 0
-              if (alreadySent >= FREE_MONEY_PITCHER_CAP) {
-                console.log(`[live] 🚫 FREE MONEY PITCHER CAP  ${ctx.pitcherName}  $${alreadySent.toFixed(0)}/$${FREE_MONEY_PITCHER_CAP} — skipping ${q.n}+  [${q.mode}]`)
-                return false
-              }
-            }
+            // Per-pitcher cap check is now per-bettor — moved inside the bettor loop below.
 
             // 2× sizing for high-edge bets (≥15¢); kellyScale < 1 for lower-conviction entries
             const edgeMult     = q.edge >= 0.15 ? 2 : 1
@@ -2079,6 +2085,18 @@ async function main() {
                 if (myPgKeys.has(`${q.n}-NO`)) { placed.add(bettorKey); continue }
               } else {
                 if (myPgKeys.has(`${q.n}-${q.betSide}`)) { placed.add(bettorKey); continue }
+              }
+
+              // Per-bettor free-money pitcher cap — each bettor gets their own $30/pitcher budget
+              // split 70/15/15 by edge across qualifying thresholds (freeMoneySubCap set above).
+              if (q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout') {
+                const subCap = q.freeMoneySubCap ?? FREE_MONEY_PITCHER_CAP
+                const alreadySent = freeMoneySentByUserPitcher.get(bettor.id)?.get(pitcherId) ?? 0
+                if (alreadySent >= subCap) {
+                  console.log(`[live] 🚫 FREE MONEY CAP  ${bettor.name}  ${ctx.pitcherName}  $${alreadySent.toFixed(0)}/$${subCap.toFixed(0)} — skipping ${q.n}+  [${q.mode}]`)
+                  placed.add(bettorKey)
+                  continue
+                }
               }
 
               const betResult = await executeBet({
@@ -2114,11 +2132,13 @@ async function main() {
                 placed.add(bettorKey)
                 anySuccess = true
 
-                // Track free-money spend toward per-pitcher cap
+                // Track free-money spend toward per-bettor per-pitcher cap
                 if ((q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout') && betResult.finalContracts > 0) {
                   const askC = betResult.freeMoneySummary?.askCents ?? q.midCents
                   const spent = betResult.finalContracts * (askC / 100)
-                  freeMoneySentPerPitcher.set(pitcherId, (freeMoneySentPerPitcher.get(pitcherId) ?? 0) + spent)
+                  if (!freeMoneySentByUserPitcher.has(bettor.id)) freeMoneySentByUserPitcher.set(bettor.id, new Map())
+                  const bMap = freeMoneySentByUserPitcher.get(bettor.id)
+                  bMap.set(pitcherId, (bMap.get(pitcherId) ?? 0) + spent)
                 }
 
                 const webhooks = bettor.discord_webhook ? [bettor.discord_webhook] : []
