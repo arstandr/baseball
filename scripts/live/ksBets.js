@@ -202,14 +202,14 @@ async function logEdges() {
   // Rule A: Ban NO bets where market_mid ≥ 65 AND model also thinks YES is favored (model_prob ≥ 0.50)
   //         Both market and model agree YES is likely — no conviction to bet NO.
   //         If model says NO wins outright (model_prob < 0.50), let it through regardless of market price.
-  // Rule D: Ban YES bets where model_prob < 0.30 (not enough conviction)
+  // Rule D: Ban YES bets where model_prob < 0.25 (matches YES_MIN_PROB upstream filter in strikeoutEdge.js)
   //         Exception: if edge ≥ 18¢, let it through — large edge overrides low-conviction
   // Rule E: Ban NO bets where market_mid < 15 — market already near-certain NO, no edge to capture
   // Rule F: Ban NO bets at strike ≤ 4 — Apr 2026: strike 3 NO 0% WR (-$53), strike 4 NO 27.8% WR (-$41)
   // Rule C (strike=3 skip) removed — live data shows K≤3 bets have 47% ROI
   const guardedEdges = withFill.filter(e => {
     if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false  // Rule A
-    if (e.side === 'YES' && e.model_prob < 0.30 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false  // Rule D (waived if edge ≥ 18¢)
+    if (e.side === 'YES' && e.model_prob < 0.25 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false  // Rule D (waived if edge ≥ 18¢)
     if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false                            // Rule E
     if (e.side === 'NO' && e.strike <= 4) return false                                         // Rule F
     return true
@@ -408,6 +408,14 @@ async function logEdges() {
     )
     const existingYesCounts = {}
     for (const r of existingYesRows) existingYesCounts[r.pitcher_name] = r.cnt
+
+    // Guard: if denominatorEdge is zero (no edges passed the filters, or
+    // total_edge_weighted wasn't written yet), division would produce NaN
+    // for every bet. Skip sizing entirely for this bettor/run.
+    if (!denominatorEdge || denominatorEdge <= 0) {
+      console.warn(`[ks-bets] denominatorEdge is zero — skipping bet sizing for ${bettor.name}`)
+      continue
+    }
 
     // Size each bet proportionally, then enforce hard budget cap by taking
     // highest-edge bets first and stopping once the budget is spent.
@@ -1280,7 +1288,8 @@ async function planPortfolio() {
   const guardedEdges = withFill.filter(e => {
     if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false
     // B10: edge override — if _edgeVal >= 0.18, allow through even with low model_prob (mirrors logEdges)
-    if (e.side === 'YES' && e.model_prob < 0.30 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false
+    // Rule D threshold = 0.25, matching YES_MIN_PROB in strikeoutEdge.js upstream filter
+    if (e.side === 'YES' && e.model_prob < 0.25 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false
     if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false
     if (e.side === 'NO' && e.strike <= 4) return false   // Rule F — matches logEdges filter
     return true

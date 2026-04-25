@@ -324,9 +324,32 @@ async function firePendingBets() {
       notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
     }
 
-    // Pass the pre-allocated budget so this pitcher only draws from its slate share
-    const maxRiskFlag = entry.allocated_usd > 0 ? ` --max-risk ${entry.allocated_usd.toFixed(2)}` : ''
-    console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}${entry.allocated_usd ? ` (alloc $${entry.allocated_usd.toFixed(0)})` : ''}`)
+    // Pass the pre-allocated budget so this pitcher only draws from its slate share.
+    // If allocated_usd is NULL (planPortfolio hasn't run yet — e.g. early-morning bets
+    // fire before the 10am plan), cap at dailyBudget / totalPending instead of letting
+    // the fallback path use the full remaining budget for the first bet.
+    let effectiveAlloc = entry.allocated_usd > 0 ? entry.allocated_usd : null
+    if (!effectiveAlloc) {
+      try {
+        const pendingCount = await dbOne(
+          `SELECT COUNT(*) as n FROM bet_schedule WHERE bet_date=? AND status='pending'`,
+          [date],
+        )
+        // Approximate daily budget from first active bettor's bankroll (best available without running ksBets)
+        const firstBettor = await dbOne(
+          `SELECT starting_bankroll, daily_risk_pct FROM users WHERE active_bettor=1 AND paper=0 LIMIT 1`,
+        ).catch(() => null)
+        if (firstBettor?.starting_bankroll) {
+          const DAILY_RISK_PCT = firstBettor.daily_risk_pct ?? 0.04
+          const dailyBudget = firstBettor.starting_bankroll * DAILY_RISK_PCT
+          const totalPending = Math.max(1, (pendingCount?.n ?? 1) + 1) // +1 for self (already fired)
+          effectiveAlloc = Math.round((dailyBudget / totalPending) * 100) / 100
+          console.log(`[scheduler] ⚠ allocated_usd NULL for ${entry.pitcher_name} — safe cap $${effectiveAlloc.toFixed(0)} (budget $${dailyBudget.toFixed(0)} ÷ ${totalPending} entries)`)
+        }
+      } catch { /* safe cap not critical — ksBets will still run, just without the --max-risk flag */ }
+    }
+    const maxRiskFlag = effectiveAlloc > 0 ? ` --max-risk ${effectiveAlloc.toFixed(2)}` : ''
+    console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}${effectiveAlloc ? ` (alloc $${effectiveAlloc.toFixed(0)})` : ''}`)
     try {
       await runAsync(
         `Scheduled bet: ${entry.pitcher_name} (${entry.game_label})`,
@@ -466,18 +489,18 @@ export async function startScheduler() {
     }, 60_000)
   }, { timezone: 'America/New_York' })
 
-  // Every 5 min, 4am–8pm ET — fetch lineups then fire pending bets.
-  // Starts at 4am to cover Tokyo Series games (~6am ET, lineups post ~4am).
+  // Every 5 min, 3am–8pm ET — fetch lineups then fire pending bets.
+  // Starts at 3am to cover Tokyo Series games (~6am ET, lineups post ~3–3:30am ET).
   // daily_plan guard ensures no bet fires before the morning pipeline completes.
   // fetchLineups.js skips teams already captured (cheap no-op once all lineups posted).
-  cron.schedule('*/5 4-20 * * *', () => {
+  cron.schedule('*/5 3-20 * * *', () => {
     const d = etDate()
     run('Lineup check', `node scripts/live/fetchLineups.js --date ${d}`)
     setTimeout(() => firePendingBets(), 30_000)
   }, { timezone: 'America/New_York' })
 
   // Every 5 min outside lineup-check hours — fire pending bets only (no lineup fetch).
-  cron.schedule('*/5 0-3,21-23 * * *', () => firePendingBets(), { timezone: 'America/New_York' })
+  cron.schedule('*/5 0-2,21-23 * * *', () => firePendingBets(), { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh; 90s later re-run portfolio plan with fresh prices
   cron.schedule('30 15 * * *', () => {
@@ -554,5 +577,5 @@ export async function startScheduler() {
     run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 3:00am settle+early-game check | 7:00am schedule+Savant | 8:30am full pipeline (skipped if early-game pre-run) | */5min 4am-8pm lineup+bets | 3:30pm lineup refresh | 4/6/8/10pm partial settle')
+  console.log('[scheduler] daily jobs (ET): 3:00am settle+early-game check | 7:00am schedule+Savant | 8:30am full pipeline (skipped if early-game pre-run) | */5min 3am-8pm lineup+bets | 3:30pm lineup refresh | 4/6/8/10pm partial settle')
 }

@@ -139,8 +139,11 @@ async function main() {
     rows = csvParse(clean, { columns: true, skip_empty_lines: true, relax_quotes: true })
     if (!Array.isArray(rows)) throw new Error('csv parse failed')
   } catch (err) {
-    console.error(`[statcast] Savant fetch failed: ${err.message}`)
-    process.exit(1)
+    // Non-fatal: stale DB data from yesterday is better than killing the whole pipeline.
+    // dailyRun.sh has set -e; exiting 1 would abort all downstream steps (no bets placed).
+    console.error(`[statcast] ⚠ Savant fetch failed: ${err.message}`)
+    console.error(`[statcast] Continuing with stale data from last successful fetch.`)
+    process.exit(0)
   }
 
   console.log(`[statcast] ${rows.length} rows returned from Savant`)

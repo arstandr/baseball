@@ -58,7 +58,12 @@ async function main() {
     }
 
     if (!games.length) {
-      console.log(`[schedule] ${date}: no games`)
+      const existing = await db.one(`SELECT COUNT(*) as n FROM games WHERE date = ?`, [date])
+      if ((existing?.n ?? 0) > 0) {
+        console.warn(`[schedule] ⚠ API returned 0 games but DB has ${existing.n} rows for ${date} — keeping existing data, skipping update`)
+        continue
+      }
+      console.log(`[schedule] No games found for ${date}`)
       continue
     }
 

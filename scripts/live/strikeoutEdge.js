@@ -529,9 +529,15 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
   if (pK_career != null && pK_season != null) {
     pK_blended = (w_career * pK_career + w_season * pK_season + w_l5 * pK_l5) / total
   } else if (pK_season != null) {
-    pK_blended = w_season * pK_season + (1 - w_season) * pK_l5
+    // Career data missing — re-normalize between season and L5 only.
+    // Old code used (1-w_season) as the L5 weight, but w_career was still non-zero
+    // (e.g. 0.40 for a rookie), making the complement wrong and inflating L5 share.
+    const tSL = w_season + w_l5
+    pK_blended = tSL > 0 ? (w_season * pK_season + w_l5 * pK_l5) / tSL : pK_l5
   } else if (pK_career != null) {
-    pK_blended = w_career * pK_career + (1 - w_career) * pK_l5
+    // Season data missing — re-normalize between career and L5 only.
+    const tCL = w_career + w_l5
+    pK_blended = tCL > 0 ? (w_career * pK_career + w_l5 * pK_l5) / tCL : pK_l5
   } else {
     pK_blended = pK_l5
   }

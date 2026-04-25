@@ -1264,6 +1264,17 @@ async function main() {
 
   // Track which in-game bets we've already placed this session (avoid dups)
   const placed = new Set()
+  // Hydrate from DB so restarts don't re-place bets already submitted this session
+  const todayLiveBets = await db.all(
+    `SELECT user_id, pitcher_id, strike FROM ks_bets
+     WHERE bet_date = ? AND live_bet = 1 AND order_status IS NOT NULL`,
+    [TODAY],
+  ).catch(() => [])
+  for (const b of todayLiveBets) {
+    const betKey = `${b.pitcher_id}-${b.strike}-live`
+    placed.add(`${b.user_id}:${betKey}`)
+  }
+  console.log(`[live] Hydrated placed Set with ${placed.size} existing live bets from DB`)
   // Track cover/dead/one-away alerts already sent
   const covered = new Set()
   const dead    = new Set()

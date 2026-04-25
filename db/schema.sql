@@ -994,15 +994,43 @@ ALTER TABLE monitor_state ADD COLUMN final_detected_at TEXT;
 -- Prevents simultaneous pulls from competing for the same cash pool.
 -- ========================================================================
 CREATE TABLE IF NOT EXISTS game_reserves (
-  game_id      TEXT NOT NULL,
-  pitcher_id   TEXT NOT NULL,
-  bet_date     TEXT NOT NULL,
-  user_id      INTEGER NOT NULL,
-  reserved_usd REAL NOT NULL DEFAULT 0,
-  used_usd     REAL NOT NULL DEFAULT 0,
-  created_at   TEXT,
+  game_id         TEXT NOT NULL,
+  pitcher_id      TEXT NOT NULL,
+  bet_date        TEXT NOT NULL,
+  user_id         INTEGER NOT NULL,
+  reserved_usd    REAL NOT NULL DEFAULT 0,
+  used_usd        REAL NOT NULL DEFAULT 0,
+  provisional_usd REAL NOT NULL DEFAULT 0,
+  created_at      TEXT,
   PRIMARY KEY (game_id, pitcher_id, bet_date, user_id)
 );
+
+-- ========================================================================
+-- provisional_ledger: debit/credit accounting for confirmed-win NO bets
+-- Debit posted when pitcher confirmed pulled (inning ≥5) on filled NO bets.
+-- Credit posted at game settlement — debit and credit cancel each other out.
+-- Budget engine adds provisional_net × 0.20 to available pre-game capital;
+-- game_reserves.provisional_usd adds 10% of same for in-game use.
+-- UNIQUE(ks_bet_id, type) enforces exactly one debit and one credit per bet.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS provisional_ledger (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL,
+  bet_date     TEXT NOT NULL,
+  ks_bet_id    INTEGER NOT NULL REFERENCES ks_bets(id),
+  game_id      TEXT NOT NULL,
+  pitcher_id   TEXT NOT NULL,
+  type         TEXT NOT NULL CHECK(type IN ('debit','credit')),
+  amount_usd   REAL NOT NULL,
+  reason       TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(ks_bet_id, type)
+);
+CREATE INDEX IF NOT EXISTS idx_provisional_ledger_date ON provisional_ledger(bet_date);
+CREATE INDEX IF NOT EXISTS idx_provisional_ledger_user ON provisional_ledger(user_id, bet_date);
+
+-- Backfill new game_reserves column for existing databases (safe no-op)
+ALTER TABLE game_reserves ADD COLUMN provisional_usd REAL NOT NULL DEFAULT 0;
 
 -- Backfill new bet_schedule columns for existing databases (safe no-ops)
 ALTER TABLE bet_schedule ADD COLUMN preflight_outcome TEXT;

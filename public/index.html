@@ -409,6 +409,7 @@
             <div class="sched-body">
               <b>Pitcher removed from game — buy NO immediately</b>
               <p>When a starter is pulled mid-game and he hasn't reached a strikeout threshold yet, that threshold is now <em>impossible to hit</em>. The YES contract is worthless. But Kalshi sometimes takes a few minutes to reprice. When we confirm the starter is out (reliever on mound, or same IP/Ks two polls in a row), we fire taker NO orders right away — buying the guaranteed outcome before the market catches up. Capped at $10 per threshold, $30 total per pitcher.</p>
+              <p style="color:var(--text-dim);font-size:12px;margin:6px 0 0;line-height:1.5"><strong>Exception:</strong> If we already hold a pre-game YES bet on a given threshold, we skip the free-money NO on that same threshold. Holding both sides of the same Kalshi market creates a "mixed position" that causes the settlement API to return zero revenue — breaking P&L accounting. The pre-game YES is already a losing position in this scenario; we accept that loss rather than creating an accounting mess by layering a NO on top.</p>
             </div>
           </div>
           <div class="sys-row sched-row">
