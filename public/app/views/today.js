@@ -490,6 +490,7 @@ export async function loadDay(date) {
             ip: p.ip, pitches: p.pitches, inning: p.inning,
             home_score: p.home_score, away_score: p.away_score,
             inning_state: p.inning_state, is_pitching: p.is_pitching,
+            balls: p.balls ?? null, strikes: p.strikes ?? null, outs: p.outs ?? null,
           }
         }
       }
@@ -779,6 +780,9 @@ function renderGameCard(p, sd) {
   const inningState   = live?.inning_state ?? null
   const pitchCount    = live?.pitches ?? null
   const currentInning = live?.inning ?? null
+  const liveBalls     = live?.balls   ?? null
+  const liveStrikes   = live?.strikes ?? null
+  const liveOuts      = live?.outs    ?? null
 
   let pitchingStatusHtml = ''
   if (live && !live.is_final) {
@@ -786,8 +790,11 @@ function renderGameCard(p, sd) {
       currentInning,
       pitchCount != null ? `${pitchCount} pitches` : null,
     ].filter(Boolean).join(' · ')
+    const countHtml = isPitching && liveStrikes != null
+      ? `<div class="gc-count-row"><span class="gc-count-b">${liveBalls ?? '?'}</span><span class="gc-count-sep">-</span><span class="gc-count-s">${liveStrikes}</span><span class="gc-count-label">B-S</span><span class="gc-count-divider">·</span><span class="gc-count-o">${liveOuts ?? '?'}</span><span class="gc-count-label">out${liveOuts !== 1 ? 's' : ''}</span></div>`
+      : ''
     if (isPitching) {
-      pitchingStatusHtml = `<div class="gc-pitching-now">⚾ Pitching Now${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
+      pitchingStatusHtml = `<div class="gc-pitching-now">⚾ Pitching Now${pitchInfo ? ' · ' + pitchInfo : ''}</div>${countHtml}`
     } else if (live.still_in === false) {
       pitchingStatusHtml = `<div class="gc-pitching-out">Out of game${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
     } else if (inningState === 'Middle' || inningState === 'End') {

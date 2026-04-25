@@ -104,6 +104,7 @@ export function connectSSE() {
               ip: p.ip, pitches: p.pitches, inning: p.inning,
               home_score: p.home_score, away_score: p.away_score,
               inning_state: p.inning_state, is_pitching: p.is_pitching,
+              balls: p.balls ?? null, strikes: p.strikes ?? null, outs: p.outs ?? null,
             }
           }
           renderGameCards(shared.dailyPitchers, shared.liveBetsPitchers)
@@ -157,14 +158,19 @@ export async function pollLive(date) {
 
   for (const p of data.pitchers) {
     shared.liveOverlay[String(p.pitcher_id)] = {
-      ks:         p.ks,
-      still_in:   p.still_in,
-      is_final:   p.is_final,
-      ip:         p.ip,
-      pitches:    p.pitches,
-      inning:     p.inning,
-      home_score: p.home_score,
-      away_score: p.away_score,
+      ks:           p.ks,
+      still_in:     p.still_in,
+      is_final:     p.is_final,
+      ip:           p.ip,
+      pitches:      p.pitches,
+      inning:       p.inning,
+      home_score:   p.home_score,
+      away_score:   p.away_score,
+      inning_state: p.inning_state,
+      is_pitching:  p.is_pitching,
+      balls:        p.balls   ?? null,
+      strikes:      p.strikes ?? null,
+      outs:         p.outs    ?? null,
     }
   }
 
