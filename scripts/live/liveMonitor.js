@@ -588,15 +588,14 @@ async function postProvisionalDebits(pitcherId, gameId, currentKs, numericInning
     // Full net payout = contracts × (1 - 7% Kalshi fee on profit portion)
     const expectedPayout = bet.filled_contracts * (1 - 0.07 * (1 - fillFrac))
 
-    try {
-      await db.run(
-        `INSERT OR IGNORE INTO provisional_ledger
-           (user_id, bet_date, ks_bet_id, game_id, pitcher_id, type, amount_usd, reason)
-         VALUES (?, ?, ?, ?, ?, 'debit', ?, 'pull-confirmed')`,
-        [userId, TODAY, bet.id, gameId, String(pitcherId), expectedPayout],
-      )
-      totalDebit += expectedPayout
-    } catch { /* UNIQUE constraint → already debited, skip */ }
+    const ins = await db.run(
+      `INSERT OR IGNORE INTO provisional_ledger
+         (user_id, bet_date, ks_bet_id, game_id, pitcher_id, type, amount_usd, reason)
+       VALUES (?, ?, ?, ?, ?, 'debit', ?, 'pull-confirmed')`,
+      [userId, TODAY, bet.id, gameId, String(pitcherId), expectedPayout],
+    ).catch(() => ({ rowsAffected: 0 }))
+    // Only count rows actually inserted (INSERT OR IGNORE returns rowsAffected=0 for skips)
+    if ((ins?.rowsAffected ?? 0) > 0) totalDebit += expectedPayout
   }
 
   // Recalculate in-game provision from full ledger total (INSERT OR IGNORE skips dupes,

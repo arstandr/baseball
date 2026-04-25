@@ -410,8 +410,14 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
       bfSource   = `logBF×${logWithBf.length}`
     } else {
       const earlyExits = last5.filter(r => Math.floor(r.ip) < 3).length
-      const cappedIPs  = last5.map(r => Math.floor(r.ip) < 3 ? 3.0 : r.ip)
-      const avgIpRaw   = cappedIPs.reduce((s, v) => s + v, 0) / nStarts
+      // Only floor short starts when they're anomalous (< 40% of sample).
+      // When early exits are common (pitcher is genuinely a short-leash arm or had weather/injury)
+      // use actual IPs so we don't inflate expected BF for the current start.
+      const useFloor = earlyExits / nStarts < 0.4
+      const adjIPs   = useFloor
+        ? last5.map(r => Math.floor(r.ip) < 3 ? 3.0 : r.ip)
+        : last5.map(r => r.ip)
+      const avgIpRaw   = adjIPs.reduce((s, v) => s + v, 0) / nStarts
       const w_ip = Math.min(1, nStarts / 5)
       expectedBF = (w_ip * avgIpRaw + (1 - w_ip) * careerIp) * LEAGUE_PA_PER_IP
       bfSource   = `ip×PA/IP`
@@ -836,14 +842,15 @@ async function main() {
       // Handedness split adjustment: pitcher's K% vs LHB/RHB vs typical MLB lineup composition.
       // MLB lineups are ~40% LHB on average. This corrects for extreme platoon mismatches
       // (e.g., RHP who dominates LHB facing a lineup that's 75% RHB → reduce lambda).
-      // Capped at ±7% since the 40% LHB assumption is a league average, not lineup-specific.
+      // Capped at ±12% to allow legitimate extreme platoon pitchers (e.g. LOOGY arms,
+      // extreme same-side dominance) to be reflected while still bounding noisy small samples.
       let splitAdj = 1.0
       let splitNote = ''
       if (savant?.k_pct_vs_l != null && savant?.k_pct_vs_r != null && (savant.k_pct ?? 0) > 0.01) {
         const LHB_PCT = 0.40  // MLB default; refined when confirmed lineups are available
         const splitK  = LHB_PCT * savant.k_pct_vs_l + (1 - LHB_PCT) * savant.k_pct_vs_r
         const raw     = splitK / savant.k_pct
-        splitAdj = Math.max(0.93, Math.min(1.07, raw))
+        splitAdj = Math.max(0.88, Math.min(1.12, raw))
         if (Math.abs(splitAdj - 1.0) > 0.015) {
           splitNote = ` | splitK×${splitAdj.toFixed(2)}(vsL=${(savant.k_pct_vs_l*100).toFixed(1)}%,vsR=${(savant.k_pct_vs_r*100).toFixed(1)}%)`
         }

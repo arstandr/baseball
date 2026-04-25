@@ -563,13 +563,19 @@ export async function startScheduler() {
 
   // Midnight ET — prune stale game_lineups rows, keeping only latest per (game_id, team_abbr, vs_hand).
   // Lineups are fetched repeatedly throughout the day; only the newest row per group is used.
+  // Also prune monitor_state rows older than 14 days to prevent unbounded table growth.
   cron.schedule('0 0 * * *', async () => {
     await dbRun(
       `DELETE FROM game_lineups WHERE rowid NOT IN (
          SELECT MAX(rowid) FROM game_lineups GROUP BY game_id, team_abbr, vs_hand
        )`,
     ).catch(() => null)
-    console.log(`[cleanup] Pruned stale game_lineups rows`)
+    const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000)
+      .toISOString().slice(0, 10)
+    const { rowsAffected } = await dbRun(
+      `DELETE FROM monitor_state WHERE bet_date < ?`, [cutoff],
+    ).catch(() => ({ rowsAffected: 0 }))
+    console.log(`[cleanup] Pruned stale game_lineups and ${rowsAffected} old monitor_state rows`)
   }, { timezone: 'America/New_York' })
 
   // Every Monday 8:00 AM ET — NB model calibration check (alerts on drift > 7%)
