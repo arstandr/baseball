@@ -83,6 +83,7 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
   // Bayesian blend of live K% with pre-game prior.
   //   BF < 9   → pure prior (too small a sample)
   //   BF ≥ 9   → blend liveKpct with pK_blended, weight rising to 0.5 at BF=18
+  //   Fast-update: if live K% is ≥1.5× prior AND hot AND BF≥9 → accelerate convergence
   // Clamped to [0.10, 0.45] to avoid runaway extremes on small samples.
   let pK_effective = pK_blended
   if (currentBF >= 9) {
@@ -90,6 +91,12 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
     const w_live   = Math.min(0.5, currentBF / 36)
     const blended  = w_live * liveKpct + (1 - w_live) * pK_blended
     pK_effective   = Math.max(0.10, Math.min(0.45, blended))
+    // Fast update: pitcher is dominating well above prior → trust live evidence faster
+    if (liveKpct > pK_blended * 1.5 && liveKpct > 0.25) {
+      const w_fast    = Math.min(0.75, currentBF / 18)
+      const fastBlend = w_fast * liveKpct + (1 - w_fast) * pK_blended
+      pK_effective    = Math.max(0.10, Math.min(0.45, fastBlend))
+    }
   }
 
   // TTO K-rate penalty: batters have seen this pitcher 2-3× through the order and adjust.
@@ -184,6 +191,8 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
   let finalContracts = Math.max(1, Math.round(betSize))
   let orderCents     = Math.round(side === 'YES' ? marketMid : 100 - marketMid)  // fallback
   let freeMoneySummary = null  // set below for pulled-mode notifications
+  let orderId    = null  // captured from placeOrder response so ksFillSync + WS applier can track it
+  let initFilled = 0    // taker orders may fill immediately; capture so the DB row is accurate from the start
 
   if (isLive) {
     const ob = await getOrderbook(ticker, 10, creds).catch(() => null)
@@ -221,7 +230,10 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       try {
         const betTag  = mode === 'pulled' ? '💰 FREE MONEY TAKER' : '🚫 DEAD PATH TAKER'
         const logTag  = mode === 'pulled' ? 'FREE MONEY'          : 'DEAD PATH'
-        await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents, creds)
+        const placed  = await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents, creds)
+        const placedOrder = placed?.order ?? placed
+        orderId    = placedOrder?.order_id ?? null
+        initFilled = Math.round(parseFloat(placedOrder?.fill_count_fp ?? '0'))
         console.log(`\n  [${betTag}] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢  profit≈+$${expectedProfit.toFixed(2)}`)
         db.saveLog({ tag: 'BET', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢ taker  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
         freeMoneySummary = { askCents, expectedProfit, yesPrice: Math.round(100 - askCents) }
@@ -283,7 +295,10 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       } catch { /* non-fatal */ }
 
       try {
-        await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents, creds)
+        const placed2     = await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents, creds)
+        const placedOrder2 = placed2?.order ?? placed2
+        orderId    = placedOrder2?.order_id ?? null
+        initFilled = Math.round(parseFloat(placedOrder2?.fill_count_fp ?? '0'))
         console.log(`  [LIVE MAKER] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`)
         db.saveLog({ tag: 'BET', msg: `${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`, pitcher: pitcherName, strike, side })
       } catch (err) {
@@ -319,6 +334,9 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     live_bet:             1,
     ticker,
     bet_mode:             mode,
+    order_id:             orderId,
+    filled_contracts:     initFilled || null,
+    order_status:         orderId ? (initFilled >= finalContracts ? 'filled' : 'resting') : null,
     live_ks_at_bet:       liveKs       ?? null,
     live_ip_at_bet:       liveIP       ?? null,
     live_pitches_at_bet:  livePitches  ?? null,
@@ -464,15 +482,6 @@ async function sendDailyReport() {
   }, await getAllWebhooks(db))
 }
 
-// ── T-90 resting order review: flip-to-NO or cancel no-edge ──────────────────
-//
-// Called for each Preview game when first pitch is ≤90 min away.
-// For unfilled maker orders:
-//   - If YES price rose ≥7¢ past model_prob → NO side now has edge → flip
-//   - If edge on original side dropped below threshold → cancel, skip
-//   - Otherwise → leave it resting until T-45
-// Guards with _t90Games so it only runs once per game.
-
 // Load per-user Kalshi credentials for a batch of ks_bets rows.
 // Kalshi 404s when an order is looked up under the wrong account, so every
 // cancel/place/getOrder must auth as the row's owner, not the env default.
@@ -490,198 +499,6 @@ async function _loadCredsForBets(bets) {
   return credsMap
 }
 
-const _t90Games = new Set()
-
-async function manageRestingOrders(game) {
-  if (_t90Games.has(game.id)) return
-  _t90Games.add(game.id)
-
-  const restingBets = await db.all(
-    `SELECT * FROM ks_bets
-      WHERE bet_date = ? AND order_status = 'resting' AND result IS NULL
-        AND (pitcher_id = ? OR pitcher_id = ?)`,
-    [TODAY, game.pitcher_home_id, game.pitcher_away_id],
-  )
-  if (!restingBets.length) return
-
-  const credsMap = await _loadCredsForBets(restingBets)
-
-  console.log(`\n[live] T-90 review: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
-
-  for (const bet of restingBets) {
-    if (!bet.ticker) continue
-    const creds = credsMap.get(bet.user_id) ?? {}
-    if (!creds.keyId) { console.error(`  [T-90] no creds for user_id=${bet.user_id} (${bet.pitcher_name}) — skipping`); continue }
-    try {
-      const mkt = await getMarketPrice(bet.ticker)
-      if (!mkt) continue
-
-      const modelProb   = bet.model_prob ?? 0.5
-      // Current mid for each side (fractions 0-1)
-      // getMarketPrice() returns: { bid, ask } as YES bid/ask fractions; price_over = (bid+ask)/2
-      const yesMid  = mkt.price_over != null ? mkt.price_over : (mkt.bid + mkt.ask) / 2
-      const yesBid  = mkt.bid   // fraction 0-1
-      const yesAsk  = mkt.ask   // fraction 0-1
-      const noAsk   = 1 - yesBid  // cost to buy NO = 100 - yes_bid
-      const noMid   = 1 - yesMid
-
-      const edgeYES = modelProb - yesMid
-      const edgeNO  = (1 - modelProb) - noMid
-
-      // Original side edge still viable?
-      const originalEdge = bet.side === 'YES' ? edgeYES : edgeNO
-      if (originalEdge >= LIVE_EDGE / 2) continue  // still good — let it ride to T-45
-
-      // Edge gone on original side — check if opposite side has edge
-      const flipSide  = bet.side === 'YES' ? 'NO' : 'YES'
-      const flipEdge  = bet.side === 'YES' ? edgeNO : edgeYES
-      const flipPrice = bet.side === 'YES' ? noMid  : yesMid
-
-      if (flipEdge >= LIVE_EDGE) {
-        // Cancel original, place flip-side maker
-        if (bet.order_id) await cancelOrder(bet.order_id, creds)
-        console.log(`  ↔ ${bet.pitcher_name} ${bet.strike}+ flip YES→${flipSide}  original edge=${(originalEdge*100).toFixed(1)}¢  flip edge=${(flipEdge*100).toFixed(1)}¢`)
-
-        // flipAsk in cents: for flipping to NO, cost = 100 - yes_bid; for flipping to YES, cost = yes_ask
-        const flipAskCents = bet.side === 'YES' ? Math.round(noAsk * 100) : Math.round(yesAsk * 100)
-        const flipAsk      = Math.min(99, flipAskCents)
-        const makerCents   = Math.max(1, flipAsk - 1)
-        const contracts   = Math.max(1, Math.round((bet.bet_size ?? 100) / flipPrice))
-        const result      = await placeOrder(bet.ticker, flipSide.toLowerCase(), contracts, makerCents, creds)
-        const newOrder    = result?.order ?? result
-        const newOrderId  = newOrder?.order_id ?? null
-
-        await db.run(
-          `UPDATE ks_bets SET side=?, order_id=?, order_status='resting', market_mid=?, fill_price=NULL WHERE id=?`,
-          [flipSide, newOrderId, Math.round(flipPrice * 100), bet.id],
-        )
-        console.log(`    → ${flipSide} MAKER ${contracts}c @ ${makerCents}¢  id=${newOrderId}`)
-      } else {
-        // No edge on either side — cancel and skip
-        if (bet.order_id) await cancelOrder(bet.order_id, creds)
-        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
-        console.log(`  ✗ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — no edge on either side at T-90, cancelled  (YES edge=${(edgeYES*100).toFixed(1)}¢ NO edge=${(edgeNO*100).toFixed(1)}¢)`)
-      }
-    } catch (err) {
-      console.error(`  [T-90] error for ${bet.pitcher_name}: ${err.message}`)
-    }
-  }
-}
-
-// ── T-120 pre-game order management ──────────────────────────────────────────
-//
-// Called for each Preview game when first pitch is ≤120 min away (T-2h).
-// Makers were placed at T-2.5h and have had 30 min to rest. Now:
-//   - Already filled → update DB status, done
-//   - Still resting  → cancel, re-price at current market, place taker if edge holds
-// This runs at most once per game (guarded by a Set in the caller scope).
-
-const _managedGames = new Set()
-
-async function managePreGameOrders(game) {
-  if (_managedGames.has(game.id)) return
-  _managedGames.add(game.id)
-
-  const restingBets = await db.all(
-    `SELECT * FROM ks_bets
-      WHERE bet_date = ? AND order_status = 'resting' AND result IS NULL
-        AND (pitcher_id = ? OR pitcher_id = ?)`,
-    [TODAY, game.pitcher_home_id, game.pitcher_away_id],
-  )
-  if (!restingBets.length) return
-
-  const credsMap = await _loadCredsForBets(restingBets)
-
-  console.log(`\n[live] T-120 order check: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
-
-  for (const bet of restingBets) {
-    if (!bet.order_id || !bet.ticker) continue
-    const creds = credsMap.get(bet.user_id) ?? {}
-    if (!creds.keyId) { console.error(`  [T-120] no creds for user_id=${bet.user_id} (${bet.pitcher_name}) — skipping`); continue }
-    try {
-      const order = await getOrder(bet.order_id, creds)
-      const filled = order?.status === 'executed' || Number(order?.remaining_count_fp ?? order?.remaining_count ?? 0) === 0
-
-      if (filled) {
-        const priceDollars   = order?.yes_price_dollars ?? order?.no_price_dollars ?? null
-        const fillPriceCents = priceDollars ? Math.round(parseFloat(priceDollars) * 100)
-                             : (order?.yes_price ?? order?.no_price ?? null)
-        const filledCount    = Math.round(parseFloat(order?.fill_count_fp ?? '0'))
-        await db.run(
-          `UPDATE ks_bets SET order_status='filled', fill_price=COALESCE(?, fill_price), filled_contracts=? WHERE id=?`,
-          [fillPriceCents, filledCount || null, bet.id],
-        )
-        console.log(`  ✓ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — filled ${filledCount}c @ ${fillPriceCents ?? '?'}¢ (maker)`)
-        // Notify on confirmed maker fill — this is an official transaction
-        try {
-          await notifyLiveBet({
-            pitcherName: bet.pitcher_name,
-            strike:      bet.strike,
-            side:        bet.side,
-            marketMid:   fillPriceCents ?? bet.market_mid,
-            edge:        bet.edge,
-            betSize:     filledCount,
-            paper:       bet.paper === 1,
-            fillType:    'maker-filled',
-          }, await getAllWebhooks(db))
-        } catch {}
-        continue
-      }
-
-      // Not filled — cancel and re-evaluate at current market price
-      await cancelOrder(bet.order_id, creds)
-      console.log(`  ✗ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — not filled, cancelling maker order`)
-
-      const mkt = await getMarketPrice(bet.ticker)
-      if (!mkt) {
-        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
-        console.log(`    → no market data, skipping`)
-        continue
-      }
-
-      const currentAsk = bet.side === 'YES' ? mkt.ask : (1 - mkt.bid)   // fraction 0-1
-      const modelProb  = bet.model_prob ?? 0.5
-      const currentEdge = modelProb - currentAsk
-
-      if (currentEdge < (LIVE_EDGE / 2)) {
-        // Edge evaporated (use half threshold since we're close to game time)
-        await db.run(`UPDATE ks_bets SET order_status='cancelled' WHERE id=?`, [bet.id])
-        console.log(`    → edge gone (${(currentEdge*100).toFixed(1)}¢ at ${(currentAsk*100).toFixed(0)}¢ ask), skipping`)
-        continue
-      }
-
-      // Edge still good — take the market as a taker order
-      const takerCents = Math.min(99, Math.round(currentAsk * 100) + 1)
-      // bet_size is face value ($1/contract at Kalshi) = contract count directly
-      const contracts  = Math.max(1, Math.round(bet.bet_size ?? 100))
-      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents, creds)
-      const order2     = result?.order ?? result
-      const newOrderId = order2?.order_id ?? null
-      const newStatus  = order2?.status ?? 'placed'
-
-      await db.run(
-        `UPDATE ks_bets SET order_id=?, fill_price=?, order_status=?, market_mid=? WHERE id=?`,
-        [newOrderId, takerCents, newStatus, Math.round(currentAsk * 100), bet.id],
-      )
-      console.log(`    → TAKER fallback placed ${contracts}c @ ${takerCents}¢  edge=${(currentEdge*100).toFixed(1)}¢  id=${newOrderId}`)
-      // Notify on taker placement — takers fill immediately, this is an official transaction
-      try {
-        await notifyLiveBet({
-          pitcherName: bet.pitcher_name,
-          strike:      bet.strike,
-          side:        bet.side,
-          marketMid:   takerCents,
-          edge:        bet.edge,
-          betSize:     contracts,
-          paper:       bet.paper === 1,
-          fillType:    'taker',
-        }, await getAllWebhooks(db))
-      } catch {}
-    } catch (err) {
-      console.error(`  [T-120] error for ${bet.pitcher_name}: ${err.message}`)
-    }
-  }
-}
 
 // ── 30-min stale maker → taker conversion ────────────────────────────────────
 //
@@ -892,6 +709,56 @@ async function manageRestingOrder(bet, { currentPitches, currentIP, market, cred
   }
 }
 
+// ── Reconcile live bet fills from Kalshi at game-end ─────────────────────────
+//
+// Belt-and-suspenders: even if wsFillApplier or ksFillSync missed an update
+// (e.g. WS disconnect, or bet was placed before order_id fix deployed), this
+// runs once per game when state → Final and patches any live bets that still
+// have no fill data. Queries Kalshi fills by ticker so it works even for bets
+// with null order_id.
+
+async function reconcileLiveFills(game) {
+  const gameLabel = `${game.team_away}@${game.team_home}`
+  const liveBets = await db.all(
+    `SELECT * FROM ks_bets
+      WHERE bet_date = ? AND game = ? AND live_bet = 1 AND result IS NULL
+        AND (filled_contracts IS NULL OR filled_contracts = 0)`,
+    [TODAY, gameLabel],
+  )
+  if (!liveBets.length) return
+
+  const credsMap = await _loadCredsForBets(liveBets)
+  const fillsByTicker = new Map()  // ticker → fills[]
+
+  for (const bet of liveBets) {
+    const creds = credsMap.get(bet.user_id) ?? {}
+    if (!creds.keyId) continue
+    const ticker = bet.ticker
+    if (!ticker) continue
+
+    try {
+      if (!fillsByTicker.has(ticker)) {
+        const fills = await getFills({ ticker, limit: 200 }, creds).catch(() => [])
+        fillsByTicker.set(ticker, fills)
+      }
+      const fills = fillsByTicker.get(ticker) || []
+      const sideKey = (bet.side || 'no').toLowerCase()
+      const filled = fills
+        .filter(f => f.side === sideKey && f.action === 'buy')
+        .reduce((s, f) => s + Math.round(parseFloat(f.count_fp || 0)), 0)
+      if (filled > 0) {
+        await db.run(
+          `UPDATE ks_bets SET filled_contracts = ?, order_status = 'filled' WHERE id = ?`,
+          [filled, bet.id],
+        )
+        console.log(`[reconcile-fills] bet ${bet.id} ${ticker}: backfilled ${filled} contracts from Kalshi`)
+      }
+    } catch (err) {
+      console.error(`[reconcile-fills] error for bet ${bet.id}: ${err.message}`)
+    }
+  }
+}
+
 // ── Cancel pre-game resting orders the moment a game goes live ───────────────
 //
 // Pre-game resting orders are placed at stale pre-game prices. Once the first
@@ -1046,6 +913,7 @@ async function main() {
       ])
       if (ls?.abstractGameState === 'Final' && !settledGames.has(game.id)) {
         settledGames.add(game.id)
+        await reconcileLiveFills(game).catch(() => {})
         await settleAndNotifyGame(game, box)
       }
     } catch (err) {
@@ -1120,17 +988,6 @@ async function main() {
         const state = ls?.abstractGameState
 
         if (state === 'Preview') {
-          if (LIVE && game.game_time) {
-            const minsToGame = (new Date(game.game_time) - Date.now()) / 60000
-            // T-120: 30 min after makers placed — cancel unfilled, taker fallback if edge holds
-            if (minsToGame <= 120 && minsToGame > 90) {
-              await managePreGameOrders(game)
-            }
-            // T-90: secondary safety — flip-to-NO or cancel anything still resting with no edge
-            if (minsToGame <= 90 && minsToGame > 0) {
-              await manageRestingOrders(game)
-            }
-          }
           continue
         }
 
@@ -1138,6 +995,7 @@ async function main() {
         if (state === 'Final') {
           if (!settledGames.has(game.id)) {
             settledGames.add(game.id)
+            await reconcileLiveFills(game).catch(() => {})
             await settleAndNotifyGame(game, box)
           }
           continue
@@ -1222,6 +1080,23 @@ async function main() {
               console.log(`\n[live] ✅ COVERED + SETTLED ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)  +$${pnl.toFixed(2)}`)
               db.saveLog({ tag: 'COVER', msg: `${ctx.pitcherName} ${bet.strike}+ YES covered at ${currentKs}K  +$${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl })
               await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
+
+              // Auto-close: sell YES position early if bid ≥ 88¢ — lock near-max profit now
+              if (LIVE && bet.filled_contracts > 0 && bet.ticker && bet.paper === 0) {
+                try {
+                  const closeMkt = await getMarketPrice(bet.ticker).catch(() => null)
+                  const yesBidCents = closeMkt?.bid != null ? Math.round(closeMkt.bid * 100) : null
+                  if (yesBidCents != null && yesBidCents >= 88) {
+                    const userRow = activeBettors.find(b => b.id === bet.user_id)
+                    if (userRow?.kalshi_key_id) {
+                      const sellCreds = { keyId: userRow.kalshi_key_id, privateKey: userRow.kalshi_private_key }
+                      await placeOrder(bet.ticker, 'yes', bet.filled_contracts, yesBidCents, sellCreds, 'sell')
+                      console.log(`[live] 💰 AUTO-CLOSE ${ctx.pitcherName} YES${bet.strike} ${bet.filled_contracts}c @ ${yesBidCents}¢`)
+                      db.saveLog({ tag: 'SELL', msg: `${ctx.pitcherName} YES${bet.strike} sold ${bet.filled_contracts}c @ ${yesBidCents}¢ — auto-close`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES' })
+                    }
+                  }
+                } catch { /* non-fatal — position still settled above */ }
+              }
             }
 
             // Dead: YES bet, starter pulled and can't reach threshold — settle as loss immediately
@@ -1285,9 +1160,9 @@ async function main() {
           if (pitcherPulledEarly) urgentThisCycle = true  // free money window — stay fast
 
           // BF + inning gates — bypassed for confirmed-pulled pitchers (state already resolved)
-          if (!pitcherPulledEarly && currentBF < 6) continue
+          if (!pitcherPulledEarly && currentBF < 4) continue
           const currentInn = ls.currentInning ?? 0
-          if (!pitcherPulledEarly && currentInn < 3) continue
+          if (!pitcherPulledEarly && currentInn < 2) continue
 
           const live = pitcherPulledEarly
             ? null
@@ -1357,7 +1232,7 @@ async function main() {
             // Pitcher is still in the game but structurally cannot accumulate enough Ks.
             // Use env-configured thresholds so they can be tuned without a redeploy.
             if (isCurrent && currentPitches >= PULL_PITCH_COUNT && currentIP >= PULL_MIN_IP && n - currentKs >= 3) {
-              if (!preGameKeys.has(`${n}-NO`) && noMid < 72 && noMid > 5) {
+              if (!preGameKeys.has(`${n}-NO`) && noMid < 85 && noMid > 5) {
                 const deadEdge = (1 - marketPrice) - 0.05  // 5¢ buffer for model uncertainty
                 if (deadEdge >= 0.10) {
                   qualifying.push({
@@ -1380,22 +1255,33 @@ async function main() {
 
             if (preGameKeys.has(`${n}-${betSide}`)) continue
 
-            // ── MODE 2: High-conviction only — YES 20¢/75%, NO 15¢/15% ──
+            // ── MODE 2: High-conviction — tiered YES thresholds + ksChanged momentum ──
+            // kellyScale < 1 → partial sizing for lower-conviction entries
             if (betSide === 'YES') {
-              if (modelProb < 0.75) continue
-              if (edge < Math.max(0.20, halfSpread + 0.04)) continue
+              const onKMomentum = ksChanged   // pitcher just added a K this cycle
+              const yesMinProb  = onKMomentum ? 0.55 : 0.60
+              const yesFullConv = modelProb >= 0.75
+              const yesMinEdge  = yesFullConv
+                ? Math.max(0.20, halfSpread + 0.04)
+                : onKMomentum ? Math.max(0.10, halfSpread + 0.03) : Math.max(0.12, halfSpread + 0.03)
+              if (modelProb < yesMinProb) continue
+              if (edge < yesMinEdge) continue
+              const kellyScale  = yesFullConv ? 1.0 : onKMomentum ? 0.35 : 0.50
+              qualifying.push({
+                n, mkt, midCents, marketPrice, modelProb, edge, betSide, betKey,
+                mode: 'high-conviction', kellyScale,
+                modelProbSide: modelProb, marketPriceSide: marketPrice,
+              })
             } else {
               if (modelProb > 0.15) continue
               if (noAskCents > 55) continue   // don't pay >55¢ for a NO — cost = 100 - yes_bid
               if (edge < Math.max(0.15, halfSpread + 0.04)) continue
+              qualifying.push({
+                n, mkt, midCents, marketPrice, modelProb, edge, betSide, betKey,
+                mode: 'high-conviction', kellyScale: 1.0,
+                modelProbSide: 1 - modelProb, marketPriceSide: 1 - marketPrice,
+              })
             }
-
-            qualifying.push({
-              n, mkt, midCents, marketPrice, modelProb, edge, betSide, betKey,
-              mode: 'high-conviction',
-              modelProbSide: betSide === 'YES' ? modelProb : 1 - modelProb,
-              marketPriceSide: betSide === 'YES' ? marketPrice : 1 - marketPrice,
-            })
           }
 
           if (!qualifying.length) continue
@@ -1417,26 +1303,28 @@ async function main() {
             execOrder.sort((a, b) => qualifying[b].n - qualifying[a].n)
           }
 
-          for (const i of execOrder) {
+          // Shared exec helper — returns true if any bettor order succeeded
+          const runExecItem = async (i) => {
             const q = qualifying[i]
             const s = sized[i]
-            if (!s || s.betSize <= 0) continue
+            if (!s || s.betSize <= 0) return false
 
-            // Per-pitcher free-money cap: stop firing takers once $500 sent for this pitcher
+            // Per-pitcher free-money cap: stop firing takers once limit reached
             if (q.mode === 'pulled') {
               const alreadySent = freeMoneySentPerPitcher.get(pitcherId) ?? 0
               if (alreadySent >= FREE_MONEY_PITCHER_CAP) {
                 console.log(`[live] 🚫 FREE MONEY PITCHER CAP  ${ctx.pitcherName}  $${alreadySent.toFixed(0)}/$${FREE_MONEY_PITCHER_CAP} — skipping ${q.n}+`)
-                continue
+                return false
               }
             }
 
-            // 2× sizing for high-edge bets (≥15¢) — validated +$1,909 on 100 bets historically
-            const edgeMult    = q.edge >= 0.15 ? 2 : 1
-            const finalBetSize = s.betSize * edgeMult
-            const capitalRisk = capitalAtRisk(finalBetSize, q.marketPrice, q.betSide)
+            // 2× sizing for high-edge bets (≥15¢); kellyScale < 1 for lower-conviction entries
+            const edgeMult     = q.edge >= 0.15 ? 2 : 1
+            const finalBetSize = s.betSize * edgeMult * (q.kellyScale ?? 1.0)
+            const capitalRisk  = capitalAtRisk(finalBetSize, q.marketPrice, q.betSide)
 
-            const sizeTag = edgeMult > 1 ? ` [2× edge=${(q.edge*100).toFixed(0)}¢]` : ''
+            const scaleTag = (q.kellyScale ?? 1.0) < 1.0 ? ` [${Math.round((q.kellyScale ?? 1.0)*100)}% kelly]` : ''
+            const sizeTag  = edgeMult > 1 ? ` [2× edge=${(q.edge*100).toFixed(0)}¢]${scaleTag}` : scaleTag
             console.log(`\n[live] ${q.mode === 'pulled' ? '🎯 PULLED' : '🔥 EDGE'} ${ctx.game} ${ctx.pitcherName} ${q.n}+ Ks ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p ${currentBF}BF  [${q.mode}]${sizeTag}`)
             db.saveLog({ tag: q.mode === 'pulled' ? 'PULLED' : 'EDGE', msg: `${ctx.pitcherName} ${q.n}+ ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP${sizeTag}`, pitcher: ctx.pitcherName, strike: q.n, side: q.betSide, edge_cents: Math.round(q.edge * 100) })
 
@@ -1487,7 +1375,6 @@ async function main() {
 
                 const webhooks = bettor.discord_webhook ? [bettor.discord_webhook] : []
                 if (q.mode === 'pulled' && betResult?.freeMoneySummary) {
-                  // Taker — fills immediately, notify now
                   await notifyFreeMoney({
                     pitcherName: ctx.pitcherName,
                     strike: q.n,
@@ -1500,7 +1387,6 @@ async function main() {
                     paper:          bettor.paper !== 0,
                   }, webhooks)
                 } else if (q.mode === 'dead-path') {
-                  // Taker — fills immediately, notify now
                   await notifyLiveBet({
                     pitcherName: ctx.pitcherName,
                     strike: q.n,
@@ -1517,8 +1403,22 @@ async function main() {
                 // high-conviction: maker order — no notification until fill confirmed at T-120
               }
             }
+            return anySuccess
+          }
 
-            if (LIVE && anySuccess) await loadDailyLoss()  // recheck loss tally after live orders fire
+          // Pulled + dead-path: taker orders on independent markets — fire concurrently
+          const batchItems = execOrder.filter(i => qualifying[i].mode === 'pulled' || qualifying[i].mode === 'dead-path')
+          const seqItems   = execOrder.filter(i => qualifying[i].mode !== 'pulled' && qualifying[i].mode !== 'dead-path')
+
+          if (batchItems.length) {
+            const batchResults = await Promise.all(batchItems.map(i => runExecItem(i)))
+            if (LIVE && batchResults.some(Boolean)) await loadDailyLoss()
+          }
+
+          // High-conviction: maker orders — sequential to respect queue ordering
+          for (const i of seqItems) {
+            const success = await runExecItem(i)
+            if (LIVE && success) await loadDailyLoss()
           }
         }
       } catch { /* skip game on error */ }
