@@ -440,8 +440,14 @@ export async function startScheduler() {
     }, 60_000)
   }, { timezone: 'America/New_York' })
 
-  // Every 5 min — fire any scheduled bets whose lineup has been posted (lineup-gated)
-  cron.schedule('*/5 * * * *', () => firePendingBets(), { timezone: 'America/New_York' })
+  // Every 5 min — fetch lineups for any games not yet captured, then fire pending bets.
+  // fetchLineups.js skips teams already in game_lineups (cheap no-op once all lineups posted).
+  // This means bets fire within 5 min of MLB posting the official batting order.
+  cron.schedule('*/5 * * * *', () => {
+    const d = etDate()
+    run('Lineup check', `node scripts/live/fetchLineups.js --date ${d}`)
+    setTimeout(() => firePendingBets(), 30_000)  // 30s delay so fetchLineups finishes first
+  }, { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh; 90s later re-run portfolio plan with fresh prices
   cron.schedule('30 15 * * *', () => {
@@ -473,5 +479,5 @@ export async function startScheduler() {
     run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 7:00am early schedule | 8:30am full pipeline | :30 8am-3pm schedule refresh | */5min lineup-gated bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 3:00am settle all')
+  console.log('[scheduler] daily jobs (ET): 7:00am early schedule | 8:30am full pipeline | :30 8am-3pm schedule refresh | */5min lineup fetch + bet fire | 3:30pm full lineup refresh + re-price | 4/6/8/10pm partial settle | 3:00am settle all')
 }

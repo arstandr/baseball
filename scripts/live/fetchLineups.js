@@ -110,10 +110,28 @@ async function main() {
     return
   }
 
-  console.log(`[lineups] Fetching official lineups for ${games.length} games on ${TODAY}…`)
+  // Pre-load which teams already have lineup data for today (skip re-fetching splits)
+  const alreadyFetched = new Set()
+  const existingRows = await db.all(
+    `SELECT game_id, team_abbr FROM game_lineups WHERE fetch_date = ? GROUP BY game_id, team_abbr`,
+    [TODAY],
+  ).catch(() => [])
+  for (const r of existingRows) alreadyFetched.add(`${r.game_id}:${r.team_abbr}`)
+
+  const pendingGames = games.filter(g =>
+    !alreadyFetched.has(`${g.id}:${g.team_home}`) || !alreadyFetched.has(`${g.id}:${g.team_away}`)
+  )
+
+  if (!pendingGames.length) {
+    console.log(`[lineups] All ${games.length} games already have lineups for ${TODAY} — skipping`)
+    await db.close()
+    return
+  }
+
+  console.log(`[lineups] Checking ${pendingGames.length}/${games.length} games still needing lineups on ${TODAY}…`)
   let lineupsSaved = 0, gamesWithLineup = 0
 
-  for (const game of games) {
+  for (const game of pendingGames) {
     const boxRes = await axios.get(`${MLB_BASE}/game/${game.id}/boxscore`, {
       timeout: 10000, validateStatus: s => s >= 200 && s < 500,
     }).catch(() => null)
@@ -121,6 +139,8 @@ async function main() {
 
     let gameSaved = false
     for (const [side, teamAbbr] of [['home', game.team_home], ['away', game.team_away]]) {
+      if (alreadyFetched.has(`${game.id}:${teamAbbr}`)) continue  // already have this team's lineup
+
       const team  = boxRes.data?.teams?.[side]
       const order = team?.battingOrder || []
       if (!order.length) {
