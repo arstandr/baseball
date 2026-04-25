@@ -338,6 +338,15 @@ export async function startScheduler() {
     run('Portfolio plan (10am)', `node scripts/live/ksBets.js plan --date ${d}`)
   }, { timezone: 'America/New_York' })
 
+  // Every hour 11am–5pm ET — intra-day price check.
+  // Re-runs the edge finder for pitchers whose game is still >3h away.
+  // If Kalshi prices moved in our favor since morning, buys in early at the better price.
+  // Skips pitchers already bet (dedup in logEdges) and anything inside the T-2.5h window.
+  cron.schedule('0 11-17 * * *', () => {
+    const d = etDate()
+    run('Intra-day price check', `node scripts/live/ksBets.js log --date ${d} --min-hours 3`)
+  }, { timezone: 'America/New_York' })
+
   // NBA morning run disabled
 
   // Every 30 min, 9:30am–3:30pm ET — re-fetch schedule + rebuild bet_schedule.

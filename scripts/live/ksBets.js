@@ -33,6 +33,7 @@ const opts = parseArgs({
   riskPct:   { flag: 'risk-pct', type: 'number', default: null },
   dryRun:    { flag: 'dry-run', type: 'boolean', default: false },
   pitcherId: { flag: 'pitcher-id', default: null },
+  minHours:  { flag: 'min-hours', type: 'number', default: null },  // skip pitchers whose game starts within this many hours
 })
 
 const TODAY    = opts.date
@@ -403,12 +404,20 @@ async function logEdges() {
       // Skip pitchers whose game has already started per the games table
       if (e.pitcher_id) {
         const gameRow = await db.one(
-          `SELECT status FROM games WHERE date=? AND (pitcher_home_id=? OR pitcher_away_id=?)`,
+          `SELECT status, game_time FROM games WHERE date=? AND (pitcher_home_id=? OR pitcher_away_id=?)`,
           [TODAY, String(e.pitcher_id), String(e.pitcher_id)],
         )
         if (gameRow && (gameRow.status === 'live' || gameRow.status === 'final')) {
           console.log(`  [skip] ${e.pitcher} — game already live/final (${gameRow.status})`)
           continue
+        }
+        // --min-hours: hourly pre-game check — skip pitchers inside the T-2.5h window
+        if (opts.minHours != null && gameRow?.game_time) {
+          const hoursToGame = (new Date(gameRow.game_time) - Date.now()) / 3_600_000
+          if (hoursToGame < opts.minHours) {
+            console.log(`  [skip] ${e.pitcher} — game in ${hoursToGame.toFixed(1)}h < ${opts.minHours}h min-hours window`)
+            continue
+          }
         }
       }
 
