@@ -318,14 +318,23 @@ async function checkForUpdates() {
     try {
       execSync('git reset --hard origin/main', { cwd: ROOT })
 
-      // Fix 7: only run npm ci when deps actually changed
+      // Only run npm install when deps actually changed
       let ranNpmCi = false
       if (lockfileChanged) {
         console.log('[closer] package-lock.json changed — running npm ci')
-        execSync('npm ci --quiet', { cwd: ROOT })
-        ranNpmCi = true
+        try {
+          execSync('npm ci --quiet', { cwd: ROOT })
+          ranNpmCi = true
+        } catch (ciErr) {
+          // npm ci deletes node_modules before reinstalling — if it fails mid-way,
+          // node_modules is empty and the process crashes on next require. Fall back
+          // to npm install which is more tolerant of network blips and lockfile drift.
+          console.warn(`[closer] npm ci failed (${ciErr.message.split('\n')[0]}) — falling back to npm install`)
+          execSync('npm install --quiet', { cwd: ROOT })
+          ranNpmCi = true
+        }
       } else {
-        console.log('[closer] no dependency changes — skipping npm ci')
+        console.log('[closer] no dependency changes — skipping npm install')
       }
 
       _currentHash = remote
@@ -343,7 +352,7 @@ async function checkForUpdates() {
           title:       '🔄 THE CLOSER — code updated',
           description:
             `Commit: \`${remote.slice(0, 7)}\` — ${msg}\n` +
-            `npm ci: ${ranNpmCi ? 'yes' : 'skipped'}\n` +
+            `deps: ${ranNpmCi ? 'reinstalled' : 'skipped (no lockfile change)'}\n` +
             `Changed (${changedFiles.length}):\n\`\`\`\n${fileList}\n\`\`\``,
           color: 0x0099ff,
         }, webhooks)
