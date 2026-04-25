@@ -152,6 +152,17 @@ async function firePendingBets() {
   const date = etDate()
   const now  = new Date().toISOString()
 
+  // Guard: don't fire any bets until daily_plan exists for today.
+  // daily_plan is written by `ksBets.js plan` at the end of the morning pipeline.
+  // Without it, ksBets can't size bets against the full day's portfolio.
+  try {
+    const plan = await dbOne(`SELECT bet_date FROM daily_plan WHERE bet_date = ?`, [date])
+    if (!plan) {
+      console.log(`[scheduler] firePendingBets: daily_plan not yet created for ${date} — holding all bets`)
+      return
+    }
+  } catch { return }  // DB error — hold bets to be safe
+
   let rows
   try {
     rows = await dbAll(
@@ -440,14 +451,19 @@ export async function startScheduler() {
     }, 60_000)
   }, { timezone: 'America/New_York' })
 
-  // Every 5 min — fetch lineups for any games not yet captured, then fire pending bets.
-  // fetchLineups.js skips teams already in game_lineups (cheap no-op once all lineups posted).
-  // This means bets fire within 5 min of MLB posting the official batting order.
-  cron.schedule('*/5 * * * *', () => {
+  // Every 5 min, 10am–8pm ET — fetch lineups then fire pending bets.
+  // Restricted to 10am+ so the morning pipeline (done by ~9am) has time to complete
+  // and daily_plan is guaranteed to exist before any bet fires.
+  // fetchLineups.js skips teams already captured (cheap no-op once all lineups posted).
+  cron.schedule('*/5 10-20 * * *', () => {
     const d = etDate()
     run('Lineup check', `node scripts/live/fetchLineups.js --date ${d}`)
     setTimeout(() => firePendingBets(), 30_000)  // 30s delay so fetchLineups finishes first
   }, { timezone: 'America/New_York' })
+
+  // Every 5 min outside lineup-check hours — still fire pending bets in case of late
+  // pipeline finishes or T-90 backstop games, but skip the lineup fetch.
+  cron.schedule('*/5 0-9,21-23 * * *', () => firePendingBets(), { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh; 90s later re-run portfolio plan with fresh prices
   cron.schedule('30 15 * * *', () => {

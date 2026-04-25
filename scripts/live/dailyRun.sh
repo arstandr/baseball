@@ -182,6 +182,10 @@ echo "── 6. Edge finder (lineup fallback: team K%) ──"
 node scripts/live/strikeoutEdge.js --date "$DATE" --json
 
 echo ""
+echo "── 6b. Portfolio plan (sizing denominator — must exist before any bet fires) ──"
+node scripts/live/ksBets.js plan --date "$DATE"
+
+echo ""
 echo "── 7. Build bet schedule (bets fire within 5min of lineup detection) ──"
 node scripts/live/ksBets.js build-schedule --date "$DATE"
 
