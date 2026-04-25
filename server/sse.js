@@ -41,10 +41,10 @@ setInterval(async () => {
     const today = todayISO()
     const [settlRow, liveRow, morningRow, filledRow] = await Promise.all([
       db.one(`SELECT COUNT(*) as n, MAX(settled_at) as last_settled, MAX(logged_at) as last_logged
-               FROM ks_bets WHERE bet_date=?`, [today]),
-      db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=1`, [today]),
-      db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=0`, [today]),
-      db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=0 AND filled_contracts > 0`, [today]),
+               FROM ks_bets WHERE bet_date=? AND paper=0`, [today]),
+      db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=1 AND paper=0`, [today]),
+      db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=0 AND paper=0`, [today]),
+      db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=0 AND paper=0 AND filled_contracts > 0`, [today]),
     ])
     const newSettled     = settlRow?.n ?? 0
     const newLive        = liveRow?.n ?? 0
@@ -188,7 +188,7 @@ router.get('/meta', async (req, res) => {
     let lastDataUpdate = _lastDataUpdate
     if (!lastDataUpdate) {
       const row = await db.one(
-        `SELECT MAX(settled_at) as s, MAX(logged_at) as l FROM ks_bets WHERE bet_date=?`, [today],
+        `SELECT MAX(settled_at) as s, MAX(logged_at) as l FROM ks_bets WHERE bet_date=? AND paper=0`, [today],
       ).catch(() => null)
       lastDataUpdate = [row?.s, row?.l].filter(Boolean).sort().pop() ?? null
       if (lastDataUpdate) _lastDataUpdate = lastDataUpdate

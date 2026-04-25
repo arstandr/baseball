@@ -235,7 +235,7 @@ router.post('/ks/reconcile', wrap(async (req, res) => {
 router.get('/ks/dates', wrap(async (req, res) => {
   const uf   = userFilter(req)
   const rows = await db.all(
-    `SELECT DISTINCT bet_date FROM ks_bets WHERE live_bet = 0 ${uf.clause} ORDER BY bet_date DESC LIMIT 60`,
+    `SELECT DISTINCT bet_date FROM ks_bets WHERE live_bet = 0 AND paper = 0 ${uf.clause} ORDER BY bet_date DESC LIMIT 60`,
     uf.args,
   )
   res.json(rows.map(r => r.bet_date).filter(Boolean))
@@ -530,7 +530,7 @@ router.get('/ks/bets', wrap(async (req, res) => {
   const limit  = Math.min(200, Number(req.query.limit || 50))
   const offset = (page - 1) * limit
 
-  let where  = `live_bet = 0`
+  let where  = `live_bet = 0 AND paper = 0`
   const params = []
   if (req.query.pitcher) { where += ` AND pitcher_name LIKE ?`; params.push(`%${req.query.pitcher}%`) }
   if (req.query.side)    { where += ` AND side = ?`;    params.push(req.query.side.toUpperCase()) }
@@ -786,7 +786,7 @@ router.get('/ks/pitcher-leaderboard', wrap(async (req, res) => {
             SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
             SUM(COALESCE(pnl,0))                           AS pnl,
             SUM(bet_size)                                  AS wagered
-     FROM ks_bets WHERE live_bet = 0 AND result IS NOT NULL
+     FROM ks_bets WHERE live_bet = 0 AND paper = 0 AND result IS NOT NULL
      GROUP BY pitcher_name ORDER BY pnl DESC`,
   )
   const all = rows.map(r => {
@@ -808,7 +808,7 @@ router.get('/ks/pitcher-leaderboard', wrap(async (req, res) => {
 
 router.get('/ks/game-review', wrap(async (req, res) => {
   const { from, to, result } = req.query
-  const conds = ['live_bet = 0']
+  const conds = ['live_bet = 0', 'paper = 0']
   const vals  = []
   if (from)   { conds.push('bet_date >= ?'); vals.push(from) }
   if (to)     { conds.push('bet_date <= ?'); vals.push(to) }
@@ -872,7 +872,7 @@ router.get('/ks/testing', wrap(async (req, res) => {
         SUM(COALESCE(pnl,0))                              AS pnl,
         AVG(edge)                                         AS avg_edge
       FROM ks_bets
-      WHERE result IS NOT NULL AND live_bet = 0 AND edge IS NOT NULL
+      WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 AND edge IS NOT NULL
       GROUP BY bucket_cents ORDER BY bucket_cents ASC
     `),
     db.all(`
@@ -885,12 +885,12 @@ router.get('/ks/testing', wrap(async (req, res) => {
         SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
         SUM(COALESCE(pnl,0)) AS pnl
       FROM ks_bets
-      WHERE result IS NOT NULL AND live_bet = 0 AND lambda IS NOT NULL AND actual_ks IS NOT NULL
+      WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 AND lambda IS NOT NULL AND actual_ks IS NOT NULL
       GROUP BY pitcher_name HAVING bets >= 3 ORDER BY bets DESC
     `),
     db.all(`
       SELECT edge, result, pnl, bet_size, capital_at_risk
-      FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND edge IS NOT NULL ORDER BY edge ASC
+      FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 AND edge IS NOT NULL ORDER BY edge ASC
     `),
   ])
 
@@ -976,7 +976,7 @@ router.get('/ks/testing', wrap(async (req, res) => {
 router.post('/ks/auto-settle', wrap(async (req, res) => {
   const { user_id } = req.body || {}
   const today  = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
-  const clause = user_id ? 'bet_date = ? AND result IS NULL AND user_id = ?' : 'bet_date = ? AND result IS NULL'
+  const clause = user_id ? 'bet_date = ? AND result IS NULL AND paper = 0 AND user_id = ?' : 'bet_date = ? AND result IS NULL AND paper = 0'
   const args   = user_id ? [today, user_id] : [today]
   const pending = await db.all(`SELECT * FROM ks_bets WHERE ${clause}`, args)
   if (!pending.length) return res.json({ settled: 0, checked: 0 })
