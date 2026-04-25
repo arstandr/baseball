@@ -893,15 +893,111 @@ async function main() {
   const dead    = new Set()
   const oneAway = new Set()
   const lastKsMap = new Map()  // pitcherId → last confirmed K count (delta detection)
-  // Track which games have been settled + Discord'd
-  const settledGames = new Set()
-  // Track which games have had their pre-game resting orders cancelled at first pitch
-  const preGameCancelled = new Set()
-  // Require 2 consecutive "not current" readings before treating as pulled.
-  // The MLB API sets isCurrentPitcher=false between half-innings (team at bat),
-  // which causes false free-money triggers on pitchers who are just in the dugout.
-  const notCurrentSince = new Map()  // pitcherId → { ip, ks, seenAt }
   const freeMoneySentPerPitcher = new Map()  // pitcherId → total USD risked on free-money takers
+
+  // ── DB-backed monitor state (survives restarts) ───────────────────────────
+  // In-memory caches are the hot path; every write also persists to monitor_state.
+  // On startup, loadMonitorState() hydrates the caches from today's DB rows.
+
+  // Ensure monitor_state table exists (safe no-op if already present)
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS monitor_state (
+      game_id           TEXT NOT NULL,
+      bet_date          TEXT NOT NULL,
+      pitcher_id        TEXT,
+      pregame_cancelled INTEGER DEFAULT 0,
+      game_settled      INTEGER DEFAULT 0,
+      not_current_since TEXT,
+      updated_at        TEXT,
+      PRIMARY KEY (game_id, bet_date, pitcher_id)
+    )
+  `).catch(() => {})
+
+  const _settledGames      = new Set()  // game_id
+  const _preGameCancelled  = new Set()  // game_id
+  const _notCurrentSince   = new Map()  // pitcherId → { ip, ks, seenAt, gameId }
+
+  async function loadMonitorState() {
+    try {
+      const rows = await db.all(
+        `SELECT game_id, pitcher_id, pregame_cancelled, game_settled, not_current_since
+         FROM monitor_state WHERE bet_date = ?`,
+        [TODAY],
+      )
+      for (const row of rows) {
+        if (row.game_settled)      _settledGames.add(row.game_id)
+        if (row.pregame_cancelled) _preGameCancelled.add(row.game_id)
+        if (row.not_current_since && row.pitcher_id && row.pitcher_id !== '__game__') {
+          try {
+            const parsed = JSON.parse(row.not_current_since)
+            _notCurrentSince.set(row.pitcher_id, { ...parsed, gameId: row.game_id })
+          } catch { /* corrupt row — ignore */ }
+        }
+      }
+      console.log(`[live] Monitor state loaded: ${_settledGames.size} settled, ${_preGameCancelled.size} pre-game cancelled, ${_notCurrentSince.size} possible-pull tracked`)
+    } catch (err) {
+      console.warn('[live] Could not load monitor_state:', err.message)
+    }
+  }
+
+  async function _markSettled(gameId) {
+    _settledGames.add(gameId)
+    await db.run(
+      `INSERT INTO monitor_state (game_id, bet_date, pitcher_id, game_settled, updated_at)
+       VALUES (?, ?, '__game__', 1, ?)
+       ON CONFLICT(game_id, bet_date, pitcher_id) DO UPDATE SET game_settled=1, updated_at=excluded.updated_at`,
+      [gameId, TODAY, new Date().toISOString()],
+    ).catch(() => {})
+  }
+
+  async function _markPreGameCancelled(gameId) {
+    _preGameCancelled.add(gameId)
+    await db.run(
+      `INSERT INTO monitor_state (game_id, bet_date, pitcher_id, pregame_cancelled, updated_at)
+       VALUES (?, ?, '__game__', 1, ?)
+       ON CONFLICT(game_id, bet_date, pitcher_id) DO UPDATE SET pregame_cancelled=1, updated_at=excluded.updated_at`,
+      [gameId, TODAY, new Date().toISOString()],
+    ).catch(() => {})
+  }
+
+  async function _setNotCurrentSince(pitcherId, gameId, value) {
+    if (value === null) {
+      _notCurrentSince.delete(pitcherId)
+      await db.run(
+        `UPDATE monitor_state SET not_current_since=NULL, updated_at=? WHERE game_id=? AND bet_date=? AND pitcher_id=?`,
+        [new Date().toISOString(), gameId, TODAY, pitcherId],
+      ).catch(() => {})
+    } else {
+      _notCurrentSince.set(pitcherId, { ...value, gameId })
+      await db.run(
+        `INSERT INTO monitor_state (game_id, bet_date, pitcher_id, not_current_since, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(game_id, bet_date, pitcher_id) DO UPDATE SET not_current_since=excluded.not_current_since, updated_at=excluded.updated_at`,
+        [gameId, TODAY, pitcherId, JSON.stringify(value), new Date().toISOString()],
+      ).catch(() => {})
+    }
+  }
+
+  await loadMonitorState()
+
+  // Proxy wrappers so the rest of the code calls Set/Map idioms as before,
+  // but writes are persisted to DB automatically.
+  const settledGames = {
+    has: (id) => _settledGames.has(id),
+    add: async (id) => { await _markSettled(id) },
+  }
+  const preGameCancelled = {
+    has: (id) => _preGameCancelled.has(id),
+    add: async (id) => { await _markPreGameCancelled(id) },
+  }
+  // notCurrentSince: callers must pass gameId as extra arg to set(); delete() derives from cached entry
+  const notCurrentSince = {
+    get:    (pid)          => _notCurrentSince.get(pid),
+    has:    (pid)          => _notCurrentSince.has(pid),
+    set:    (pid, val, gid) => _setNotCurrentSince(pid, gid ?? _notCurrentSince.get(pid)?.gameId ?? 'unknown', val),
+    delete: (pid)          => _setNotCurrentSince(pid, _notCurrentSince.get(pid)?.gameId ?? 'unknown', null),
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   // ── Startup backfill: settle any games that went Final while monitor was offline ──
   console.log('[live] Checking for games that finished before monitor started...')
@@ -912,7 +1008,7 @@ async function main() {
         mlbGet(`${MLB_BASE}/game/${game.id}/boxscore?fields=${BOX_FIELDS}`),
       ])
       if (ls?.abstractGameState === 'Final' && !settledGames.has(game.id)) {
-        settledGames.add(game.id)
+        await settledGames.add(game.id)
         await reconcileLiveFills(game).catch(() => {})
         await settleAndNotifyGame(game, box)
       }
@@ -994,7 +1090,7 @@ async function main() {
         // ── Game just went Final — settle + Discord ───────────────────────────
         if (state === 'Final') {
           if (!settledGames.has(game.id)) {
-            settledGames.add(game.id)
+            await settledGames.add(game.id)
             await reconcileLiveFills(game).catch(() => {})
             await settleAndNotifyGame(game, box)
           }
@@ -1007,7 +1103,7 @@ async function main() {
         // Pre-game limit prices are stale once first pitch is thrown — keeping
         // them open invites adverse fills when the market moves against us.
         if (!preGameCancelled.has(game.id)) {
-          preGameCancelled.add(game.id)
+          await preGameCancelled.add(game.id)
           await cancelPreGameOrders(game).catch(() => {})
         }
 
@@ -1142,13 +1238,13 @@ async function main() {
             } else {
               const prev = notCurrentSince.get(pitcherId)
               if (!prev) {
-                notCurrentSince.set(pitcherId, { ip: currentIP, ks: currentKs, seenAt: Date.now() })
+                notCurrentSince.set(pitcherId, { ip: currentIP, ks: currentKs, seenAt: Date.now() }, game.id)
                 console.log(`[live] 👀 POSSIBLE PULL  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP — waiting for confirmation`)
               } else if (prev.ip === currentIP && prev.ks === currentKs && currentIP >= 5) {
                 pitcherPulledEarly = true  // fallback: same IP/Ks two cycles, deep enough in game
                 console.log(`[live] ✅ PULL CONFIRMED (stale)  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP — firing free money`)
               } else {
-                notCurrentSince.set(pitcherId, { ip: currentIP, ks: currentKs, seenAt: Date.now() })
+                notCurrentSince.set(pitcherId, { ip: currentIP, ks: currentKs, seenAt: Date.now() }, game.id)
               }
             }
           } else if (isCurrent) {

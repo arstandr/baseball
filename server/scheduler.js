@@ -123,6 +123,30 @@ async function checkBetSanity() {
   }
 }
 
+// When a pitcher is skipped (scratch, preflight fail, dup-guard), redistribute
+// their pre-allocated budget proportionally across remaining pending entries.
+// This ensures no money is left on the table just because one game was skipped.
+async function _redistributeAllocation(date, skippedId, freedUsd) {
+  try {
+    const pending = await dbAll(
+      `SELECT id, allocated_usd FROM bet_schedule
+       WHERE bet_date = ? AND status = 'pending' AND id != ? AND allocated_usd > 0`,
+      [date, skippedId],
+    )
+    if (!pending.length) return
+    const totalAlloc = pending.reduce((s, r) => s + (r.allocated_usd || 0), 0)
+    if (totalAlloc <= 0) return
+    for (const row of pending) {
+      const bonus = freedUsd * (row.allocated_usd / totalAlloc)
+      const newAlloc = Math.round((row.allocated_usd + bonus) * 100) / 100
+      await dbRun(`UPDATE bet_schedule SET allocated_usd = ? WHERE id = ?`, [newAlloc, row.id])
+    }
+    console.log(`[scheduler] Redistributed $${freedUsd.toFixed(0)} from skipped entry to ${pending.length} remaining pitchers`)
+  } catch (err) {
+    console.warn(`[scheduler] _redistributeAllocation error: ${err.message}`)
+  }
+}
+
 async function firePendingBets() {
   const date = etDate()
   const now  = new Date().toISOString()
@@ -130,7 +154,7 @@ async function firePendingBets() {
   let rows
   try {
     rows = await dbAll(
-      `SELECT id, game_id, game_label, pitcher_id, pitcher_name, pitcher_side, game_time
+      `SELECT id, game_id, game_label, pitcher_id, pitcher_name, pitcher_side, game_time, allocated_usd
        FROM bet_schedule
        WHERE bet_date = ? AND status = 'pending' AND scheduled_at <= ?
        ORDER BY scheduled_at ASC`,
@@ -202,6 +226,38 @@ async function firePendingBets() {
 
   for (let i = 0; i < eligible.length; i++) {
     const entry = eligible[i]
+
+    // ── Lineup gate: hold until official lineups are posted, or T-90 backstop ─
+    // game_lineups table exists (per schema.sql) — check if lineup row is present.
+    const minsToGame = entry.game_time
+      ? (new Date(entry.game_time) - Date.now()) / 60_000
+      : 0
+    const pastBackstop = minsToGame <= 90
+
+    let lineupReady = false
+    try {
+      const lineupRow = await dbOne(
+        `SELECT game_id FROM game_lineups WHERE game_id = ? LIMIT 1`,
+        [entry.game_id],
+      ).catch(() => null)
+      lineupReady = !!lineupRow
+    } catch { /* table missing or query failed — treat as not ready */ }
+
+    if (!lineupReady && !pastBackstop) {
+      // Lineups not posted yet and we're not at the T-90 backstop — hold
+      console.log(`[scheduler] ⏳ HOLD ${entry.pitcher_name} — lineup not posted yet (${minsToGame.toFixed(0)}min to game)`)
+      // Un-claim the row so it can be picked up next poll
+      dbRun(`UPDATE bet_schedule SET status='pending', fired_at=NULL WHERE id=?`, [entry.id]).catch(() => {})
+      continue
+    }
+
+    if (lineupReady) {
+      console.log(`[scheduler] ✓ lineup posted for ${entry.game_label} — firing ${entry.pitcher_name}`)
+    } else {
+      console.log(`[scheduler] ⚡ T-90 backstop — firing ${entry.pitcher_name} without lineup (${minsToGame.toFixed(0)}min to game)`)
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     const check = preflightResults[i].status === 'fulfilled'
       ? preflightResults[i].value
       : { action: 'proceed', reason: '' }
@@ -243,6 +299,8 @@ async function firePendingBets() {
       dbRun(`UPDATE bet_schedule SET status='skipped' WHERE id=?`, [entry.id]).catch(() => {})
       console.log(`[scheduler] ⏭  SKIP  ${entry.pitcher_name}  —  ${check.reason}`)
       notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'skip', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
+      // Redistribute this pitcher's allocation to remaining pending entries
+      if (entry.allocated_usd > 0) _redistributeAllocation(date, entry.id, entry.allocated_usd).catch(() => {})
       continue
     }
 
@@ -251,11 +309,13 @@ async function firePendingBets() {
       notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
     }
 
-    console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}`)
+    // Pass the pre-allocated budget so this pitcher only draws from its slate share
+    const maxRiskFlag = entry.allocated_usd > 0 ? ` --max-risk ${entry.allocated_usd.toFixed(2)}` : ''
+    console.log(`[scheduler] ▶ scheduled bet: ${entry.pitcher_name} — ${entry.game_label}${entry.allocated_usd ? ` (alloc $${entry.allocated_usd.toFixed(0)})` : ''}`)
     try {
       await runAsync(
         `Scheduled bet: ${entry.pitcher_name} (${entry.game_label})`,
-        `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}`,
+        `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}${maxRiskFlag}`,
       )
       // Mark done/skipped based on whether a bet row was actually written
       const placed = await dbOne(
@@ -278,7 +338,7 @@ async function firePendingBets() {
 
 export async function startScheduler() {
   // Safe column migrations for bet_schedule (no-op if already exist)
-  for (const col of ['preflight TEXT', 'notes TEXT']) {
+  for (const col of ['preflight TEXT', 'notes TEXT', 'allocated_usd REAL']) {
     await dbRun(`ALTER TABLE bet_schedule ADD COLUMN ${col}`).catch(() => {})
   }
 
@@ -341,10 +401,16 @@ export async function startScheduler() {
   // Every hour 11am–5pm ET — intra-day price check.
   // Re-runs the edge finder for pitchers whose game is still >3h away.
   // If Kalshi prices moved in our favor since morning, buys in early at the better price.
-  // Skips pitchers already bet (dedup in logEdges) and anything inside the T-2.5h window.
+  // Skips pitchers already bet (dedup in logEdges) and anything inside the T-3.5h window.
   cron.schedule('0 11-17 * * *', () => {
     const d = etDate()
     run('Intra-day price check', `node scripts/live/ksBets.js log --date ${d} --min-hours 3`)
+  }, { timezone: 'America/New_York' })
+
+  // Refresh K prop lines every 30 min during pre-game window (11am–5pm ET)
+  // Ensures preflight has fresh DK/FD consensus before each lineup-triggered bet fires.
+  cron.schedule('*/30 11-17 * * *', () => {
+    run('K prop refresh', `node scripts/live/fetchKProps.js --date ${etDate()}`)
   }, { timezone: 'America/New_York' })
 
   // NBA morning run disabled
@@ -363,7 +429,7 @@ export async function startScheduler() {
     }, 60_000)
   }, { timezone: 'America/New_York' })
 
-  // Every 5 min — fire any scheduled bets whose T-2.5h window has arrived
+  // Every 5 min — fire any scheduled bets whose T-3.5h window has arrived (lineup-gated)
   cron.schedule('*/5 * * * *', () => firePendingBets(), { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh; 90s later re-run portfolio plan with fresh prices

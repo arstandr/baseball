@@ -88,7 +88,11 @@ setInterval(async () => {
 
     const bettors = await db.all(`SELECT id, kalshi_key_id, kalshi_private_key, kalshi_balance FROM users WHERE active_bettor=1 AND id != 1`)
     for (const u of bettors) {
-      if (u.kalshi_key_id) syncSettlementsForUser(u).catch(() => {})
+      if (u.kalshi_key_id) {
+        syncSettlementsForUser(u).then(r => {
+          if (r?.newSettled > 0) broadcastSSE('settled', { lastDataUpdate: new Date().toISOString() })
+        }).catch(() => {})
+      }
     }
     const newBal = Math.round((bettors[0]?.kalshi_balance || 0) * 100)
     if (newBal !== _sseState.kalshiBalance && _sseState.kalshiBalance !== -1) {

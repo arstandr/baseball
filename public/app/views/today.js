@@ -290,13 +290,47 @@ export async function refreshTodayView() {
   await refreshDates()
 }
 
+function _etHour() {
+  return parseInt(
+    new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false })
+      .formatToParts(new Date()).find(p => p.type === 'hour').value, 10,
+  )
+}
+
+function _msUntil6amET() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(new Date())
+  const h = parseInt(parts.find(p => p.type === 'hour').value, 10)
+  const m = parseInt(parts.find(p => p.type === 'minute').value, 10)
+  const s = parseInt(parts.find(p => p.type === 'second').value, 10)
+  if (h >= 6) return 0
+  return ((6 - h) * 3600 - m * 60 - s) * 1000
+}
+
+let _dayCutoverTimer = null
+function _scheduleDayCutover() {
+  if (_dayCutoverTimer) return
+  const ms = _msUntil6amET()
+  if (ms <= 0) return
+  _dayCutoverTimer = setTimeout(() => {
+    _dayCutoverTimer = null
+    state.selectedDate = null  // force default to new "today"
+    refreshDates()
+  }, ms)
+}
+
 async function refreshDates() {
+  _scheduleDayCutover()
   const uidParam = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
   const datesWithBets = await fetchJson(`/api/ks/dates${uidParam}`).catch(() => [])
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
   const dates = datesWithBets.includes(today) ? datesWithBets : [today, ...datesWithBets]
+  // Before 6am ET stay on the most recent game date (bets may still be settling).
+  // After 6am ET default to the fresh today date so yesterday's games move to "Yesterday".
+  const defaultDate = _etHour() >= 6 ? today : (datesWithBets[0] || today)
   if (!state.selectedDate || !dates.includes(state.selectedDate)) {
-    state.selectedDate = datesWithBets[0] || today
+    state.selectedDate = defaultDate
   }
 
   const container = document.getElementById('date-pills')

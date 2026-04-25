@@ -888,23 +888,24 @@ CREATE INDEX IF NOT EXISTS live_log_date ON live_log(bet_date, ts);
 ALTER TABLE ks_bets ADD COLUMN bet_mode TEXT DEFAULT 'normal';
 
 -- ========================================================================
--- bet_schedule: per-game scheduled bet entries (T-2.5h before first pitch)
--- Built by ksBets.js build-schedule at 9am. Polled every 5min by scheduler.
+-- bet_schedule: per-game scheduled bet entries (T-3.5h before first pitch)
+-- Built by ksBets.js build-schedule at 9am. Polled every 5min by scheduler (lineup-gated).
 -- ========================================================================
 CREATE TABLE IF NOT EXISTS bet_schedule (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  bet_date     TEXT NOT NULL,
-  game_id      TEXT NOT NULL,
-  game_label   TEXT NOT NULL,
-  pitcher_id   TEXT NOT NULL,
-  pitcher_name TEXT NOT NULL,
-  pitcher_side TEXT NOT NULL,          -- 'home' | 'away'
-  game_time    TEXT NOT NULL,          -- ISO first-pitch timestamp
-  scheduled_at TEXT NOT NULL,          -- game_time - 2.5h ISO
-  status       TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | skipped | checking
-  fired_at     TEXT,
-  preflight    TEXT,                             -- 'proceed'|'skip'|'boost' from AI check
-  notes        TEXT,                             -- reason from preflight check
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  bet_date       TEXT NOT NULL,
+  game_id        TEXT NOT NULL,
+  game_label     TEXT NOT NULL,
+  pitcher_id     TEXT NOT NULL,
+  pitcher_name   TEXT NOT NULL,
+  pitcher_side   TEXT NOT NULL,          -- 'home' | 'away'
+  game_time      TEXT NOT NULL,          -- ISO first-pitch timestamp
+  scheduled_at   TEXT NOT NULL,          -- game_time - 3.5h ISO (lineup-gate window)
+  status         TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | skipped | checking
+  fired_at       TEXT,
+  preflight      TEXT,                             -- 'proceed'|'skip'|'boost' from AI check
+  notes          TEXT,                             -- reason from preflight check
+  allocated_usd  REAL,                            -- pre-reserved budget share from daily_plan
   UNIQUE(bet_date, game_id, pitcher_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bet_schedule_date ON bet_schedule(bet_date, status);
@@ -960,3 +961,20 @@ CREATE TABLE IF NOT EXISTS decision_pipeline (
 CREATE INDEX IF NOT EXISTS idx_decision_pipeline_date    ON decision_pipeline(bet_date);
 CREATE INDEX IF NOT EXISTS idx_decision_pipeline_pitcher ON decision_pipeline(pitcher_id, bet_date);
 CREATE INDEX IF NOT EXISTS idx_decision_pipeline_action  ON decision_pipeline(bet_date, final_action);
+
+-- ========================================================================
+-- monitor_state: persistent liveMonitor session state (survives restarts)
+-- Replaces in-memory Sets/Maps for settledGames, preGameCancelled, and
+-- notCurrentSince so a crash/restart doesn't re-trigger actions already taken.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS monitor_state (
+  game_id              TEXT NOT NULL,
+  bet_date             TEXT NOT NULL,
+  pitcher_id           TEXT,
+  pregame_cancelled    INTEGER DEFAULT 0,
+  game_settled         INTEGER DEFAULT 0,
+  not_current_since    TEXT,           -- ISO timestamp when pitcher was first seen as not-current
+  updated_at           TEXT,
+  PRIMARY KEY (game_id, bet_date, pitcher_id)
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_state_date ON monitor_state(bet_date);

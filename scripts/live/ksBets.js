@@ -31,6 +31,7 @@ const opts = parseArgs({
   minEdge:   { flag: 'min-edge', type: 'number', default: 0.05 },
   betSize:   { flag: 'bet-size', type: 'number', default: 100 },
   riskPct:   { flag: 'risk-pct', type: 'number', default: null },
+  maxRisk:   { flag: 'max-risk', type: 'number', default: null },  // pre-allocated budget cap for this pitcher (from daily_plan)
   dryRun:    { flag: 'dry-run', type: 'boolean', default: false },
   pitcherId: { flag: 'pitcher-id', default: null },
   minHours:  { flag: 'min-hours', type: 'number', default: null },  // skip pitchers whose game starts within this many hours
@@ -335,17 +336,27 @@ async function logEdges() {
 
     const dailyBudget = bankroll * riskPct
 
-    // Subtract capital already deployed today so re-runs (e.g. lineup refresh)
-    // can't stack bets on top of the morning run and exceed the daily % cap.
-    const alreadySpent = await db.one(
-      `SELECT COALESCE(SUM(capital_at_risk), 0) AS spent
-         FROM ks_bets WHERE bet_date=? AND live_bet=0 AND user_id=?`,
-      [TODAY, bettor.id],
-    )
-    const spentToday = Number(alreadySpent?.spent || 0)
-    if (spentToday >= dailyBudget) {
-      console.log(`[ks-bets] ${bettor.name}: daily budget $${dailyBudget.toFixed(0)} already fully deployed ($${spentToday.toFixed(0)} out) — skipping`)
-      continue
+    // If a pre-allocated budget was passed (--max-risk), use it as this pitcher's
+    // spending envelope. This is set by the scheduler from bet_schedule.allocated_usd
+    // so that the full-day slate budget is reserved upfront at 9am — evening games
+    // can't be crowded out by afternoon games spending the shared pool first.
+    // Falls back to dailyBudget minus already-spent for backward compatibility.
+    let effectiveBudget
+    if (opts.maxRisk != null && opts.maxRisk > 0) {
+      effectiveBudget = opts.maxRisk
+      console.log(`[ks-bets] ${bettor.name}: using pre-allocated budget $${effectiveBudget.toFixed(0)} (slate-aware)`)
+    } else {
+      const alreadySpent = await db.one(
+        `SELECT COALESCE(SUM(capital_at_risk), 0) AS spent
+           FROM ks_bets WHERE bet_date=? AND live_bet=0 AND user_id=?`,
+        [TODAY, bettor.id],
+      )
+      const spentToday = Number(alreadySpent?.spent || 0)
+      if (spentToday >= dailyBudget) {
+        console.log(`[ks-bets] ${bettor.name}: daily budget $${dailyBudget.toFixed(0)} already fully deployed ($${spentToday.toFixed(0)} out) — skipping`)
+        continue
+      }
+      effectiveBudget = dailyBudget - spentToday
     }
 
     // Count existing YES bets per pitcher today for this user — cap re-runs from stacking
@@ -370,7 +381,7 @@ async function logEdges() {
       })
       .sort((a, b) => b._edgeVal - a._edgeVal)  // highest edge first
 
-    let budgetLeft = dailyBudget - spentToday
+    let budgetLeft = effectiveBudget
     const sized = []
     for (const e of withFace) {
       if (budgetLeft <= 0) break
@@ -381,7 +392,7 @@ async function logEdges() {
     }
 
     console.log(
-      `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · budget $${dailyBudget.toFixed(0)} (${(riskPct*100).toFixed(0)}%) · ${sized.length} bets · ${isLive ? 'LIVE' : 'paper'}`,
+      `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · budget $${effectiveBudget.toFixed(0)} · ${sized.length} bets · ${isLive ? 'LIVE' : 'paper'}`,
     )
 
     const now = new Date().toISOString()
@@ -509,9 +520,7 @@ async function logEdges() {
           let askCents     = e.side === 'YES'
             ? Math.min(99, Math.round(mid + halfSpread))
             : Math.min(99, Math.round(100 - mid + halfSpread))
-          // Post 1¢ below ask = maker order (75% fee discount vs taker)
-          // This rests on the book; liveMonitor cancels + takes market at T-120min if unfilled
-          const makerCents = Math.max(1, askCents - 1)
+          // TAKER: hit the current ask immediately — no resting, no adverse selection
           // Orderbook depth check — cap contracts at available liquidity
           let contracts = Math.max(1, Math.round(e._face))
 
@@ -549,14 +558,14 @@ async function logEdges() {
             }
           } catch { /* non-fatal — proceed with original sizing */ }
 
-          const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, makerCents, creds)
+          const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, askCents, creds)
           const order  = result?.order ?? result
 
           const orderId     = order?.order_id    ?? null
-          const fillPrice   = order?.yes_price   ?? order?.no_price ?? makerCents
-          const filledConts = order?.filled_count ?? 0   // 0 until Kalshi confirms fills
+          const fillPrice   = order?.yes_price   ?? order?.no_price ?? askCents
+          const filledConts = order?.filled_count ?? 0   // taker fills may be immediate
           const placedAt    = order?.created_time ?? new Date().toISOString()
-          const status      = order?.status      ?? 'resting'
+          const status      = order?.status      ?? 'executed'
 
           await db.run(
             `UPDATE ks_bets SET order_id=?, fill_price=?, filled_at=?, filled_contracts=?, order_status=?, paper=0
@@ -565,7 +574,7 @@ async function logEdges() {
             [orderId, fillPrice, placedAt, filledConts, status, TODAY, e.pitcher, e.strike, e.side, bettor.id, bettor.id],
           )
           ordersPlaced++
-          console.log(`  [kalshi] MAKER  ${e.side} ${e.strike}+ ${e.pitcher.padEnd(24)} ${contracts}c @ ${makerCents}¢ (ask ${askCents}¢)  id=${orderId}`)
+          console.log(`  [kalshi] TAKER  ${e.side} ${e.strike}+ ${e.pitcher.padEnd(24)} ${contracts}c @ ${askCents}¢  id=${orderId}`)
         } catch (err) {
           ordersFailed++
           console.error(`  [kalshi] FAILED  ${e.side} ${e.strike}+ ${e.pitcher}: ${err.message}`)
@@ -631,7 +640,7 @@ async function logEdges() {
 // ── BUILD-SCHEDULE mode: write T-2.5h entries for all of today's starters ────
 
 async function buildSchedule() {
-  const OFFSET_MS = 2.5 * 60 * 60 * 1000  // 150 minutes
+  const OFFSET_MS = 3.5 * 60 * 60 * 1000  // 210 minutes — T-3.5h to catch lineup posting window
 
   const games = await db.all(
     `SELECT g.id, g.game_time, g.team_home, g.team_away, g.pitcher_home_id, g.pitcher_away_id
@@ -682,7 +691,7 @@ async function buildSchedule() {
     }
   }
 
-  console.log(`\n[build-schedule] Done: ${added} new entries. Polling job fires bets at T-2.5h.`)
+  console.log(`\n[build-schedule] Done: ${added} new entries. Polling job fires bets at T-3.5h (lineup-gated).`)
   await db.close()
 }
 
@@ -1264,8 +1273,37 @@ async function planPortfolio() {
   )
 
   console.log(`[plan] ${TODAY}: ${pitcherBreakdown.size} pitchers · total_edge_weighted=${totalEdgeWeighted.toFixed(3)}`)
-  for (const [, p] of pitcherBreakdown) {
-    console.log(`  ${p.pitcher_name.padEnd(28)} ${p.edge_weighted.toFixed(3)}`)
+
+  // ── Backfill bet_schedule.allocated_usd for all pending entries ──────────────
+  // Each pitcher gets a pre-reserved share of the daily budget proportional to
+  // their edge weight. This prevents afternoon games from consuming the entire
+  // budget before evening games with equal or better edges get a chance to fire.
+  // Only updates PENDING rows — already-fired entries keep their original bet.
+  try {
+    await db.run(`ALTER TABLE bet_schedule ADD COLUMN allocated_usd REAL`).catch(() => {})
+
+    // Get active bettors to compute their daily budgets
+    const bettors = await db.all(`SELECT id, starting_bankroll, daily_risk_pct, paper FROM users WHERE active = 1`)
+    for (const bettor of bettors) {
+      const riskPct = bettor.daily_risk_pct ?? DAILY_RISK_PCT
+      // Use starting_bankroll as proxy — real Kalshi balance pulled at fire time
+      const bankroll = bettor.starting_bankroll ?? STARTING_BANKROLL
+      const dailyBudget = bankroll * riskPct
+
+      for (const [, p] of pitcherBreakdown) {
+        const share = totalEdgeWeighted > 0 ? p.edge_weighted / totalEdgeWeighted : 1 / pitcherBreakdown.size
+        const alloc = Math.round(share * dailyBudget * 100) / 100
+        await db.run(
+          `UPDATE bet_schedule SET allocated_usd = ?
+           WHERE bet_date = ? AND pitcher_id = ? AND status = 'pending'`,
+          [alloc, TODAY, p.pitcher_id],
+        ).catch(() => {})
+        console.log(`  ${p.pitcher_name.padEnd(28)} edge=${p.edge_weighted.toFixed(3)}  alloc=$${alloc.toFixed(0)} (${(share*100).toFixed(1)}%)`)
+      }
+    }
+    console.log(`[plan] Allocations written to bet_schedule`)
+  } catch (err) {
+    console.warn(`[plan] Could not write allocations to bet_schedule: ${err.message}`)
   }
 }
 
