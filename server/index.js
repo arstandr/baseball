@@ -99,6 +99,13 @@ export function startServer() {
   return app.listen(port, async () => {
     await db.migrate()
     await seedUsersFromEnv()
+    // Backfill paper=0 for any pre-game bets that placed real Kalshi orders
+    // (paper defaults to 1 at INSERT; the post-order UPDATE sometimes missed them)
+    await db.run(
+      `UPDATE ks_bets SET paper = 0
+       WHERE live_bet = 0 AND paper = 1
+         AND (order_id IS NOT NULL OR filled_contracts > 0)`
+    ).catch(e => console.warn('[startup] paper backfill failed:', e.message))
     startScheduler()
     startWsDaemon().catch(e => console.error('[ws-daemon] startup failed:', e.message))
     console.log(`[mlbie] dashboard listening on http://localhost:${port}`)

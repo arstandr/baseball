@@ -262,8 +262,9 @@ router.get('/ks/daily', wrap(async (req, res) => {
             order_id, fill_price, filled_at, filled_contracts, order_status, paper,
             bet_mode, capital_at_risk, live_ks_at_bet, live_ip_at_bet, live_inning
      FROM ks_bets
-     WHERE bet_date = ? AND live_bet = 0 AND paper = 0
+     WHERE bet_date = ? AND live_bet = 0
        AND (order_id IS NOT NULL OR filled_contracts > 0 OR result IS NOT NULL)
+       AND (paper = 0 OR filled_contracts > 0)
        ${uf.clause}
      ORDER BY pitcher_name, strike ASC`,
     [date, ...uf.args],

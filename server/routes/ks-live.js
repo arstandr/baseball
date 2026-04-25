@@ -28,8 +28,9 @@ router.get('/ks/live', wrap(async (req, res) => {
     `SELECT id, pitcher_id, pitcher_name, strike, side, market_mid, spread, bet_size,
             filled_contracts, fill_price, order_status, result
        FROM ks_bets
-       WHERE bet_date = ? AND live_bet = 0 AND paper = 0
+       WHERE bet_date = ? AND live_bet = 0
          AND (order_id IS NOT NULL OR filled_contracts > 0 OR result IS NOT NULL)
+         AND (paper = 0 OR filled_contracts > 0)
          ${uf.clause}`,
     [date, ...uf.args],
   )

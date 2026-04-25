@@ -539,6 +539,7 @@ async function logEdges() {
         raw_adj_factor:  e.raw_adj_factor  ?? null,
         spread:          e.spread          ?? null,
         live_bet:        0,
+        paper:           isLive ? 0 : 1,
       }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
       bettorLogged++
       logged++
@@ -729,12 +730,40 @@ async function buildSchedule() {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [TODAY, g.id, gameLabel, pitcherId, pitcherName, side, g.game_time, scheduledAt],
       )
+      const gameET = gameTime.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })
       if (inserted?.changes ?? 1) {
-        const gameET = gameTime.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })
         console.log(`[build-schedule] ${pitcherName.padEnd(22)} (${side.padEnd(4)}) ${gameLabel}  → game ${gameET} ET (lineup-gated)`)
         added++
       } else {
-        console.log(`[build-schedule] ${pitcherName} — already scheduled, skipping`)
+        // Row already exists — if it errored (morning glitch), revive it to pending so it can fire
+        const existing = await db.one(
+          `SELECT status, preflight FROM bet_schedule WHERE bet_date=? AND game_id=? AND pitcher_id=?`,
+          [TODAY, g.id, pitcherId],
+        )
+        // Revive error rows, and skipped rows where ksBets found no edge (preflight != 'skip').
+        // Preflight-skipped rows are AI/market judgment calls — leave them terminal.
+        const isError   = existing?.status === 'error'
+        const isNoEdge  = existing?.status === 'skipped' && existing?.preflight !== 'skip'
+        if (isError || isNoEdge) {
+          const gameStarted = new Date(g.game_time) <= new Date()
+          const existingBet = gameStarted ? null : await db.one(
+            `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_id=? AND live_bet=0 AND paper=0 LIMIT 1`,
+            [TODAY, pitcherId],
+          ).catch(() => null)
+          if (!gameStarted && !existingBet) {
+            await db.run(
+              `UPDATE bet_schedule SET status='pending', notes=NULL, fired_at=NULL, scheduled_at=?
+               WHERE bet_date=? AND game_id=? AND pitcher_id=?`,
+              [scheduledAt, TODAY, g.id, pitcherId],
+            )
+            console.log(`[build-schedule] ${pitcherName.padEnd(22)} (${side.padEnd(4)}) ${gameLabel}  → revived from ${existing.status} → game ${gameET} ET`)
+            added++
+          } else {
+            console.log(`[build-schedule] ${pitcherName} — ${gameStarted ? 'game already started' : 'bet already placed'}, leaving ${existing.status}`)
+          }
+        } else {
+          console.log(`[build-schedule] ${pitcherName} — already scheduled (${existing?.status}), skipping`)
+        }
       }
     }
   }
