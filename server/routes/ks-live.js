@@ -165,7 +165,7 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
            result, pnl, logged_at,
            live_ks_at_bet, live_ip_at_bet, live_inning, live_score
     FROM ks_bets
-    WHERE bet_date = ? AND live_bet = 1 ${uf.clause}
+    WHERE bet_date = ? AND live_bet = 1 AND paper = 0 ${uf.clause}
     ORDER BY pitcher_name ASC, strike ASC, logged_at DESC
   `, [date, ...uf.args])
 

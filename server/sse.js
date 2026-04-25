@@ -118,7 +118,7 @@ async function settleDeterminedBets(pitchers, date) {
     const bets = await db.all(
       `SELECT id, side, strike, market_mid, spread, bet_size, fill_price, filled_contracts
        FROM ks_bets
-       WHERE pitcher_id = ? AND bet_date = ? AND result IS NULL`,
+       WHERE pitcher_id = ? AND bet_date = ? AND result IS NULL AND paper = 0`,
       [p.pitcher_id, date],
     )
 
