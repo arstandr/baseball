@@ -226,7 +226,7 @@ async function settleEdges() {
 
   // Discord EOD report for NBA
   const allSettled = await db.all(`
-    SELECT * FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL AND model = 'nba_totals' AND live_bet = 0`,
+    SELECT * FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss') AND model = 'nba_totals' AND live_bet = 0`,
     [TODAY])
   if (allSettled.length) {
     const dayPnl   = allSettled.reduce((s, b) => s + (b.pnl || 0), 0)
@@ -237,7 +237,7 @@ async function settleEdges() {
              SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS w,
              SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS l,
              COALESCE(SUM(bet_size),0) AS wagered
-      FROM ks_bets WHERE result IS NOT NULL AND model = 'nba_totals' AND live_bet = 0`)
+      FROM ks_bets WHERE result IN ('win','loss') AND model = 'nba_totals' AND live_bet = 0`)
     await notifyDailyReport({
       date: `${TODAY} (NBA Totals)`,
       bets: allSettled.map(b => ({
