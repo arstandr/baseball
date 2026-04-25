@@ -538,6 +538,17 @@ export async function startScheduler() {
     }, 10 * 60 * 1000)  // 10 min after settle starts (give EOD time to finish)
   }, { timezone: 'America/New_York' })
 
+  // Midnight ET — prune stale game_lineups rows, keeping only latest per (game_id, team_abbr, vs_hand).
+  // Lineups are fetched repeatedly throughout the day; only the newest row per group is used.
+  cron.schedule('0 0 * * *', async () => {
+    await dbRun(
+      `DELETE FROM game_lineups WHERE rowid NOT IN (
+         SELECT MAX(rowid) FROM game_lineups GROUP BY game_id, team_abbr, vs_hand
+       )`,
+    ).catch(() => null)
+    console.log(`[cleanup] Pruned stale game_lineups rows`)
+  }, { timezone: 'America/New_York' })
+
   // Every Monday 8:00 AM ET — NB model calibration check (alerts on drift > 7%)
   cron.schedule('0 8 * * 1', () => {
     run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')

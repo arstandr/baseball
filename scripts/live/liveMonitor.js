@@ -875,9 +875,18 @@ async function convertStaleMakers() {
       }
 
       // Edge still good — take the market
-      const takerCents = Math.min(99, Math.round(currentAsk * 100) + 1)
-      const contracts  = Math.max(1, Math.round(bet.bet_size ?? 100))
-      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerCents, creds)
+      const takerCents    = Math.min(99, Math.round(currentAsk * 100) + 1)
+      const computedContracts = Math.max(1, Math.round(bet.bet_size ?? 100))
+      // Deduct already-filled contracts so we don't over-expose beyond original Kelly intent
+      const alreadyFilled  = bet.filled_contracts ?? 0
+      const takerContracts = Math.max(0, computedContracts - alreadyFilled)
+      if (takerContracts === 0) {
+        console.log(`  [stale-maker] ${bet.pitcher_name} ${bet.strike}+ already fully filled — no taker needed`)
+        _convertedBetIds.add(bet.id)
+        await db.run(`UPDATE ks_bets SET order_status='filled' WHERE id=?`, [bet.id])
+        continue
+      }
+      const result     = await placeOrder(bet.ticker, bet.side.toLowerCase(), takerContracts, takerCents, creds)
       const order2     = result?.order ?? result
       const newOrderId = order2?.order_id ?? null
       const newStatus  = order2?.status ?? 'placed'
@@ -887,7 +896,7 @@ async function convertStaleMakers() {
         `UPDATE ks_bets SET order_id=?, fill_price=?, order_status=?, market_mid=?, filled_at=? WHERE id=?`,
         [newOrderId, takerCents, newStatus, Math.round(currentAsk * 100), new Date().toISOString(), bet.id],
       )
-      console.log(`  → TAKER placed ${contracts}c @ ${takerCents}¢  edge=${(currentEdge * 100).toFixed(1)}¢  id=${newOrderId}`)
+      console.log(`  → TAKER placed ${takerContracts}c @ ${takerCents}¢  edge=${(currentEdge * 100).toFixed(1)}¢  id=${newOrderId}  (${alreadyFilled} already filled as maker)`)
     } catch (err) {
       console.error(`  [stale-maker] error for ${bet.pitcher_name}: ${err.message}`)
     }
@@ -1409,7 +1418,7 @@ async function main() {
 
   // Load active bettors once — refreshed every 50 iterations to pick up config changes
   let activeBettors = await db.all(
-    `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct
+    `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct, kalshi_balance
      FROM users WHERE active_bettor=1 ORDER BY id`,
   )
 
@@ -1418,7 +1427,7 @@ async function main() {
     // Refresh active bettors periodically in case creds/paper flag changed
     if (iteration > 0 && iteration % 50 === 0) {
       activeBettors = await db.all(
-        `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct
+        `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct, kalshi_balance
          FROM users WHERE active_bettor=1 ORDER BY id`,
       ).catch(() => activeBettors)
     }
@@ -1443,8 +1452,9 @@ async function main() {
     // Rule E: Auto-halt after -15% daily drawdown (net across all bets today)
     await reloadDailyNetPnl()
     const DRAWDOWN_HALT_PCT = 0.15
-    const totalStartingBankroll = activeBettors.reduce((s, u) => s + (u.starting_bankroll ?? 1000), 0)
-    const drawdownLimit = -(totalStartingBankroll * DRAWDOWN_HALT_PCT)
+    // For live users, prefer kalshi_balance (reflects real P&L over time) over starting_bankroll
+    const totalBankroll = activeBettors.reduce((s, u) => s + ((LIVE && u.kalshi_balance > 0) ? u.kalshi_balance : (u.starting_bankroll ?? 1000)), 0)
+    const drawdownLimit = -(totalBankroll * DRAWDOWN_HALT_PCT)
     if (_dailyNetPnl < drawdownLimit) {
       console.log(`\n[live] Rule E: Drawdown halt — today's P&L $${_dailyNetPnl.toFixed(2)} exceeds -${(DRAWDOWN_HALT_PCT*100).toFixed(0)}% limit. Stopping new bets.`)
       // Cancel all open orders on halt — for each live bettor

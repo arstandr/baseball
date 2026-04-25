@@ -1,3 +1,8 @@
+// DEPRECATED — This file is not called in production. The live in-game model
+// lives in liveMonitor.js (computeLiveModel). If you need to research live
+// probability, use liveMonitor.js as the reference — this file's model logic
+// has diverged (no pitch-count budget, no BF-based TTO, no score-state modifier).
+
 // scripts/live/inGameEdge.js — Live in-game strikeout edge finder.
 //
 // Polls active games every POLL_INTERVAL seconds, fetches live pitcher K totals
