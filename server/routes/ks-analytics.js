@@ -389,10 +389,26 @@ router.get('/ks/daily', wrap(async (req, res) => {
     return a.pitcher_name.localeCompare(b.pitcher_name)
   })
 
+  const liveRow = await db.one(
+    `SELECT COALESCE(SUM(pnl), 0) AS pnl, COUNT(*) AS bets,
+            SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending
+     FROM ks_bets WHERE bet_date=? AND live_bet=1 AND paper=0 ${uf.clause}`,
+    [date, ...uf.args],
+  ).catch(() => null)
+
+  const live_day_pnl    = roundTo(Number(liveRow?.pnl     || 0), 2)
+  const live_day_wins   = Number(liveRow?.wins    || 0)
+  const live_day_losses = Number(liveRow?.losses  || 0)
+  const live_day_pending= Number(liveRow?.pending || 0)
+
   res.json({
     date,
-    day_pnl:     roundTo(day_pnl, 2),
-    day_wins, day_losses, day_pending,
+    day_pnl:     roundTo(day_pnl + live_day_pnl, 2),
+    day_wins:    day_wins  + live_day_wins,
+    day_losses:  day_losses + live_day_losses,
+    day_pending: day_pending + live_day_pending,
     day_bets:    bets.length,
     pitchers,
   })

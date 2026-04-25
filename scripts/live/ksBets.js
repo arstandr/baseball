@@ -625,11 +625,7 @@ async function logEdges() {
     ],
   )
 
-  // Discord: post picks only to bettors who actually logged bets this run
-  if (_webhooksWithBets.length > 0) {
-    const discordEdges = guardedEdges.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
-    await notifyEdges(discordEdges, TODAY, _webhooksWithBets)
-  }
+  // Discord pick notifications suppressed — alerts fire only on confirmed fills/takers (T-120 check)
 }
 
 // ── BUILD-SCHEDULE mode: write T-2.5h entries for all of today's starters ────

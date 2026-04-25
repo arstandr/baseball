@@ -119,18 +119,22 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
 // ── Kalshi live market fetch for KS markets ───────────────────────────────────
 
 async function fetchLiveKsMarkets(ticker) {
-  // ticker is like KXMLBKS-26APR202138TORLAA-TORDCEASE84
-  // We want all K thresholds for this pitcher: KXMLBKS-26APR202138TORLAA-TORDCEASE84-{N}
+  // ticker is like KXMLBKS-26APR202138TORLAA-TORDCEASE84 (pitcher's baseTicker — no threshold suffix)
+  // We want all K thresholds for THIS pitcher only: TORDCEASE84-2, -3, -4, ...
+  // The API endpoint only accepts an event_ticker (strips the pitcher code), so we filter
+  // the response to markets whose ticker starts with this specific pitcher's baseTicker.
+  // Without this filter, all pitchers in the same game would be included, causing the
+  // false-pull system to buy contracts on the wrong pitcher's markets.
   try {
-    const eventTicker = ticker.split('-').slice(0, -1).join('-')  // strip threshold
-    const path = `/markets?event_ticker=${eventTicker}&series_ticker=KXMLBKS&status=open&limit=20`
+    const eventTicker = ticker.split('-').slice(0, -1).join('-')  // strip pitcher code → event level
     const headers = getAuthHeaders('GET', `/trade-api/v2/markets`)
     const res = await axios.get(`https://api.elections.kalshi.com/trade-api/v2/markets`, {
       params: { event_ticker: eventTicker, series_ticker: 'KXMLBKS', status: 'open', limit: 20 },
       headers,
       timeout: 10000,
     })
-    return res.data?.markets || []
+    const all = res.data?.markets || []
+    return all.filter(m => m.ticker.startsWith(ticker + '-'))
   } catch { return [] }
 }
 
@@ -356,6 +360,15 @@ async function settleAndNotifyGame(game, boxData) {
 
     if (actualKs == null) continue
 
+    // Pre-game resting orders that never filled — void them, no real money was risked.
+    if (!bet.live_bet && !bet.filled_contracts) {
+      await db.run(
+        `UPDATE ks_bets SET result='void', pnl=0, settled_at=? WHERE id=?`,
+        [now, bet.id],
+      )
+      continue
+    }
+
     const hit = actualKs >= bet.strike
     const won = bet.side === 'YES' ? hit : !hit
 
@@ -387,6 +400,11 @@ async function settleAndNotifyGame(game, boxData) {
           }
         }
       } catch { /* fall through to math */ }
+    }
+    if (pnl == null && bet.live_bet && !bet.filled_contracts) {
+      // Live bet with no fill data and Kalshi hasn't settled yet.
+      // Skip settling — ksSettlementSync computes correct P&L from actual Kalshi fills + settlement.
+      continue
     }
     if (pnl == null) {
       const fillFraction = fillPrice / 100
@@ -594,6 +612,19 @@ async function managePreGameOrders(game) {
           [fillPriceCents, filledCount || null, bet.id],
         )
         console.log(`  ✓ ${bet.pitcher_name} ${bet.side} ${bet.strike}+ — filled ${filledCount}c @ ${fillPriceCents ?? '?'}¢ (maker)`)
+        // Notify on confirmed maker fill — this is an official transaction
+        try {
+          await notifyLiveBet({
+            pitcherName: bet.pitcher_name,
+            strike:      bet.strike,
+            side:        bet.side,
+            marketMid:   fillPriceCents ?? bet.market_mid,
+            edge:        bet.edge,
+            betSize:     filledCount,
+            paper:       bet.paper === 1,
+            fillType:    'maker-filled',
+          }, await getAllWebhooks(db))
+        } catch {}
         continue
       }
 
@@ -633,6 +664,19 @@ async function managePreGameOrders(game) {
         [newOrderId, takerCents, newStatus, Math.round(currentAsk * 100), bet.id],
       )
       console.log(`    → TAKER fallback placed ${contracts}c @ ${takerCents}¢  edge=${(currentEdge*100).toFixed(1)}¢  id=${newOrderId}`)
+      // Notify on taker placement — takers fill immediately, this is an official transaction
+      try {
+        await notifyLiveBet({
+          pitcherName: bet.pitcher_name,
+          strike:      bet.strike,
+          side:        bet.side,
+          marketMid:   takerCents,
+          edge:        bet.edge,
+          betSize:     contracts,
+          paper:       bet.paper === 1,
+          fillType:    'taker',
+        }, await getAllWebhooks(db))
+      } catch {}
     } catch (err) {
       console.error(`  [T-120] error for ${bet.pitcher_name}: ${err.message}`)
     }
@@ -848,6 +892,43 @@ async function manageRestingOrder(bet, { currentPitches, currentIP, market, cred
   }
 }
 
+// ── Cancel pre-game resting orders the moment a game goes live ───────────────
+//
+// Pre-game resting orders are placed at stale pre-game prices. Once the first
+// pitch is thrown, live K data makes those prices obsolete. The worst outcome
+// is filling mid-game at a price that's now wrong: you only fill when the market
+// moves against you (someone hits your limit when your edge has evaporated).
+// So we cancel all unfilled pre-game makers the moment the game starts.
+
+async function cancelPreGameOrders(game) {
+  const gameLabel = `${game.team_away}@${game.team_home}`
+  const restingBets = await db.all(
+    `SELECT * FROM ks_bets
+      WHERE bet_date = ? AND live_bet = 0 AND order_status = 'resting' AND result IS NULL
+        AND (pitcher_id = ? OR pitcher_id = ?)`,
+    [TODAY, game.pitcher_home_id, game.pitcher_away_id],
+  )
+  if (!restingBets.length) return
+
+  const credsMap = await _loadCredsForBets(restingBets)
+  console.log(`\n[live] 🚫 GAME STARTED — cancelling ${restingBets.length} pre-game resting order(s) for ${gameLabel}`)
+
+  for (const bet of restingBets) {
+    const creds = credsMap.get(bet.user_id) ?? {}
+    try {
+      if (bet.order_id && creds.keyId) await cancelOrder(bet.order_id, creds)
+      await db.run(
+        `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=? WHERE id=?`,
+        [new Date().toISOString(), bet.id],
+      )
+      console.log(`  ✗ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — pre-game order cancelled at first pitch`)
+    } catch (err) {
+      console.error(`  [cancel-pregame] error for ${bet.pitcher_name}: ${err.message}`)
+    }
+  }
+  db.saveLog({ tag: 'INFO', msg: `${gameLabel} started — cancelled ${restingBets.length} pre-game resting orders` })
+}
+
 // ── Main monitor loop ─────────────────────────────────────────────────────────
 
 async function main() {
@@ -947,6 +1028,8 @@ async function main() {
   const lastKsMap = new Map()  // pitcherId → last confirmed K count (delta detection)
   // Track which games have been settled + Discord'd
   const settledGames = new Set()
+  // Track which games have had their pre-game resting orders cancelled at first pitch
+  const preGameCancelled = new Set()
   // Require 2 consecutive "not current" readings before treating as pulled.
   // The MLB API sets isCurrentPitcher=false between half-innings (team at bat),
   // which causes false free-money triggers on pitchers who are just in the dugout.
@@ -1061,6 +1144,14 @@ async function main() {
         }
 
         allDone = false  // at least one game still live
+
+        // Cancel pre-game resting orders the first time we see this game live.
+        // Pre-game limit prices are stale once first pitch is thrown — keeping
+        // them open invites adverse fills when the market moves against us.
+        if (!preGameCancelled.has(game.id)) {
+          preGameCancelled.add(game.id)
+          await cancelPreGameOrders(game).catch(() => {})
+        }
 
         // Check both starters
         for (const [side, pitcherId] of [
@@ -1318,7 +1409,15 @@ async function main() {
             })),
           )
 
-          for (let i = 0; i < qualifying.length; i++) {
+          // For pulled/dead-path bets: execute highest threshold first.
+          // These are near-certain wins — if cash runs out, we want the safest
+          // (most certain, highest-n) positions filled rather than cheap low-threshold ones.
+          const execOrder = qualifying.map((_, i) => i)
+          if (qualifying.some(q => q.mode === 'pulled' || q.mode === 'dead-path')) {
+            execOrder.sort((a, b) => qualifying[b].n - qualifying[a].n)
+          }
+
+          for (const i of execOrder) {
             const q = qualifying[i]
             const s = sized[i]
             if (!s || s.betSize <= 0) continue
@@ -1388,6 +1487,7 @@ async function main() {
 
                 const webhooks = bettor.discord_webhook ? [bettor.discord_webhook] : []
                 if (q.mode === 'pulled' && betResult?.freeMoneySummary) {
+                  // Taker — fills immediately, notify now
                   await notifyFreeMoney({
                     pitcherName: ctx.pitcherName,
                     strike: q.n,
@@ -1399,7 +1499,8 @@ async function main() {
                     game:           ctx.game,
                     paper:          bettor.paper !== 0,
                   }, webhooks)
-                } else {
+                } else if (q.mode === 'dead-path') {
+                  // Taker — fills immediately, notify now
                   await notifyLiveBet({
                     pitcherName: ctx.pitcherName,
                     strike: q.n,
@@ -1413,6 +1514,7 @@ async function main() {
                     paper: bettor.paper !== 0,
                   }, webhooks)
                 }
+                // high-conviction: maker order — no notification until fill confirmed at T-120
               }
             }
 

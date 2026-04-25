@@ -628,12 +628,11 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     return { p, sd: calcPitcherStatus(p, live) }
   })
 
+  // Sort: live games first, then by game_time within each group
   cards.sort((a, b) => {
-    if ( a.sd.isLive && !b.sd.isLive) return -1
-    if (!a.sd.isLive &&  b.sd.isLive) return  1
-    if ( a.sd.isLive &&  b.sd.isLive) return b.sd.pendingRisk - a.sd.pendingRisk
-    if ( a.sd.isWaiting && !b.sd.isWaiting) return -1
-    if (!a.sd.isWaiting &&  b.sd.isWaiting) return  1
+    const aLive = a.sd.isLive
+    const bLive = b.sd.isLive
+    if (aLive !== bLive) return aLive ? -1 : 1
     return (a.p.game_time || '').localeCompare(b.p.game_time || '')
   })
 
@@ -656,10 +655,13 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     if (card && det) {
       det.hidden = false
       card.classList.add('gc-expanded')
-      const arr = card.querySelector('.gc-expand')
-      if (arr) arr.textContent = '‹'
     }
   }
+
+  // Wire click-anywhere-to-expand and show search box
+  const searchWrap = document.getElementById('sc-search-wrap')
+  if (searchWrap && cards.length) searchWrap.hidden = false
+  _applySearch()
 }
 
 function renderGameCard(p, sd) {
@@ -677,12 +679,18 @@ function renderGameCard(p, sd) {
 
   let pitchingStatusHtml = ''
   if (live && !live.is_final) {
+    const pitchInfo = [
+      currentInning,
+      pitchCount != null ? `${pitchCount} pitches` : null,
+    ].filter(Boolean).join(' · ')
     if (isPitching) {
-      pitchingStatusHtml = `<div class="gc-pitching-now">⚾ Pitching Now · ${pitchCount ? pitchCount + ' pitches' : ''}</div>`
+      pitchingStatusHtml = `<div class="gc-pitching-now">⚾ Pitching Now${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
     } else if (live.still_in === false) {
-      pitchingStatusHtml = `<div class="gc-pitching-out">Out of game</div>`
+      pitchingStatusHtml = `<div class="gc-pitching-out">Out of game${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
     } else if (inningState === 'Middle' || inningState === 'End') {
-      pitchingStatusHtml = `<div class="gc-pitching-between">Between innings${currentInning ? ` · ${currentInning}` : ''}</div>`
+      pitchingStatusHtml = `<div class="gc-pitching-between">Between innings${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
+    } else if (pitchInfo) {
+      pitchingStatusHtml = `<div class="gc-pitching-between">${pitchInfo}</div>`
     }
   }
 
@@ -783,7 +791,7 @@ function renderGameCard(p, sd) {
     }).join('')
 
   const filterTags = [p.wins > 0 ? 'win' : null, p.losses > 0 ? 'loss' : null, p.pending > 0 ? 'pending' : null].filter(Boolean).join(' ') || 'pending'
-  return `<div class="game-card ${cfg.cls}" id="${cardId}" data-pitcher-id="${p.pitcher_id}" data-pending-risk="${sd.pendingRisk.toFixed(2)}" data-filter-result="${filterTags}">
+  return `<div class="game-card ${cfg.cls}" id="${cardId}" data-pitcher-id="${p.pitcher_id}" data-pending-risk="${sd.pendingRisk.toFixed(2)}" data-filter-result="${filterTags}" onclick="toggleGcDetails('${cardId}')">
     <div class="gc-status-band ${cfg.cls}">${cfg.label}</div>
     <div class="gc-body">
       <div class="gc-pitcher">${esc(p.pitcher_name)}</div>
@@ -797,9 +805,9 @@ function renderGameCard(p, sd) {
       ${progressHtml}
     </div>
     ${moneyHtml}
-    <button class="gc-expand-toggle" onclick="toggleGcDetails('${cardId}')">
+    <div class="gc-expand-toggle">
       <span id="${cardId}-tlbl">Show details ›</span>
-    </button>
+    </div>
     <div class="gc-details" id="${cardId}-det" hidden>
       <div class="gc-thresholds">${rows}</div>
     </div>
@@ -807,13 +815,26 @@ function renderGameCard(p, sd) {
 }
 
 function toggleGcDetails(cardId) {
+  const card  = document.getElementById(cardId)
   const det   = document.getElementById(`${cardId}-det`)
-  const label = document.getElementById(`${cardId}-tlbl`)
   if (!det) return
   const opening = det.hidden
   det.hidden = !opening
-  if (label) label.textContent = opening ? 'Hide details ‹' : 'Show details ›'
+  card?.classList.toggle('gc-expanded', opening)
 }
+
+function _applySearch() {
+  const input = document.getElementById('sc-search')
+  if (!input) return
+  const q = (input.value || '').trim().toLowerCase()
+  document.querySelectorAll('#sc-bet-list .game-card').forEach(card => {
+    const name = (card.querySelector('.gc-pitcher')?.textContent || '').toLowerCase()
+    card.style.display = (!q || name.includes(q)) ? '' : 'none'
+  })
+}
+
+// wire search input once (re-runs on re-renders are no-ops since input persists)
+document.getElementById('sc-search')?.addEventListener('input', _applySearch)
 
 export function buildPitcherCard(p) {
   const KALSHI_FEE = 0.07
