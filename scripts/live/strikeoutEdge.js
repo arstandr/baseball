@@ -545,12 +545,13 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
   const bbPenalty = 1.0
 
   // ── TTO (Times Through Order) penalty ───────────────────────────────────
-  // K rate drops ~18% on the 3rd pass through the lineup — hitters adjust.
+  // K rate drops ~15% on the 3rd pass through the lineup — hitters adjust.
   // Only meaningful when pitcher is projected to face ≥19 batters (TTO3+ zone).
-  // Apply proportionally: fraction of expectedBF in TTO3+ gets ×0.82.
+  // Apply proportionally: fraction of expectedBF in TTO3+ gets ×0.85.
+  // Value matches inGameEdge.js (TTO_PENALTY=0.85) so pre-game and live models agree.
   const TTO_LINEUP = 9          // batters in a lineup
   const TTO3_BF    = TTO_LINEUP * 2  // BF threshold where TTO3 begins (18)
-  const TTO3_DECAY = 0.82        // K rate multiplier in TTO3+
+  const TTO3_DECAY = 0.85        // K rate multiplier in TTO3+ (unified with live model)
   let ttoPenalty = 1.0, ttoNote = null
 
   if (expectedBF > TTO3_BF) {
@@ -840,6 +841,8 @@ async function main() {
         if (Math.abs(splitAdj - 1.0) > 0.015) {
           splitNote = ` | splitK×${splitAdj.toFixed(2)}(vsL=${(savant.k_pct_vs_l*100).toFixed(1)}%,vsR=${(savant.k_pct_vs_r*100).toFixed(1)}%)`
         }
+      } else if (savant) {
+        console.warn(`  [edge] ⚠ ${meta.name}: no Savant L/R splits — platoon adjustment skipped (blended K% used)`)
       }
 
       const lambda    = lambdaBase * splitAdj * effectiveAdj * parkFactor * weatherMult * umpFactor

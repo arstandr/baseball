@@ -197,13 +197,23 @@ async function loadPriors() {
        GROUP BY pitcher_name`,
     [TODAY],
   )
-  // Derive avg_ip from lambda / (k9/9). k9 = blended k9 at time of logging.
+  // Load per-pitcher avg IP from recent starts (last 5 starts with IP > 0)
+  const ipRows = await db.all(
+    `SELECT pitcher_id, AVG(ip) as avg_ip
+       FROM (
+         SELECT pitcher_id, ip FROM pitcher_recent_starts
+         WHERE season = ? AND ip > 0
+         ORDER BY pitcher_id, game_date DESC
+       )
+       GROUP BY pitcher_id`,
+    [new Date(TODAY).getFullYear()],
+  ).catch(() => [])
+  const avgIpByPitcher = new Map(ipRows.map(r => [String(r.pitcher_id), Number(r.avg_ip)]))
+
   _priorCache = new Map()
   for (const r of rows) {
     const k9_prior = r.k9_season ?? r.k9_l5 ?? 8.8
-    // avg_ip = lambda / (k9/9) — but lambda already includes opp adjustment.
-    // Use a fixed 5.2 default since we don't store avg_ip separately.
-    const avg_ip = 5.2
+    const avg_ip = avgIpByPitcher.get(String(r.pitcher_id)) ?? 5.2
     _priorCache.set(r.pitcher_id,                  { k9: k9_prior, avg_ip, name: r.pitcher_name })
     _priorCache.set(r.pitcher_name?.toLowerCase(), { k9: k9_prior, avg_ip })
   }

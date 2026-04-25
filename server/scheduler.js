@@ -2,8 +2,9 @@
 //
 // Runs daily jobs (all times ET):
 //   7:00 AM  — early schedule + Savant fetch (slate visibility before Kalshi opens)
+//   2:00 PM  — afternoon Savant refresh (fresh pitcher K% for evening games)
 //   8:30 AM  — full morning run (schedule + Savant + edges + build bet_schedule)
-//   */5 min  — firePendingBets: fires pre-game bets immediately when lineup is detected
+//   */5 min  — firePendingBets: fires when BOTH lineups posted (T-90 backstop if late)
 //   3:30 PM  — lineup refresh (official 9-man lineups → re-price edges)
 //   3:00 AM  — settle + EOD report (Claude analysis → Discord; after west coast games finish)
 //
@@ -249,24 +250,24 @@ async function firePendingBets() {
     let lineupReady = false
     try {
       const lineupRow = await dbOne(
-        `SELECT game_id FROM game_lineups WHERE game_id = ? LIMIT 1`,
-        [entry.game_id],
+        `SELECT COUNT(DISTINCT team_abbr) as teams FROM game_lineups WHERE game_id = ? AND fetch_date = ?`,
+        [entry.game_id, date],
       ).catch(() => null)
-      lineupReady = !!lineupRow
+      lineupReady = (lineupRow?.teams ?? 0) >= 2
     } catch { /* table missing or query failed — treat as not ready */ }
 
     if (!lineupReady && !pastBackstop) {
-      // Lineups not posted yet and we're not at the T-90 backstop — hold
-      console.log(`[scheduler] ⏳ HOLD ${entry.pitcher_name} — lineup not posted yet (${minsToGame.toFixed(0)}min to game)`)
+      // Both lineups not posted yet and we're not at the T-90 backstop — hold
+      console.log(`[scheduler] ⏳ HOLD ${entry.pitcher_name} — waiting for both lineups (${minsToGame.toFixed(0)}min to game)`)
       // Un-claim the row so it can be picked up next poll
       dbRun(`UPDATE bet_schedule SET status='pending', fired_at=NULL WHERE id=?`, [entry.id]).catch(() => {})
       continue
     }
 
     if (lineupReady) {
-      console.log(`[scheduler] ✓ lineup posted for ${entry.game_label} — firing ${entry.pitcher_name}`)
+      console.log(`[scheduler] ✓ both lineups posted for ${entry.game_label} — firing ${entry.pitcher_name}`)
     } else {
-      console.log(`[scheduler] ⚡ T-90 backstop — firing ${entry.pitcher_name} without lineup (${minsToGame.toFixed(0)}min to game)`)
+      console.log(`[scheduler] ⚡ T-90 backstop — firing ${entry.pitcher_name} without both lineups (${minsToGame.toFixed(0)}min to game)`)
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -403,6 +404,13 @@ export async function startScheduler() {
     const d = etDate()
     run('Early schedule fetch', `node scripts/live/fetchSchedule.js --date ${d} --days 1`)
     setTimeout(() => run('Early Savant fetch', `node scripts/live/fetchPitcherStatcast.js`), 30_000)
+  }, { timezone: 'America/New_York' })
+
+  // 2:00 PM ET — afternoon Savant refresh (fresh pitcher K% data for evening games).
+  // Statcast data fetched at 7am can be 7+ hours stale by game time. Re-fetching at 2pm
+  // ensures evening-game edge calculations use the most recent K% before bets fire.
+  cron.schedule('0 14 * * *', () => {
+    run('Afternoon Savant refresh', `node scripts/live/fetchPitcherStatcast.js`)
   }, { timezone: 'America/New_York' })
 
   // 8:30 AM ET — MLB morning run (skipped if early-game pipeline already ran at 3am).

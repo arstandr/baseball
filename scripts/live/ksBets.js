@@ -203,12 +203,13 @@ async function logEdges() {
   //         Both market and model agree YES is likely — no conviction to bet NO.
   //         If model says NO wins outright (model_prob < 0.50), let it through regardless of market price.
   // Rule D: Ban YES bets where model_prob < 0.30 (not enough conviction)
+  //         Exception: if edge ≥ 18¢, let it through — large edge overrides low-conviction
   // Rule E: Ban NO bets where market_mid < 15 — market already near-certain NO, no edge to capture
   // Rule F: Ban NO bets at strike ≤ 4 — Apr 2026: strike 3 NO 0% WR (-$53), strike 4 NO 27.8% WR (-$41)
   // Rule C (strike=3 skip) removed — live data shows K≤3 bets have 47% ROI
   const guardedEdges = withFill.filter(e => {
     if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false  // Rule A
-    if (e.side === 'YES' && e.model_prob < 0.30) return false                                  // Rule D
+    if (e.side === 'YES' && e.model_prob < 0.30 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false  // Rule D (waived if edge ≥ 18¢)
     if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false                            // Rule E
     if (e.side === 'NO' && e.strike <= 4) return false                                         // Rule F
     return true
@@ -622,7 +623,7 @@ async function logEdges() {
           const order  = result?.order ?? result
 
           const orderId     = order?.order_id    ?? null
-          const fillPrice   = order?.yes_price   ?? order?.no_price ?? askCents
+          const fillPrice   = askCents  // taker fill IS the submitted ask; yes_price from response is complement for NO bets
           const filledConts = order?.filled_count ?? 0   // taker fills may be immediate
           const placedAt    = order?.created_time ?? new Date().toISOString()
           const status      = order?.status      ?? 'executed'
@@ -1293,11 +1294,12 @@ async function planPortfolio() {
     return yesCounts[e.pitcher] <= MAX_YES_PER_PITCHER
   })
 
-  // Protection rules A / D / E
+  // Protection rules A / D / E / F (mirrors logEdges filter — keeps denominator consistent)
   const guardedEdges = withFill.filter(e => {
     if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false
     if (e.side === 'YES' && e.model_prob < 0.30) return false
     if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false
+    if (e.side === 'NO' && e.strike <= 4) return false   // Rule F — matches logEdges filter
     return true
   })
 

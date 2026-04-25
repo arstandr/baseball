@@ -390,10 +390,54 @@
             <div class="sys-row"><span>Bet sizing method</span><b>Quarter Kelly (25%)</b></div>
             <div class="sys-row"><span>Max bet per pitcher</span><b>5% of bankroll</b></div>
             <div class="sys-row"><span>Minimum bet</span><b>$25</b></div>
-            <div class="sys-row"><span>Minimum edge (YES or NO)</span><b>12¢</b></div>
+            <div class="sys-row"><span>Minimum edge (YES or NO)</span><b>12¢ (YES bets with ≥18¢ edge bypass the 30% model conviction requirement)</b></div>
             <div class="sys-row"><span>NO bets capital weight</span><b>1.25× (structural edge)</b></div>
             <div class="sys-row"><span>Max NO price (pre-game calc)</span><b>80¢ NO mid — above this, risk/reward is too poor</b></div>
             <div class="sys-row"><span>Max NO price (live re-entry)</span><b>55¢ ask — won't pay more mid-game</b></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head"><h2>Free Money Rules</h2><span class="panel-sub">When the market hasn't caught up to reality — taker orders, no waiting</span></div>
+        <div class="sys-info">
+          <p style="color:var(--text-dim);font-size:13px;margin:0 0 12px;line-height:1.5">
+            Normal bets use <em>maker</em> orders — we set a price and wait for someone to take the other side. Free money situations are different: the outcome is already structurally decided (or nearly so), but Kalshi's market hasn't repriced yet. In these cases, we skip the queue and use <em>taker</em> orders — buying immediately at whatever price is available. Speed matters more than fees here.
+          </p>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge rule-gate" style="background:#1a6b3c;color:#7fffb0;font-size:10px;line-height:1.3">Pulled<br>Pitcher</span>
+            <div class="sched-body">
+              <b>Pitcher removed from game — buy NO immediately</b>
+              <p>When a starter is pulled mid-game and he hasn't reached a strikeout threshold yet, that threshold is now <em>impossible to hit</em>. The YES contract is worthless. But Kalshi sometimes takes a few minutes to reprice. When we confirm the starter is out (reliever on mound, or same IP/Ks two polls in a row), we fire taker NO orders right away — buying the guaranteed outcome before the market catches up. Capped at $10 per threshold, $30 total per pitcher.</p>
+            </div>
+          </div>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge rule-gate" style="background:#1a3d6b;color:#70b8ff;font-size:10px;line-height:1.3">Crossed<br>YES</span>
+            <div class="sched-body">
+              <b>Threshold already hit — buy YES if market is lagged</b>
+              <p>The opposite of a pulled pitcher: if a starter <em>already has</em> enough strikeouts to cover a threshold (e.g. he has 8 Ks and the market is 8+), that YES contract is worth 100¢ — guaranteed. If Kalshi is still showing YES available at ≤20¢, we buy it immediately. The outcome is certain; we're just collecting what the market hasn't priced in yet. Capped at $10 per threshold, same $30 pitcher cap as above.</p>
+            </div>
+          </div>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge rule-gate" style="background:#5a3d00;color:#ffc966;font-size:10px;line-height:1.3">Blowout<br>NO</span>
+            <div class="sched-body">
+              <b>Team losing big in late innings — pitcher pull is likely, buy NO</b>
+              <p>When a pitcher's team is losing by 5 or more runs starting in the 6th inning (or later), managers almost always pull their starter early. There's no reason to keep the ace in when the game is out of reach. If the pitcher still needs 3+ Ks to cover a threshold, that gap is structurally very hard to close before the hook. We buy NO taker orders in this situation — not as a certainty, but as a high-probability structural bet that the market usually underprices. Edge threshold: 10¢ or better after fees.</p>
+            </div>
+          </div>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge rule-cap" style="font-size:10px;line-height:1.3">Dead<br>Path</span>
+            <div class="sched-body">
+              <b>High pitch count + too big a gap — physically can't get there, buy NO</b>
+              <p>Even if the pitcher is still in the game, some situations are structurally dead: if he's thrown 85+ pitches in 4+ innings and needs 3+ more strikeouts to cover a threshold, there just isn't enough gas left to do it. Starters rarely survive past 100–105 pitches, and each inning is only 3 outs — strikeouts aren't guaranteed. When pitch count and the K gap both say "not happening," we use a Kelly-sized NO taker rather than waiting. Capped at $10 per threshold via game reserves.</p>
+            </div>
+          </div>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge rule-block" style="font-size:10px;line-height:1.3">Pre-Game<br>Scratch</span>
+            <div class="sched-body">
+              <b>Scheduled starter never showed up — hedge open YES positions</b>
+              <p>Sometimes a pitcher is scratched at the last minute (injury, illness, manager decision) and a different starter takes the ball. If we placed YES bets on the scheduled starter and he never appears — confirmed by IP=0, Ks=0, not current pitcher, reliever on mound after inning 3 — we fire NO takers on any open YES positions to hedge the loss. Two-poll confirmation prevents false triggers from MLB API delays. The system treats this like a pulled pitcher: outcome determined, buy NO immediately.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -438,6 +482,13 @@
               </div>
             </div>
             <div class="sys-row sched-row">
+              <span class="sched-time">2:00 PM</span>
+              <div class="sched-body">
+                <b>Afternoon Pitcher Data Refresh</b>
+                <p>Re-fetches Statcast K% data from Baseball Savant. The 7am fetch can be 7+ hours stale by game time — this ensures evening-game edge calculations use the freshest available pitcher data before bets fire.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
               <span class="sched-time">3:30 PM</span>
               <div class="sched-body">
                 <b>Lineup Refresh + Re-Price</b>
@@ -474,8 +525,8 @@
             <div class="sys-row sched-row">
               <span class="sched-time rule-badge rule-block">Rule D</span>
               <div class="sched-body">
-                <b>Block YES bets without enough conviction</b>
-                <p>YES bets require our model to give at least a 30% probability. Below that, we don't have enough conviction — backing a long shot at low confidence burns capital even when the price looks right.</p>
+                <b>Block low-conviction YES bets — unless the edge is massive</b>
+                <p>YES bets normally require at least 30% model probability. Below that threshold, we skip — backing a long shot at low confidence wastes capital. Exception: if the edge is 18¢ or greater (market is significantly mispriced), the bet is allowed through regardless of model conviction, since large edges override low-confidence calls.</p>
               </div>
             </div>
             <div class="sys-row sched-row">
@@ -502,8 +553,8 @@
             <div class="sys-row sched-row">
               <span class="sched-time rule-badge rule-gate">Lineup<br>Gate</span>
               <div class="sched-body">
-                <b>No bets until the batting lineup is confirmed</b>
-                <p>We never place a bet until the official starting lineup is posted for that team. A scratch or DH replacement can completely change the strikeout environment for a pitcher. The T-90 backstop (90 min before first pitch) fires if lineups are unusually late.</p>
+                <b>No bets until BOTH teams' lineups are confirmed</b>
+                <p>We wait for the official batting lineup from both the home and away team before firing any bet. A single team's lineup isn't enough — the opposing lineup determines how many strikeout opportunities the pitcher actually faces. The T-90 backstop (90 min before first pitch) fires if lineups are still missing.</p>
               </div>
             </div>
             <div class="sys-row sched-row">
@@ -511,6 +562,13 @@
               <div class="sched-body">
                 <b>Max 3 YES bets per pitcher per day</b>
                 <p>We limit YES exposure on any single pitcher to 3 contracts. If a pitcher has multiple K thresholds where we see edge (e.g. 5+, 6+, 7+), we take the best 3 rather than pyramiding the same risk across all of them.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-cap">TTO<br>Penalty</span>
+              <div class="sched-body">
+                <b>15% K-rate reduction the 3rd time through the lineup</b>
+                <p>When a pitcher faces the same batters for the 3rd time in a game (roughly inning 7+), hitters have seen all his pitches and adjust — K rates historically drop ~15%. Both the pre-game model and the live in-game model apply the same 15% reduction, so our probability estimates stay consistent throughout the game.</p>
               </div>
             </div>
           </div>
