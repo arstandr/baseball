@@ -197,12 +197,13 @@ async function logEdges() {
   if (yesCapRemoved > 0) console.log(`[ks-bets] Capped ${yesCapRemoved} YES bet(s) (max ${MAX_YES_PER_PITCHER} per pitcher)`)
 
   // ── Protection rules (A / D) ─────────────────────────────────────────────
-  // Rule A: Ban NO bets where market_mid ≥ 65 AND model_prob ≤ 0.75
-  //         Market is already pricing the event as likely; our NO edge is noise
+  // Rule A: Ban NO bets where market_mid ≥ 65 AND model also thinks YES is favored (model_prob ≥ 0.50)
+  //         Both market and model agree YES is likely — no conviction to bet NO.
+  //         If model says NO wins outright (model_prob < 0.50), let it through regardless of market price.
   // Rule D: Ban YES bets where model_prob < 0.30 (not enough conviction)
   // Rule C (strike=3 skip) removed — live data shows K≤3 bets have 47% ROI
   const guardedEdges = withFill.filter(e => {
-    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob <= 0.75) return false
+    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false
     if (e.side === 'YES' && e.model_prob < 0.30) return false
     return true
   })
@@ -281,6 +282,7 @@ async function logEdges() {
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────
   const STAGGER_MS = 45_000   // 45s between users on live orders
   let logged = 0
+  const _webhooksWithBets = []  // only bettors who actually logged bets get Discord
 
   const _betsPlacedByPitcher = new Map()
 
@@ -554,6 +556,7 @@ async function logEdges() {
 
     const totalRisk = sized.reduce((s, e) => s + e._face * e._fill, 0)
     console.log(`[ks-bets] ${bettor.name}: logged ${bettorLogged} · orders ${ordersPlaced} placed / ${ordersFailed} failed · risk $${totalRisk.toFixed(0)} of $${bankroll.toFixed(0)} (${(totalRisk/bankroll*100).toFixed(1)}%)`)
+    if (bettorLogged > 0 && bettor.discord_webhook) _webhooksWithBets.push(bettor.discord_webhook)
   }
 
   // Cache today's Kalshi open prices for real-price backtest
@@ -601,10 +604,10 @@ async function logEdges() {
     ],
   )
 
-  // Discord: post morning picks — only show edges that actually passed ALL filters and got logged
-  if (logged > 0) {
+  // Discord: post picks only to bettors who actually logged bets this run
+  if (_webhooksWithBets.length > 0) {
     const discordEdges = guardedEdges.map(e => ({ ...e, bet_size: e.bet_size ?? BET_SIZE }))
-    await notifyEdges(discordEdges, TODAY, await getAllWebhooks(db))
+    await notifyEdges(discordEdges, TODAY, _webhooksWithBets)
   }
 }
 
