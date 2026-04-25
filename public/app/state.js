@@ -19,4 +19,5 @@ export const shared = {
   liveBetsPitchers: [],   // from /api/ks/live-bets
   betSchedule:      [],   // from /api/ks/schedule — pending T-2.5h entries
   dayPnl:           0,
+  bettors:          [],   // from /api/ks/bettors — all active live bettors
 }

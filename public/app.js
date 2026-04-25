@@ -1,5 +1,5 @@
 // Boot entry — imports focused modules, wires UI, starts the app.
-import { state } from './app/state.js'
+import { state, shared } from './app/state.js'
 import { fmt$, esc } from './app/utils.js'
 import { fetchJson } from './app/api.js'
 import { connectSSE, updateLastUpdated } from './app/live.js'
@@ -173,6 +173,7 @@ function _resolveLiveBettor(bettors) {
 
 async function refreshAll() {
   const bettors = await fetchJson('/api/ks/bettors').catch(() => [])
+  shared.bettors = bettors.filter(b => !b.paper)
   _resolveLiveBettor(bettors)
 
   const viewRefresh =

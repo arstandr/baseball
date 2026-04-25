@@ -186,8 +186,21 @@ a:hover { text-decoration: underline; }
 .agent-row.bad    .ag-fill { background: var(--bad); }
 
 /* ------------------------ date pills ------------------------ */
-.date-row { margin: 12px 0 16px; overflow-x: auto; }
-.date-pills { display: flex; gap: 8px; padding-bottom: 4px; }
+.date-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 16px; }
+.date-pills { display: flex; gap: 8px; padding-bottom: 4px; flex: 1; overflow-x: auto; }
+.user-select {
+  flex-shrink: 0;
+  background: var(--card); border: 1px solid var(--border);
+  color: var(--text-dim); padding: 6px 12px; border-radius: 999px;
+  font-family: var(--mono); font-size: 12px; cursor: pointer;
+  outline: none; transition: border-color 0.15s, color 0.15s;
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+  padding-right: 26px;
+}
+.user-select:hover { border-color: var(--accent); color: var(--text); }
+.user-select:focus { border-color: var(--accent); }
 .date-pill {
   background: var(--card); border: 1px solid var(--border);
   color: var(--text-dim); padding: 8px 14px; border-radius: 999px;

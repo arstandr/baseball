@@ -320,8 +320,38 @@ function _scheduleDayCutover() {
   }, ms)
 }
 
+function _renderUserSelect() {
+  const sel = document.getElementById('user-select')
+  if (!sel) return
+  const bettors = shared.bettors || []
+  if (bettors.length <= 1) { sel.hidden = true; return }
+
+  sel.hidden = false
+  // Only rebuild options if the bettor list changed
+  const ids = bettors.map(b => b.id).join(',')
+  if (sel.dataset.ids === ids && sel.dataset.selected === String(state.liveBettorId)) return
+  sel.dataset.ids      = ids
+  sel.dataset.selected = String(state.liveBettorId)
+
+  sel.innerHTML = ''
+  for (const b of bettors) {
+    const opt = document.createElement('option')
+    opt.value       = b.id
+    opt.textContent = b.name?.split('-')[0] ?? b.name  // "Adam-Live" → "Adam"
+    if (b.id === state.liveBettorId) opt.selected = true
+    sel.appendChild(opt)
+  }
+
+  sel.onchange = () => {
+    state.liveBettorId = Number(sel.value)
+    sel.dataset.selected = String(state.liveBettorId)
+    refreshDates()
+  }
+}
+
 async function refreshDates() {
   _scheduleDayCutover()
+  _renderUserSelect()
   const uidParam = state.liveBettorId ? `?user_id=${state.liveBettorId}` : ''
   const datesWithBets = await fetchJson(`/api/ks/dates${uidParam}`).catch(() => [])
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
