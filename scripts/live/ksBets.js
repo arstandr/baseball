@@ -217,26 +217,6 @@ async function logEdges() {
   const guardsRemoved = withFill.length - guardedEdges.length
   if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/D/E/F: removed ${guardsRemoved} bet(s)`)
 
-  // ── Rule G: market-skepticism edge cap (YES only) ─────────────────────────
-  // When model is >4× more bullish than market on a YES bet, the apparent edge
-  // (~65¢) drives a massive Kelly fraction that's almost certainly wrong. Cap
-  // _edgeVal at 15¢ for sizing so the bet still fires but right-sized.
-  // Sánchez 6+ YES: model=69%, market=4¢ (17× gap) — Kelly sized as 65¢ edge → -$430 start.
-  const RULE_G_MULTIPLE = 4
-  const RULE_G_EDGE_CAP = 0.15
-  let ruleGCapped = 0
-  for (const e of guardedEdges) {
-    if (e.side !== 'YES') continue
-    const mktProb = (e.market_mid ?? 50) / 100
-    if (mktProb <= 0) continue
-    if (e.model_prob > RULE_G_MULTIPLE * mktProb && e._edgeVal > RULE_G_EDGE_CAP) {
-      console.log(`[ks-bets] Rule G: ${e.pitcher} ${e.strike}+ YES model=${(e.model_prob*100).toFixed(0)}% mkt=${(mktProb*100).toFixed(0)}¢ — cap _edgeVal ${e._edgeVal.toFixed(3)}→${RULE_G_EDGE_CAP}`)
-      e._edgeVal = RULE_G_EDGE_CAP
-      ruleGCapped++
-    }
-  }
-  if (ruleGCapped > 0) console.log(`[ks-bets] Rule G: capped ${ruleGCapped} YES bet(s) at ≤${RULE_G_EDGE_CAP} edge`)
-
   // ── Pipeline: emit rule_filters per pitcher ─────────────────────────────
   // Group edges by pitcher to record one pipeline row per pitcher
   const _ruleFiltersByPitcher = new Map()

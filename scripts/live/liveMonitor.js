@@ -1834,26 +1834,29 @@ async function main() {
               continue  // blowout: skip normal model for this n
             }
 
-            // ── MODE 1.5: Dead-path NO — pitch count + gap make threshold unreachable ──
-            // Pitcher is still in the game but structurally cannot accumulate enough Ks.
-            // Use env-configured thresholds so they can be tuned without a redeploy.
-            if (isCurrent && currentPitches >= PULL_PITCH_COUNT && currentIP >= PULL_MIN_IP && n - currentKs >= 3) {
-              if (!preGameKeys.has(`${n}-NO`) && noMid < 85 && noMid > 5) {
-                const deadEdge = (1 - marketPrice) - 0.05  // 5¢ buffer for model uncertainty
-                if (deadEdge >= 0.10) {
-                  qualifying.push({
-                    n, mkt, midCents, marketPrice, modelProb: 0.05,
-                    edge: deadEdge, betSide: 'NO', betKey, mode: 'dead-path',
-                    modelProbSide: 0.95, marketPriceSide: 1 - marketPrice,
-                  })
-                }
-              }
-              continue  // gap is structurally uncloseable — skip normal model for this n
-            }
-
             if (!live) continue  // pulled pitcher — no high-conviction model available
 
             const modelProb = live.probAtLeast(n)
+
+            // ── MODE 1.5: Dead-path NO — model confirms threshold is near-unreachable ──
+            // Only fires when BOTH the pitch-count gate AND the live model agree.
+            // Previously used a hardcoded 0.05 probability — this caused misfires for
+            // high-pitch-budget starters (e.g. avgPitches=105 at 85 pitches has ~1.2 IP left,
+            // which at 33% K rate gives ~20% probability, not 5%).
+            if (isCurrent && currentPitches >= PULL_PITCH_COUNT && currentIP >= PULL_MIN_IP &&
+                n - currentKs >= 3 && modelProb < 0.10) {
+              if (!preGameKeys.has(`${n}-NO`) && noMid < 85 && noMid > 5) {
+                const deadEdge = (1 - marketPrice) - modelProb
+                if (deadEdge >= 0.10) {
+                  qualifying.push({
+                    n, mkt, midCents, marketPrice, modelProb,
+                    edge: deadEdge, betSide: 'NO', betKey, mode: 'dead-path',
+                    modelProbSide: 1 - modelProb, marketPriceSide: 1 - marketPrice,
+                  })
+                }
+              }
+              continue
+            }
             const edgeYES   = modelProb - marketPrice
             const edgeNO    = (1 - modelProb) - (1 - marketPrice)
             const betSide   = edgeYES >= edgeNO ? 'YES' : 'NO'
