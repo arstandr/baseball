@@ -257,6 +257,15 @@ async function firePendingBets() {
         `Scheduled bet: ${entry.pitcher_name} (${entry.game_label})`,
         `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}`,
       )
+      // Mark done/skipped based on whether a bet row was actually written
+      const placed = await dbOne(
+        `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_id=? AND live_bet=0 AND paper=0 LIMIT 1`,
+        [date, entry.pitcher_id],
+      ).catch(() => null)
+      dbRun(
+        `UPDATE bet_schedule SET status=? WHERE id=? AND status='fired'`,
+        [placed ? 'done' : 'skipped', entry.id],
+      ).catch(() => {})
     } catch (err) {
       console.error(`[scheduler] ksBets failed for ${entry.pitcher_name}: ${err.message}`)
       dbRun(
@@ -322,6 +331,13 @@ export async function startScheduler() {
     mlbRun('MLB morning run')
   }, { timezone: 'America/New_York' })
 
+  // 10:00 AM ET — portfolio plan: scan ALL of today's edges and write daily_plan.
+  // Each T-2.5h ksBets.js call reads this denominator to size proportionally.
+  cron.schedule('0 10 * * *', () => {
+    const d = etDate()
+    run('Portfolio plan (10am)', `node scripts/live/ksBets.js plan --date ${d}`)
+  }, { timezone: 'America/New_York' })
+
   // NBA morning run disabled
 
   // Every 30 min, 9:30am–3:30pm ET — re-fetch schedule + rebuild bet_schedule.
@@ -341,8 +357,14 @@ export async function startScheduler() {
   // Every 5 min — fire any scheduled bets whose T-2.5h window has arrived
   cron.schedule('*/5 * * * *', () => firePendingBets(), { timezone: 'America/New_York' })
 
-  // 3:30 PM ET — MLB lineup refresh
-  cron.schedule('30 15 * * *', () => mlbRun('MLB lineup refresh', '--lineups'), { timezone: 'America/New_York' })
+  // 3:30 PM ET — MLB lineup refresh; 90s later re-run portfolio plan with fresh prices
+  cron.schedule('30 15 * * *', () => {
+    mlbRun('MLB lineup refresh', '--lineups')
+    setTimeout(() => {
+      const d = etDate()
+      run('Portfolio plan (post-lineup)', `node scripts/live/ksBets.js plan --date ${d}`)
+    }, 90_000)
+  }, { timezone: 'America/New_York' })
 
   // Mid-game partial settles — resolve guaranteed YES wins as they happen
   // 4 PM, 6 PM, 8 PM, 10 PM ET

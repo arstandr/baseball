@@ -203,12 +203,13 @@ async function logEdges() {
   // Rule D: Ban YES bets where model_prob < 0.30 (not enough conviction)
   // Rule C (strike=3 skip) removed — live data shows K≤3 bets have 47% ROI
   const guardedEdges = withFill.filter(e => {
-    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false
-    if (e.side === 'YES' && e.model_prob < 0.30) return false
+    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false  // Rule A
+    if (e.side === 'YES' && e.model_prob < 0.30) return false                                  // Rule D
+    if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false                            // Rule E: market already near-certain NO, no edge to capture
     return true
   })
   const guardsRemoved = withFill.length - guardedEdges.length
-  if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/C/D: removed ${guardsRemoved} bet(s)`)
+  if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/D/E: removed ${guardsRemoved} bet(s)`)
 
   // ── Pipeline: emit rule_filters per pitcher ─────────────────────────────
   // Group edges by pitcher to record one pipeline row per pitcher
@@ -278,6 +279,17 @@ async function logEdges() {
   const NO_SIDE_MULT  = 1.25
   const YES_SIDE_MULT = 1.00
   const totalEdge = guardedEdges.reduce((s, e) => s + e._edgeVal * (e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT), 0)
+
+  // Portfolio-aware sizing: use daily_plan.total_edge_weighted as the denominator when available.
+  // This prevents the first game of the day from absorbing the full budget assuming it's the only game.
+  let denominatorEdge = totalEdge
+  try {
+    const plan = await db.one(`SELECT total_edge_weighted FROM daily_plan WHERE bet_date = ?`, [TODAY])
+    if (plan?.total_edge_weighted > 0) {
+      denominatorEdge = plan.total_edge_weighted
+      console.log(`[ks-bets] Daily plan denominator: ${denominatorEdge.toFixed(3)} (local this run: ${totalEdge.toFixed(3)})`)
+    }
+  } catch { /* daily_plan not yet created — fall back to local totalEdge */ }
 
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────
   const STAGGER_MS = 45_000   // 45s between users on live orders
@@ -350,7 +362,7 @@ async function logEdges() {
     const withFace = guardedEdges
       .map(e => {
         const sideMult  = e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT
-        const riskAlloc = (e._edgeVal * sideMult / totalEdge) * dailyBudget
+        const riskAlloc = (e._edgeVal * sideMult / denominatorEdge) * dailyBudget
         const faceValue = Math.round(riskAlloc / e._fill)
         const face = Math.max(faceValue, MIN_BET_FACE)
         return { ...e, _face: face, _actualRisk: face * e._fill }
@@ -823,6 +835,37 @@ async function settleBets() {
     }
   }
 
+  // ── Sync resting order statuses from Kalshi before settling ─────────────────
+  // Maker orders placed at T-2.5h may still be resting, partially filled, or cancelled.
+  // Pull live status so P&L calculations use actual fill price and contract count.
+  const restingBets = open.filter(b => b.order_status === 'resting' && b.order_id && b.user_id)
+  if (restingBets.length) {
+    console.log(`[ks-bets] Syncing ${restingBets.length} resting order(s) with Kalshi…`)
+    for (const bet of restingBets) {
+      const creds = userCreds.get(bet.user_id)
+      if (!creds) continue
+      try {
+        const order = await getOrder(bet.order_id, creds)
+        if (!order) continue
+        const newStatus   = order.status         ?? bet.order_status
+        const filledConts = order.filled_count   ?? bet.filled_contracts
+        const fillPrice   = order.yes_price ?? order.no_price ?? bet.fill_price
+        if (newStatus !== bet.order_status || filledConts !== bet.filled_contracts) {
+          await db.run(
+            `UPDATE ks_bets SET order_status=?, filled_contracts=?, fill_price=COALESCE(?,fill_price) WHERE id=?`,
+            [newStatus, filledConts, fillPrice ?? null, bet.id],
+          )
+          console.log(`  sync ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: ${bet.order_status}→${newStatus} (${filledConts} filled @ ${fillPrice ?? '?'}¢)`)
+          bet.order_status     = newStatus
+          bet.filled_contracts = filledConts
+          if (fillPrice != null) bet.fill_price = fillPrice
+        }
+      } catch (err) {
+        console.warn(`  ${bet.pitcher_name} order sync failed: ${err.message}`)
+      }
+    }
+  }
+
   // Check for postponed games — void those bets rather than leaving them open forever
   const postponed = await db.all(
     `SELECT pitcher_home_id, pitcher_away_id FROM games WHERE date = ? AND status = 'postponed'`,
@@ -1118,6 +1161,109 @@ async function runCancelAll() {
   console.log('[cancel-all] Done')
 }
 
+// ── PLAN mode: morning portfolio scan for full-day sizing ─────────────────────
+// Runs once at 10am ET and again after 3:30pm lineup refresh.
+// Applies the same filter stack as logEdges() across ALL of today's pitchers,
+// then stores total_edge_weighted in daily_plan so each T-2.5h call can size
+// its bets as a proportional share of the day's total budget rather than
+// assuming it's the only game being wagered.
+
+async function planPortfolio() {
+  console.log(`[plan] Morning portfolio scan for ${TODAY}…`)
+
+  let edgesJson
+  try {
+    const { default: { execSync } } = await import('child_process')
+    const out = execSync(
+      `node scripts/live/strikeoutEdge.js --date ${TODAY} --min-edge ${minEdge} --json`,
+      { cwd: process.cwd(), timeout: 120000, encoding: 'utf8' },
+    )
+    const m = out.match(/\[EDGES_JSON\]([\s\S]+)\[\/EDGES_JSON\]/)
+    if (!m) {
+      console.log('[plan] No EDGES_JSON block found — skipping plan')
+      return
+    }
+    edgesJson = JSON.parse(m[1])
+  } catch (err) {
+    console.error('[plan] Edge finder failed:', err.message)
+    return
+  }
+
+  if (!edgesJson.length) {
+    console.log('[plan] No edges found for today — daily_plan not written')
+    return
+  }
+
+  // Apply the same filter stack as logEdges() ──────────────────────────────
+  const rawEdges = edgesJson.map(e => {
+    const mid    = (e.market_mid ?? 50) / 100
+    const hs     = (e.spread ?? 4) / 200
+    const fill   = e.side === 'YES' ? mid + hs : (1 - mid) + hs
+    const edgeVal = Math.max(Number(e.edge) || 0, 0.001)
+    return { ...e, _fill: fill, _edgeVal: edgeVal }
+  })
+
+  // Dedup hedges
+  const bestByKey = new Map()
+  for (const e of rawEdges) {
+    const key = `${e.pitcher}|${e.strike}`
+    if (!bestByKey.has(key) || e._edgeVal > bestByKey.get(key)._edgeVal) bestByKey.set(key, e)
+  }
+
+  // YES cap per pitcher
+  const MAX_YES_PER_PITCHER = 3
+  const yesCounts = {}
+  const deduped = [...bestByKey.values()].sort((a, b) => b._edgeVal - a._edgeVal)
+  const withFill = deduped.filter(e => {
+    if (e.side !== 'YES') return true
+    yesCounts[e.pitcher] = (yesCounts[e.pitcher] || 0) + 1
+    return yesCounts[e.pitcher] <= MAX_YES_PER_PITCHER
+  })
+
+  // Protection rules A / D / E
+  const guardedEdges = withFill.filter(e => {
+    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false
+    if (e.side === 'YES' && e.model_prob < 0.30) return false
+    if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false
+    return true
+  })
+
+  const NO_SIDE_MULT  = 1.25
+  const YES_SIDE_MULT = 1.00
+
+  const pitcherBreakdown = new Map()
+  let totalEdgeWeighted = 0
+  for (const e of guardedEdges) {
+    const sideMult = e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT
+    const weighted = e._edgeVal * sideMult
+    totalEdgeWeighted += weighted
+    const key = String(e.pitcher_id || e.pitcher)
+    if (!pitcherBreakdown.has(key)) {
+      pitcherBreakdown.set(key, { pitcher_id: key, pitcher_name: e.pitcher, edge_weighted: 0 })
+    }
+    pitcherBreakdown.get(key).edge_weighted += weighted
+  }
+
+  const pitchersJson = JSON.stringify([...pitcherBreakdown.values()])
+  const now = new Date().toISOString()
+
+  await db.run(
+    `INSERT INTO daily_plan (bet_date, total_edge_weighted, pitcher_count, pitchers_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(bet_date) DO UPDATE SET
+       total_edge_weighted = excluded.total_edge_weighted,
+       pitcher_count       = excluded.pitcher_count,
+       pitchers_json       = excluded.pitchers_json,
+       updated_at          = excluded.updated_at`,
+    [TODAY, totalEdgeWeighted, pitcherBreakdown.size, pitchersJson, now, now],
+  )
+
+  console.log(`[plan] ${TODAY}: ${pitcherBreakdown.size} pitchers · total_edge_weighted=${totalEdgeWeighted.toFixed(3)}`)
+  for (const [, p] of pitcherBreakdown) {
+    console.log(`  ${p.pitcher_name.padEnd(28)} ${p.edge_weighted.toFixed(3)}`)
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1127,11 +1273,12 @@ async function main() {
   if (MODE === 'log')             await logEdges()
   else if (MODE === 'settle')          await settleBets()
   else if (MODE === 'report')          await report()
+  else if (MODE === 'plan')            { await planPortfolio(); return db.close() }
   else if (MODE === 'build-schedule')  { await buildSchedule(); return }
   else if (MODE === 'cancel-scratched') { await runCancelScratched(); return db.close() }
   else if (MODE === 'cancel-all')       { await runCancelAll();       return db.close() }
   else {
-    console.error(`Unknown mode: ${MODE}. Use log | settle | report | build-schedule | cancel-scratched | cancel-all`)
+    console.error(`Unknown mode: ${MODE}. Use log | settle | report | plan | build-schedule | cancel-scratched | cancel-all`)
     process.exit(1)
   }
 

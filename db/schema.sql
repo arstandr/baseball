@@ -468,6 +468,22 @@ CREATE TABLE IF NOT EXISTS clv_log (
 );
 
 -- ========================================================================
+-- daily_plan: morning portfolio plan — total edge pool for the day.
+-- Written by `ksBets.js plan` at 10am ET; re-written after 3:30pm lineup refresh.
+-- logEdges() reads total_edge_weighted as the sizing denominator so per-pitcher
+-- T-2.5h runs share the daily budget proportionally rather than each assuming
+-- they are the only game.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS daily_plan (
+  bet_date TEXT PRIMARY KEY,
+  total_edge_weighted REAL NOT NULL,   -- sum(edgeVal × sideMult) across all planned pitchers
+  pitcher_count INTEGER NOT NULL,
+  pitchers_json TEXT,                  -- JSON [{pitcher_id, pitcher_name, edge_weighted}]
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- ========================================================================
 -- Indexes
 -- ========================================================================
 CREATE INDEX IF NOT EXISTS idx_games_date ON games(date);

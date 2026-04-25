@@ -39,8 +39,10 @@ const MLB_BASE        = 'https://statsapi.mlb.com/api/v1'
 // Field filters reduce boxscore payload ~80% — only pull what extractStarterFromBoxscore needs
 const LS_FIELDS       = 'abstractGameState,currentInning,currentInningOrdinal,teams,offense,defense'
 const BOX_FIELDS      = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players'
-// Max USD risk per free-money taker order (pulled pitcher, certainty bet)
-const PULLED_CAP_USD    = Number(process.env.PULLED_CAP_USD    || 300)
+// Max USD risk per free-money taker order per strike threshold (pulled pitcher)
+const PULLED_CAP_USD    = Number(process.env.PULLED_CAP_USD    || 100)
+// Max USD total free-money spend across all strike thresholds for one pulled pitcher
+const FREE_MONEY_PITCHER_CAP = Number(process.env.FREE_MONEY_PITCHER_CAP || 500)
 // Max USD risk per dead-path NO taker (high pitch count, gap structurally uncloseable)
 const DEAD_PATH_CAP_USD = Number(process.env.DEAD_PATH_CAP_USD || 150)
 const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
@@ -949,6 +951,7 @@ async function main() {
   // The MLB API sets isCurrentPitcher=false between half-innings (team at bat),
   // which causes false free-money triggers on pitchers who are just in the dugout.
   const notCurrentSince = new Map()  // pitcherId → { ip, ks, seenAt }
+  const freeMoneySentPerPitcher = new Map()  // pitcherId → total USD risked on free-money takers
 
   // ── Startup backfill: settle any games that went Final while monitor was offline ──
   console.log('[live] Checking for games that finished before monitor started...')
@@ -1320,6 +1323,15 @@ async function main() {
             const s = sized[i]
             if (!s || s.betSize <= 0) continue
 
+            // Per-pitcher free-money cap: stop firing takers once $500 sent for this pitcher
+            if (q.mode === 'pulled') {
+              const alreadySent = freeMoneySentPerPitcher.get(pitcherId) ?? 0
+              if (alreadySent >= FREE_MONEY_PITCHER_CAP) {
+                console.log(`[live] 🚫 FREE MONEY PITCHER CAP  ${ctx.pitcherName}  $${alreadySent.toFixed(0)}/$${FREE_MONEY_PITCHER_CAP} — skipping ${q.n}+`)
+                continue
+              }
+            }
+
             // 2× sizing for high-edge bets (≥15¢) — validated +$1,909 on 100 bets historically
             const edgeMult    = q.edge >= 0.15 ? 2 : 1
             const finalBetSize = s.betSize * edgeMult
@@ -1366,6 +1378,13 @@ async function main() {
               } else if (betResult?.finalContracts != null || betResult?.freeMoneySummary != null) {
                 placed.add(bettorKey)
                 anySuccess = true
+
+                // Track free-money spend toward per-pitcher cap
+                if (q.mode === 'pulled' && betResult.finalContracts > 0) {
+                  const askC = betResult.freeMoneySummary?.askCents ?? q.midCents
+                  const spent = betResult.finalContracts * (askC / 100)
+                  freeMoneySentPerPitcher.set(pitcherId, (freeMoneySentPerPitcher.get(pitcherId) ?? 0) + spent)
+                }
 
                 const webhooks = bettor.discord_webhook ? [bettor.discord_webhook] : []
                 if (q.mode === 'pulled' && betResult?.freeMoneySummary) {

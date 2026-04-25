@@ -155,7 +155,7 @@ async function checkForUpdates() {
 
     try {
       execSync('git reset --hard origin/main', { cwd: ROOT })
-      execSync('npm install --quiet', { cwd: ROOT })
+      execSync('npm ci --quiet', { cwd: ROOT })
       _currentHash = remote
       await writeUpdate(remote.slice(0, 7), msg)
       await writeHeartbeat('restarting', { reason: 'code update', commit: remote.slice(0, 7) })
@@ -185,10 +185,53 @@ function repairBatFile() {
   } catch {}
 }
 
+// ── Crash-loop guard ──────────────────────────────────────────────────────────
+// Tracks recent launcher start timestamps in logs/restart_count.json.
+// If >5 restarts happen within 5 minutes, alert Discord and pause 5 minutes.
+
+const CRASH_LOOP_WINDOW_MS = 5 * 60 * 1000   // 5 minutes
+const CRASH_LOOP_MAX       = 5                // restarts allowed in window
+const RESTART_LOG_PATH     = path.join(ROOT, 'logs', 'restart_count.json')
+
+async function checkCrashLoop() {
+  try {
+    fs.mkdirSync(path.join(ROOT, 'logs'), { recursive: true })
+    let timestamps = []
+    try {
+      const raw = fs.readFileSync(RESTART_LOG_PATH, 'utf8')
+      timestamps = JSON.parse(raw)
+    } catch { /* first run or corrupt — start fresh */ }
+
+    const now = Date.now()
+    timestamps = timestamps.filter(t => now - t < CRASH_LOOP_WINDOW_MS)
+    timestamps.push(now)
+    fs.writeFileSync(RESTART_LOG_PATH, JSON.stringify(timestamps))
+
+    if (timestamps.length > CRASH_LOOP_MAX) {
+      console.error(`[closer] ⚠ CRASH LOOP: ${timestamps.length} restarts in last 5 min — pausing 5 min`)
+      try {
+        const { getClient } = await import('../../lib/db.js')
+        const { notifyAlert, getAllWebhooks } = await import('../../lib/discord.js')
+        const db = getClient()
+        const webhooks = await getAllWebhooks({ all: (sql, args) => db.execute({ sql, args }).then(r => r.rows) })
+        await notifyAlert({
+          title:       '⚠️ THE CLOSER — CRASH LOOP',
+          description: `${timestamps.length} restarts in the last 5 minutes. Pausing 5 min before retry. Check logs on Windows.`,
+          color:       0xff8800,
+        }, webhooks)
+      } catch { /* non-fatal — Discord alert is best-effort */ }
+      await new Promise(r => setTimeout(r, CRASH_LOOP_WINDOW_MS))
+    }
+  } catch (err) {
+    console.error('[closer] crash-loop check failed:', err.message)
+  }
+}
+
 async function main() {
   console.log('THE CLOSER - Money Tree 2.0')
   console.log('============================')
 
+  await checkCrashLoop()
   repairBatFile()
 
   // Repo is public -- strip any embedded token from remote so pulls never need auth
