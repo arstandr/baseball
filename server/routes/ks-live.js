@@ -142,6 +142,9 @@ router.get('/ks/live', wrap(async (req, res) => {
         home_score:   ls?.teams?.home?.runs ?? null,
         away_score:   ls?.teams?.away?.runs ?? null,
         inning_state: ls?.inningState ?? null,
+        balls:        ls?.balls   ?? null,
+        strikes:      ls?.strikes ?? null,
+        outs:         ls?.outs    ?? null,
         is_pitching:  isLive && !isFinal && !!starter.still_in && (side === 'home' ? ls?.inningState === 'Top' : ls?.inningState === 'Bottom'),
         bet_statuses: allMyBets.map(b => ({
           id:     b.id,
