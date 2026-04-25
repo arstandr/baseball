@@ -510,7 +510,7 @@ async function logEdges() {
             ? Math.min(99, Math.round(mid + halfSpread))
             : Math.min(99, Math.round(100 - mid + halfSpread))
           // Post 1¢ below ask = maker order (75% fee discount vs taker)
-          // This rests on the book; liveMonitor cancels + takes market at T-45min if unfilled
+          // This rests on the book; liveMonitor cancels + takes market at T-120min if unfilled
           const makerCents = Math.max(1, askCents - 1)
           // Orderbook depth check — cap contracts at available liquidity
           let contracts = Math.max(1, Math.round(e._face))
