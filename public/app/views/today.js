@@ -641,6 +641,11 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     [...container.querySelectorAll('.game-card.gc-expanded')].map(el => el.id)
   )
 
+  // Update header best case to match sum of all cards (includes live bets)
+  const totalBestCase = cards.reduce((s, { sd }) => s + (sd.totalBestCase ?? 0), 0)
+  const maxEl = document.getElementById('day-max-val')
+  if (maxEl) maxEl.textContent = `${totalBestCase >= 0 ? '+' : ''}${fmt$(totalBestCase)}`
+
   container.innerHTML =
     cards.map(({ p, sd }) => renderGameCard(p, sd)).join('') +
     schedItems.map(s => renderScheduleCard(s)).join('')
