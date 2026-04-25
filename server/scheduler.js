@@ -398,18 +398,23 @@ export async function startScheduler() {
     mlbRun('MLB lineup refresh (catch-up)', '--lineups')
   }
 
-  // 7:00 AM ET — early schedule + data fetch so the day's slate is visible before Kalshi opens.
-  // Does not run the edge finder (needs live Kalshi prices) — full pipeline runs at 8:30am.
+  // 7:00 AM ET — early schedule + Savant refresh (slate visibility, pitcher data).
   cron.schedule('0 7 * * *', () => {
     const d = etDate()
     run('Early schedule fetch', `node scripts/live/fetchSchedule.js --date ${d} --days 1`)
     setTimeout(() => run('Early Savant fetch', `node scripts/live/fetchPitcherStatcast.js`), 30_000)
   }, { timezone: 'America/New_York' })
 
-  // 8:30 AM ET — MLB morning run (liveMonitor handled by The Closer).
-  // Moved from 9am: gives early (noon ET) games a full 3.5h+ lead time.
-  // Kalshi K prop markets open by 8:30am; edge finder runs against live prices.
-  cron.schedule('30 8 * * *', () => {
+  // 8:30 AM ET — MLB morning run (skipped if early-game pipeline already ran at 3am).
+  cron.schedule('30 8 * * *', async () => {
+    const d = etDate()
+    try {
+      const plan = await dbOne(`SELECT bet_date FROM daily_plan WHERE bet_date = ?`, [d])
+      if (plan) {
+        console.log(`[scheduler] 8:30am: daily_plan already exists — morning pipeline ran early, skipping`)
+        return
+      }
+    } catch { /* proceed */ }
     mlbRun('MLB morning run')
   }, { timezone: 'America/New_York' })
 
@@ -451,19 +456,18 @@ export async function startScheduler() {
     }, 60_000)
   }, { timezone: 'America/New_York' })
 
-  // Every 5 min, 10am–8pm ET — fetch lineups then fire pending bets.
-  // Restricted to 10am+ so the morning pipeline (done by ~9am) has time to complete
-  // and daily_plan is guaranteed to exist before any bet fires.
+  // Every 5 min, 4am–8pm ET — fetch lineups then fire pending bets.
+  // Starts at 4am to cover Tokyo Series games (~6am ET, lineups post ~4am).
+  // daily_plan guard ensures no bet fires before the morning pipeline completes.
   // fetchLineups.js skips teams already captured (cheap no-op once all lineups posted).
-  cron.schedule('*/5 10-20 * * *', () => {
+  cron.schedule('*/5 4-20 * * *', () => {
     const d = etDate()
     run('Lineup check', `node scripts/live/fetchLineups.js --date ${d}`)
-    setTimeout(() => firePendingBets(), 30_000)  // 30s delay so fetchLineups finishes first
+    setTimeout(() => firePendingBets(), 30_000)
   }, { timezone: 'America/New_York' })
 
-  // Every 5 min outside lineup-check hours — still fire pending bets in case of late
-  // pipeline finishes or T-90 backstop games, but skip the lineup fetch.
-  cron.schedule('*/5 0-9,21-23 * * *', () => firePendingBets(), { timezone: 'America/New_York' })
+  // Every 5 min outside lineup-check hours — fire pending bets only (no lineup fetch).
+  cron.schedule('*/5 0-3,21-23 * * *', () => firePendingBets(), { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh; 90s later re-run portfolio plan with fresh prices
   cron.schedule('30 15 * * *', () => {
@@ -480,14 +484,39 @@ export async function startScheduler() {
     cron.schedule(`0 ${hour} * * *`, () => mlbRun(`MLB mid-game settle (${hour}:00)`, '--settle'), { timezone: 'America/New_York' })
   }
 
-  // 3:00 AM ET — MLB settle + EOD reports + sanity check.
-  // Runs at 3am (not midnight) so west coast games (start ~10pm ET, 3h+) are finished.
-  // At 3am ET the calendar day has rolled over — explicitly settle the previous ET date.
-  cron.schedule('0 3 * * *', () => {
+  // 3:00 AM ET — MLB settle + EOD + check tomorrow for early games.
+  // Runs at 3am so west coast games are finished. Calendar day has rolled over —
+  // settle uses yesterday's ET date. Then checks tomorrow's schedule (already fetched
+  // via --days 2) and if any game starts before 10am ET, runs the full morning
+  // pipeline for tomorrow right now so daily_plan exists well before first pitch.
+  cron.schedule('0 3 * * *', async () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       .toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
     run('MLB settle + EOD', `bash scripts/live/dailyRun.sh --settle ${yesterday}`)
     setTimeout(() => checkBetSanity(), 5 * 60 * 1000)
+
+    // Check tomorrow's schedule for early games (before 10am ET = 14:00 UTC in EDT)
+    const tomorrow = etDate()  // at 3am ET, etDate() = today = tomorrow's games
+    setTimeout(async () => {
+      try {
+        const cutoffUtc = new Date()
+        cutoffUtc.setUTCHours(14, 0, 0, 0)  // 10am ET (UTC-4 EDT)
+        const early = await dbOne(
+          `SELECT id, game_time FROM games
+           WHERE date = ? AND game_time IS NOT NULL AND game_time < ?
+             AND status NOT IN ('final','postponed') LIMIT 1`,
+          [tomorrow, cutoffUtc.toISOString()],
+        )
+        if (early) {
+          console.log(`[scheduler] Early game detected for ${tomorrow} (${early.game_time}) — running morning pipeline now`)
+          mlbRun(`MLB morning run (early-game pre-run for ${tomorrow})`)
+        } else {
+          console.log(`[scheduler] No early games for ${tomorrow} — morning pipeline runs at 8:30am`)
+        }
+      } catch (err) {
+        console.warn(`[scheduler] Early-game check failed: ${err.message}`)
+      }
+    }, 10 * 60 * 1000)  // 10 min after settle starts (give EOD time to finish)
   }, { timezone: 'America/New_York' })
 
   // Every Monday 8:00 AM ET — NB model calibration check (alerts on drift > 7%)
@@ -495,5 +524,5 @@ export async function startScheduler() {
     run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 7:00am early schedule | 8:30am full pipeline | :30 8am-3pm schedule refresh | */5min lineup fetch + bet fire | 3:30pm full lineup refresh + re-price | 4/6/8/10pm partial settle | 3:00am settle all')
+  console.log('[scheduler] daily jobs (ET): 3:00am settle+early-game check | 7:00am schedule+Savant | 8:30am full pipeline (skipped if early-game pre-run) | */5min 4am-8pm lineup+bets | 3:30pm lineup refresh | 4/6/8/10pm partial settle')
 }
