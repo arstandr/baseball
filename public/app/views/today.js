@@ -379,7 +379,7 @@ export async function loadDay(date) {
     hdr.hidden = true
     empty.hidden = false
     const betList = document.getElementById('sc-bet-list')
-    if (betList) betList.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
+    if (betList) betList.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are scheduled at 8:30 AM ET and fire automatically when lineups are posted.</div>'
     const scSummary = document.getElementById('sc-summary')
     if (scSummary) scSummary.hidden = true
     return
@@ -652,7 +652,7 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
 
   if (!pitchers.length && !schedItems.length) {
     if (picksHead) picksHead.hidden = true
-    container.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are placed automatically at 9:00 AM Eastern Time.</div>'
+    container.innerHTML = '<div class="sc-empty">No bets placed for this date yet.</div><div class="sc-empty-sub">Picks are scheduled at 8:30 AM ET and fire automatically when lineups are posted.</div>'
     return
   }
   if (picksHead) { picksHead.hidden = false; picksHead.textContent = "TODAY'S GAMES" }
