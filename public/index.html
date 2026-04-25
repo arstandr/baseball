@@ -384,22 +384,135 @@
           </div>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>System</h2></div>
+          <div class="panel-head"><h2>Bet Sizing</h2><span class="panel-sub">How much we risk per bet</span></div>
           <div class="sys-info" id="sys-info">
-            <div class="sys-row"><span>Starting bankroll (per person)</span><b>$1,000</b></div>
-            <div class="sys-row"><span>Minimum edge to place a bet</span><b>5¢</b></div>
-            <div class="sys-row"><span>Bet sizing aggressiveness</span><b>Quarter Kelly (25%)</b></div>
-            <div class="sys-row"><span>Max bet per game</span><b>5% of bankroll</b></div>
-            <div class="sys-row"><span>Max price on YES bets</span><b>80¢</b></div>
-            <div class="sys-row"><span>Max price on NO bets (live)</span><b>55¢</b></div>
+            <div class="sys-row"><span>Starting bankroll (per person)</span><b>$5,000</b></div>
+            <div class="sys-row"><span>Bet sizing method</span><b>Quarter Kelly (25%)</b></div>
+            <div class="sys-row"><span>Max bet per pitcher</span><b>5% of bankroll</b></div>
+            <div class="sys-row"><span>Minimum bet</span><b>$25</b></div>
+            <div class="sys-row"><span>Minimum edge (YES or NO)</span><b>12¢</b></div>
+            <div class="sys-row"><span>NO bets capital weight</span><b>1.25× (structural edge)</b></div>
+            <div class="sys-row"><span>Max NO price (pre-game calc)</span><b>80¢ NO mid — above this, risk/reward is too poor</b></div>
+            <div class="sys-row"><span>Max NO price (live re-entry)</span><b>55¢ ask — won't pay more mid-game</b></div>
           </div>
-          <div class="panel-head" style="margin-top:20px"><h2>Daily Schedule</h2></div>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel">
+          <div class="panel-head"><h2>Daily Schedule</h2><span class="panel-sub">All times Eastern</span></div>
           <div class="sys-info">
-            <div class="sys-row"><span>7:00 AM ET</span><b>Early schedule + pitcher data fetch</b></div>
-            <div class="sys-row"><span>8:30 AM ET</span><b>Full pipeline: edges + bet schedule</b></div>
-            <div class="sys-row"><span>On lineup post</span><b>Bets fire automatically (within 5 min)</b></div>
-            <div class="sys-row"><span>3:30 PM ET</span><b>Lineup refresh + re-price edges</b></div>
-            <div class="sys-row"><span>3:00 AM ET</span><b>Settle + EOD report (after west coast games)</b></div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">3:00 AM</span>
+              <div class="sched-body">
+                <b>Settle + End-of-Day Report</b>
+                <p>Settles all of yesterday's bets (west coast games are done by now). Generates a P&amp;L report and sends it to Discord. Then checks if any game today starts before 10am ET — if so, runs the full morning pipeline immediately so bets are ready before first pitch.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">7:00 AM</span>
+              <div class="sched-body">
+                <b>Early Slate Fetch</b>
+                <p>Pulls today's game schedule and refreshes pitcher statcast data. Gives us a heads-up on who's pitching before Kalshi opens for the day.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">8:30 AM</span>
+              <div class="sched-body">
+                <b>Full Morning Pipeline</b>
+                <p>Runs the complete pre-game sequence: fetch schedule → fetch pitcher stats → calculate edges for every strikeout market → build today's bet schedule → write portfolio plan. Skipped if the 3am early-game check already ran it.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">Every 5 min<br><span style="font-weight:400;font-size:11px">(4am – 8pm)</span></span>
+              <div class="sched-body">
+                <b>Lineup Check + Bet Firing</b>
+                <p>Checks whether each team's official batting lineup has been posted. The moment a lineup is confirmed, pre-built bets for that pitcher fire within 5 minutes. If lineups still aren't posted 90 minutes before first pitch, bets fire as a backstop regardless.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">Every 30 min<br><span style="font-weight:400;font-size:11px">(8:30am – 3:30pm)</span></span>
+              <div class="sched-body">
+                <b>Schedule &amp; Odds Refresh</b>
+                <p>Re-fetches the game schedule and rebuilds the bet schedule. Catches any roster scratches, postponements, or lineup changes that happen after the morning run.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">3:30 PM</span>
+              <div class="sched-body">
+                <b>Lineup Refresh + Re-Price</b>
+                <p>Fetches the official 9-man lineups (typically posted by now for evening games) and re-runs edge calculations with final lineup data. Updates the portfolio plan with fresh sizing before late-afternoon games.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">4, 6, 8, 10 PM</span>
+              <div class="sched-body">
+                <b>Mid-Game Partial Settles</b>
+                <p>Resolves guaranteed YES wins as they happen — if a pitcher has already hit a strikeout threshold, we settle it rather than waiting until 3am.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time">Every Monday<br><span style="font-weight:400;font-size:11px">8:00 AM</span></span>
+              <div class="sched-body">
+                <b>Model Calibration Check</b>
+                <p>Compares predicted vs. actual strikeout rates over the last 90 days. Alerts if model accuracy has drifted more than 7% — a sign the underlying pitcher data may be stale or the model needs retraining.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Decision Rules</h2><span class="panel-sub">Why we place — or skip — each bet</span></div>
+          <div class="sys-info">
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-block">Rule A</span>
+              <div class="sched-body">
+                <b>Block expensive NO when model agrees with market</b>
+                <p>If the market is pricing a pitcher's K threshold as likely (NO at 65¢ or higher) AND our model also thinks he'll get there (≥50% probability), we skip the NO bet. Paying 65¢ for a NO when we think YES is likely is a losing bet structurally.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-block">Rule D</span>
+              <div class="sched-body">
+                <b>Block YES bets without enough conviction</b>
+                <p>YES bets require our model to give at least a 30% probability. Below that, we don't have enough conviction — backing a long shot at low confidence burns capital even when the price looks right.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-block">Rule E</span>
+              <div class="sched-body">
+                <b>Block NO when market has already priced it in</b>
+                <p>If the market is pricing NO below 15¢ — meaning the market is nearly certain the pitcher won't reach the threshold — there's almost no edge left to capture. We skip rather than chase pennies on a near-certain outcome.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-block">Rule F</span>
+              <div class="sched-body">
+                <b>Block NO on low strikeout thresholds (≤4 Ks)</b>
+                <p>Historical data shows NO bets on thresholds of 4 or fewer strikeouts have poor win rates. Even when the model sees edge here, live results have been consistently negative — so we skip them entirely.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-cap">Rule G</span>
+              <div class="sched-body">
+                <b>Cap sizing when we're wildly more optimistic than the market</b>
+                <p>If our model is more than 4× more confident in a YES than the market (e.g. we say 40% chance, market says 9%), we cap the edge used for sizing at 15¢. A huge disagreement usually means model error, not a free lunch — so we size conservatively.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-gate">Lineup<br>Gate</span>
+              <div class="sched-body">
+                <b>No bets until the batting lineup is confirmed</b>
+                <p>We never place a bet until the official starting lineup is posted for that team. A scratch or DH replacement can completely change the strikeout environment for a pitcher. The T-90 backstop (90 min before first pitch) fires if lineups are unusually late.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-gate">YES Cap</span>
+              <div class="sched-body">
+                <b>Max 3 YES bets per pitcher per day</b>
+                <p>We limit YES exposure on any single pitcher to 3 contracts. If a pitcher has multiple K thresholds where we see edge (e.g. 5+, 6+, 7+), we take the best 3 rather than pyramiding the same risk across all of them.</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
