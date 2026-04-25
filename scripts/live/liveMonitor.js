@@ -550,10 +550,10 @@ async function manageRestingOrders(game) {
   }
 }
 
-// ── T-45 pre-game order management ───────────────────────────────────────────
+// ── T-120 pre-game order management ──────────────────────────────────────────
 //
-// Called for each Preview game when first pitch is ≤45 min away.
-// Checks all resting maker orders for that game:
+// Called for each Preview game when first pitch is ≤120 min away (T-2h).
+// Makers were placed at T-2.5h and have had 30 min to rest. Now:
 //   - Already filled → update DB status, done
 //   - Still resting  → cancel, re-price at current market, place taker if edge holds
 // This runs at most once per game (guarded by a Set in the caller scope).
@@ -574,12 +574,12 @@ async function managePreGameOrders(game) {
 
   const credsMap = await _loadCredsForBets(restingBets)
 
-  console.log(`\n[live] T-45 order check: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
+  console.log(`\n[live] T-120 order check: ${game.team_away}@${game.team_home} — ${restingBets.length} resting order(s)`)
 
   for (const bet of restingBets) {
     if (!bet.order_id || !bet.ticker) continue
     const creds = credsMap.get(bet.user_id) ?? {}
-    if (!creds.keyId) { console.error(`  [T-45] no creds for user_id=${bet.user_id} (${bet.pitcher_name}) — skipping`); continue }
+    if (!creds.keyId) { console.error(`  [T-120] no creds for user_id=${bet.user_id} (${bet.pitcher_name}) — skipping`); continue }
     try {
       const order = await getOrder(bet.order_id, creds)
       const filled = order?.status === 'executed' || Number(order?.remaining_count_fp ?? order?.remaining_count ?? 0) === 0
@@ -634,7 +634,7 @@ async function managePreGameOrders(game) {
       )
       console.log(`    → TAKER fallback placed ${contracts}c @ ${takerCents}¢  edge=${(currentEdge*100).toFixed(1)}¢  id=${newOrderId}`)
     } catch (err) {
-      console.error(`  [T-45] error for ${bet.pitcher_name}: ${err.message}`)
+      console.error(`  [T-120] error for ${bet.pitcher_name}: ${err.message}`)
     }
   }
 }
@@ -1039,13 +1039,13 @@ async function main() {
         if (state === 'Preview') {
           if (LIVE && game.game_time) {
             const minsToGame = (new Date(game.game_time) - Date.now()) / 60000
-            // T-90: flip-to-NO / cancel no-edge resting orders
-            if (minsToGame <= 90 && minsToGame > 45) {
-              await manageRestingOrders(game)
-            }
-            // T-45: fill check → taker fallback
-            if (minsToGame <= 45 && minsToGame > 0) {
+            // T-120: 30 min after makers placed — cancel unfilled, taker fallback if edge holds
+            if (minsToGame <= 120 && minsToGame > 90) {
               await managePreGameOrders(game)
+            }
+            // T-90: secondary safety — flip-to-NO or cancel anything still resting with no edge
+            if (minsToGame <= 90 && minsToGame > 0) {
+              await manageRestingOrders(game)
             }
           }
           continue
