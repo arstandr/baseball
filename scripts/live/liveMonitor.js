@@ -192,7 +192,7 @@ let _dailyNetPnl = 0  // net P&L today (all settled bets, pre-game + live)
 async function loadDailyLoss() {
   const rows = await db.all(
     `SELECT SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses
-       FROM ks_bets WHERE bet_date = ? AND live_bet = 1`,
+       FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL`,
     [TODAY],
   )
   _dailyLoss = rows[0]?.losses || 0
@@ -718,15 +718,16 @@ async function sendDailyReport() {
   )
 
   const settled  = bets.filter(b => b.result != null)
-  const dayPnl   = settled.reduce((s, b) => s + (b.pnl || 0), 0)
-  const wins     = settled.filter(b => b.result === 'win')
+  const liveBets = settled.filter(b => !b.paper || b.paper === 0)
+  const dayPnl   = liveBets.reduce((s, b) => s + (b.pnl || 0), 0)
+  const wins     = liveBets.filter(b => b.result === 'win')
 
   // Season stats
   const season = await db.all(
     `SELECT SUM(pnl) as pnl, COUNT(*) as n,
             SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w,
             SUM(bet_size) as wagered
-       FROM ks_bets WHERE result IS NOT NULL`,
+       FROM ks_bets WHERE result IS NOT NULL AND (paper = 0 OR paper IS NULL)`,
   )
   const sp = season[0] || {}
 
@@ -1044,11 +1045,20 @@ async function cancelPreGameOrders(game) {
     const creds = credsMap.get(bet.user_id) ?? {}
     try {
       if (bet.order_id && creds.keyId) await cancelOrder(bet.order_id, creds)
-      await db.run(
-        `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=? WHERE id=?`,
-        [new Date().toISOString(), bet.id],
-      )
-      console.log(`  ✗ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — pre-game order cancelled at first pitch`)
+      if ((bet.filled_contracts ?? 0) > 0) {
+        // Partially filled — cancel the resting portion but leave result=NULL so settlement handles the filled contracts
+        await db.run(
+          `UPDATE ks_bets SET order_status='cancelled', settled_at=? WHERE id=?`,
+          [new Date().toISOString(), bet.id],
+        )
+        console.log(`  ⚠ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — partial fill (${bet.filled_contracts}c), cancelling resting portion only`)
+      } else {
+        await db.run(
+          `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=? WHERE id=?`,
+          [new Date().toISOString(), bet.id],
+        )
+        console.log(`  ✗ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — pre-game order cancelled at first pitch`)
+      }
     } catch (err) {
       console.error(`  [cancel-pregame] error for ${bet.pitcher_name}: ${err.message}`)
     }
@@ -1586,8 +1596,8 @@ async function main() {
             if (bet.side === 'YES' && currentKs >= bet.strike && !covered.has(key)) {
               covered.add(key)
               const _fcC = bet.filled_contracts != null ? bet.filled_contracts : null
-              const _ffC = _fcC != null ? (bet.fill_price ?? (bet.market_mid ?? 50)) / 100 : (bet.market_mid ?? 50) / 100
-              const _szC = _fcC != null ? _fcC : (bet.bet_size ?? 100)
+              const _ffC = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
+              const _szC = _fcC != null ? _fcC : Math.round((bet.bet_size ?? 100) / _ffC)
               const pnl = Math.round(_szC * (1 - _ffC) * 0.93 * 100) / 100
               const now = new Date().toISOString()
               await db.run(
@@ -1622,9 +1632,10 @@ async function main() {
               dead.add(key)
               const FEE = 0.07
               const contracts = bet.filled_contracts != null ? bet.filled_contracts : null
-              const fillFrac  = contracts != null ? (bet.fill_price ?? (bet.market_mid ?? 50)) / 100 : (bet.market_mid ?? 50) / 100
-              const size      = contracts != null ? contracts : (bet.bet_size ?? 100)
-              const pnl = -Math.round(size * fillFrac * 100) / 100
+              const fillFrac  = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
+              const pnl = contracts != null
+                ? -Math.round(contracts * fillFrac * 100) / 100  // loss = contracts × cost per contract
+                : -(bet.bet_size ?? 0)                           // loss = capital invested
               const now = new Date().toISOString()
               await db.run(
                 `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,

@@ -242,16 +242,18 @@ async function firePendingBets() {
 
     // ── Lineup gate: hold until official lineups are posted, or T-90 backstop ─
     // game_lineups table exists (per schema.sql) — check if lineup row is present.
-    const minsToGame = entry.game_time
-      ? (new Date(entry.game_time) - Date.now()) / 60_000
-      : 0
+    // Refresh game_time from games table in case MLB adjusted the schedule
+    const freshGame = await dbOne('SELECT game_time FROM games WHERE id = ?', [entry.game_id]).catch(() => null)
+    const gameTime = freshGame?.game_time ?? entry.game_time
+    const minsToGame = gameTime ? (new Date(gameTime) - Date.now()) / 60_000 : 0
     const pastBackstop = minsToGame <= 90
 
     let lineupReady = false
     try {
       const lineupRow = await dbOne(
-        `SELECT COUNT(DISTINCT team_abbr) as teams FROM game_lineups WHERE game_id = ? AND fetch_date = ?`,
-        [entry.game_id, date],
+        `SELECT COUNT(DISTINCT team_abbr) as teams FROM game_lineups
+         WHERE game_id = ? AND fetch_date >= date('now', '-1 day', 'localtime')`,
+        [entry.game_id],
       ).catch(() => null)
       lineupReady = (lineupRow?.teams ?? 0) >= 2
     } catch { /* table missing or query failed — treat as not ready */ }
@@ -497,6 +499,15 @@ export async function startScheduler() {
   // settle uses yesterday's ET date. Then checks tomorrow's schedule (already fetched
   // via --days 2) and if any game starts before 10am ET, runs the full morning
   // pipeline for tomorrow right now so daily_plan exists well before first pitch.
+  //
+  // ORDERING GUARANTEE: dailyRun.sh --settle runs these steps in sequence:
+  //   1. syncFills.js       — pull filled_contracts / order_status from Kalshi
+  //   2. ksBets.js settle   — mark bets won/lost, write ks_bets.pnl
+  //   3. syncSettlements.js — rebuild daily_pnl_events from Kalshi API (ksSettlementSync)
+  //   4. eodReport.js       — read daily_pnl_events for authoritative Discord P&L
+  // Step 3 MUST come after step 2 so ksSettlementSync can reconcile ks_bets.pnl for
+  // the per-bet allocation split. Step 3 also ensures daily_pnl_events includes any
+  // West Coast game settlements (games ending 1-2am ET) before eodReport runs.
   cron.schedule('0 3 * * *', async () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       .toLocaleDateString('en-CA', { timeZone: 'America/New_York' })

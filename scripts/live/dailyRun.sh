@@ -51,6 +51,13 @@ if [ "$SETTLE_MODE" = true ]; then
   node scripts/live/ksBets.js settle --date "$DATE"
 
   echo ""
+  echo "── Settlement sync (rebuild daily_pnl_events from Kalshi API) ──"
+  # Must run AFTER ksBets.js settle so ks_bets.result is written before ksSettlementSync
+  # reconciles per-bet P&L. West Coast games can end 1-2am ET; running here at 3am ET
+  # guarantees all settlements are included before eodReport reads daily_pnl_events.
+  node scripts/live/syncSettlements.js || true
+
+  echo ""
   echo "── EOD report (Claude analysis → Discord) ──"
   node scripts/live/eodReport.js --date "$DATE"
 

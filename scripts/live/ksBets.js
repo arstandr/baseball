@@ -1037,9 +1037,10 @@ async function settleBets() {
   }
 
   // Discord end-of-day report
-  const allSettled = await db.all(`SELECT * FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL AND live_bet = 0`, [TODAY])
+  // P7: exclude paper bets from daily + season totals (paper = 0 OR paper IS NULL = real-money only)
+  const allSettled = await db.all(`SELECT * FROM ks_bets WHERE bet_date = ? AND result IS NOT NULL AND live_bet = 0 AND (paper = 0 OR paper IS NULL)`, [TODAY])
   const season = await db.all(
-    `SELECT SUM(pnl) as pnl, COUNT(*) as n, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(bet_size) as wagered FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0`,
+    `SELECT SUM(pnl) as pnl, COUNT(*) as n, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(bet_size) as wagered FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND (paper = 0 OR paper IS NULL)`,
   )
   const sp = season[0] || {}
 
@@ -1079,8 +1080,9 @@ async function report() {
   cutoff.setDate(cutoff.getDate() - daysArg)
   const since = cutoff.toISOString().slice(0, 10)
 
+  // P7: exclude paper bets from report figures (real-money only)
   const bets = await db.all(
-    `SELECT * FROM ks_bets WHERE bet_date >= ? AND live_bet = 0 ORDER BY bet_date DESC, edge DESC`,
+    `SELECT * FROM ks_bets WHERE bet_date >= ? AND live_bet = 0 AND (paper = 0 OR paper IS NULL) ORDER BY bet_date DESC, edge DESC`,
     [since],
   )
 
@@ -1277,7 +1279,8 @@ async function planPortfolio() {
   // Protection rules A / D / E / F (mirrors logEdges filter — keeps denominator consistent)
   const guardedEdges = withFill.filter(e => {
     if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false
-    if (e.side === 'YES' && e.model_prob < 0.30) return false
+    // B10: edge override — if _edgeVal >= 0.18, allow through even with low model_prob (mirrors logEdges)
+    if (e.side === 'YES' && e.model_prob < 0.30 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false
     if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false
     if (e.side === 'NO' && e.strike <= 4) return false   // Rule F — matches logEdges filter
     return true
@@ -1302,6 +1305,9 @@ async function planPortfolio() {
   const pitchersJson = JSON.stringify([...pitcherBreakdown.values()])
   const now = new Date().toISOString()
 
+  // P2: ON CONFLICT ... DO UPDATE already handles re-runs (10am → 3:30pm) correctly —
+  // total_edge_weighted is always overwritten so afternoon bets use the correct denominator.
+  // No early-return guard exists, so planPortfolio always re-runs with fresh edge weights.
   await db.run(
     `INSERT INTO daily_plan (bet_date, total_edge_weighted, pitcher_count, pitchers_json, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)
