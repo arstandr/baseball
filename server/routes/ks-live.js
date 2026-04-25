@@ -63,10 +63,13 @@ router.get('/ks/live', wrap(async (req, res) => {
     if (!bs) continue
 
     const status  = g.status?.abstractGameState
+    const isLive  = status === 'Live'
     const ls      = g.linescore
     const isFinal = status === 'Final'
     const detail  = g.status?.detailedState || status
-    const inning  = isFinal ? 'Final' : (ls?.currentInningOrdinal || detail)
+    // For Preview games the MLB API can return currentInningOrdinal='1st' before first pitch.
+    // Show the detail string ('Scheduled', 'Pre-Game') instead so the card reads correctly.
+    const inning  = isFinal ? 'Final' : !isLive ? (detail || status) : (ls?.currentInningOrdinal || detail)
     const away    = g.teams?.away?.team?.abbreviation || 'AWAY'
     const home    = g.teams?.home?.team?.abbreviation || 'HOME'
     const gamePk  = g.gamePk
@@ -139,7 +142,7 @@ router.get('/ks/live', wrap(async (req, res) => {
         home_score:   ls?.teams?.home?.runs ?? null,
         away_score:   ls?.teams?.away?.runs ?? null,
         inning_state: ls?.inningState ?? null,
-        is_pitching:  !isFinal && !!starter.still_in && (side === 'home' ? ls?.inningState === 'Top' : ls?.inningState === 'Bottom'),
+        is_pitching:  isLive && !isFinal && !!starter.still_in && (side === 'home' ? ls?.inningState === 'Top' : ls?.inningState === 'Bottom'),
         bet_statuses: allMyBets.map(b => ({
           id:     b.id,
           strike: b.strike,
