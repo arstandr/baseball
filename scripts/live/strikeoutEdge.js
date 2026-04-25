@@ -89,7 +89,8 @@ const MIN_EDGE_FLOOR = 0.04   // absolute floor (4¢) regardless of spread
 // NO side wins at 74% vs YES at 35% — require stricter entry on YES.
 const YES_MIN_PROB = 0.25    // YES bets require model_prob ≥ 25%
 const YES_MIN_EDGE = 0.12    // YES bets require edge ≥ 12¢
-const NO_MIN_EDGE  = 0.08    // NO bets require edge ≥ 8¢ (vs old global 5¢)
+// Apr 2026 data: 8-12¢ NO bucket was 30 bets, 26.7% win rate, -$101. Raised from 8¢.
+const NO_MIN_EDGE  = 0.12    // NO bets require edge ≥ 12¢
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
 const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
@@ -133,13 +134,13 @@ async function loadStatcastData(season) {
 
   // Prefer today's fetch; fall back to most recent available
   let rows = await db.all(
-    `SELECT player_id, k_pct, swstr_pct, fb_velo, fb_spin, gb_pct, bb_pct, ip, pa, k_pct_vs_l, k_pct_vs_r
+    `SELECT player_id, k_pct, swstr_pct, fb_velo, fb_spin, gb_pct, bb_pct, ip, pa, k_pct_vs_l, k_pct_vs_r, nb_r, manager_leash_factor
        FROM pitcher_statcast WHERE season = ? AND fetch_date = ?`,
     [season, today],
   )
   if (!rows.length) {
     rows = await db.all(
-      `SELECT player_id, k_pct, swstr_pct, fb_velo, fb_spin, gb_pct, bb_pct, ip, pa, k_pct_vs_l, k_pct_vs_r
+      `SELECT player_id, k_pct, swstr_pct, fb_velo, fb_spin, gb_pct, bb_pct, ip, pa, k_pct_vs_l, k_pct_vs_r, nb_r, manager_leash_factor
          FROM pitcher_statcast WHERE season = ?
          ORDER BY fetch_date DESC LIMIT 500`,
       [season],
@@ -432,6 +433,16 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
     }
   }
 
+  // ── Manager leash factor: scale expectedBF by pitcher-specific pull tendency ──
+  // Built by buildManagerLeash.js from historical starts (requires ≥10 starts).
+  // <1.0 = pitcher tends to get pulled earlier than λ predicts (haircut BF).
+  // >1.0 = pitcher tends to go deeper than λ predicts (bonus BF).
+  const leashFactor = savant?.manager_leash_factor ?? 1.0
+  if (leashFactor !== 1.0) {
+    expectedBF = expectedBF * leashFactor
+    bfSource   += `×leash(${leashFactor.toFixed(2)})`
+  }
+
   const avgIp = expectedBF / LEAGUE_PA_PER_IP  // kept for display / legacy logging
   const earlyExitRate = nStarts > 0
     ? last5.filter(r => Math.floor(r.ip) < 3).length / nStarts : null
@@ -450,6 +461,16 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
     const w       = Math.min(1, nStarts / 5)
     pK_l5 = w * pK_raw + (1 - w) * careerKpct
     k9_l5 = pK_l5 * LEAGUE_PA_PER_IP * 9
+
+    // L5 regression cap: hot 5-start streaks are noisy and revert to mean.
+    // When L5 K9 > 125% of career baseline, regress back to the cap.
+    // Sánchez Apr 23: L5 was 32% above career → model said 81% YES → got 4 Ks → -$430.
+    if (k9_l5 > careerK9 * 1.25) {
+      const cappedK9 = careerK9 * 1.25
+      console.log(`[strikeout-edge] L5 regression: k9_l5 ${k9_l5.toFixed(2)} → ${cappedK9.toFixed(2)} (career ${careerK9.toFixed(2)} ×1.25)`)
+      k9_l5 = cappedK9
+      pK_l5 = cappedK9 / (LEAGUE_PA_PER_IP * 9)
+    }
   } else {
     pK_l5 = careerKpct
     k9_l5 = careerK9
@@ -930,7 +951,9 @@ async function main() {
       const _pipelineEdges = []
 
       for (const mkt of group.markets) {
-        const rawModelProb = pAtLeast(lambda, mkt.strike)
+        // Use pitcher-specific dispersion r if fitted by fitDispersion.js; fall back to NB_R (30).
+        const pitcherNbR   = savant?.nb_r ?? NB_R
+        const rawModelProb = Math.max(0, 1 - nbCDF(lambda, pitcherNbR, mkt.strike - 1))
         const mid    = mkt.yes_ask != null && mkt.yes_bid != null ? (mkt.yes_ask + mkt.yes_bid) / 2 : null
         const spread = mkt.yes_ask != null && mkt.yes_bid != null ? mkt.yes_ask - mkt.yes_bid : null
 

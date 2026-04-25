@@ -198,20 +198,43 @@ async function logEdges() {
   const yesCapRemoved = deduped.length - withFill.length
   if (yesCapRemoved > 0) console.log(`[ks-bets] Capped ${yesCapRemoved} YES bet(s) (max ${MAX_YES_PER_PITCHER} per pitcher)`)
 
-  // ── Protection rules (A / D) ─────────────────────────────────────────────
+  // ── Protection rules (A / D / E / F) ─────────────────────────────────────
   // Rule A: Ban NO bets where market_mid ≥ 65 AND model also thinks YES is favored (model_prob ≥ 0.50)
   //         Both market and model agree YES is likely — no conviction to bet NO.
   //         If model says NO wins outright (model_prob < 0.50), let it through regardless of market price.
   // Rule D: Ban YES bets where model_prob < 0.30 (not enough conviction)
+  // Rule E: Ban NO bets where market_mid < 15 — market already near-certain NO, no edge to capture
+  // Rule F: Ban NO bets at strike ≤ 4 — Apr 2026: strike 3 NO 0% WR (-$53), strike 4 NO 27.8% WR (-$41)
   // Rule C (strike=3 skip) removed — live data shows K≤3 bets have 47% ROI
   const guardedEdges = withFill.filter(e => {
     if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false  // Rule A
     if (e.side === 'YES' && e.model_prob < 0.30) return false                                  // Rule D
-    if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false                            // Rule E: market already near-certain NO, no edge to capture
+    if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false                            // Rule E
+    if (e.side === 'NO' && e.strike <= 4) return false                                         // Rule F
     return true
   })
   const guardsRemoved = withFill.length - guardedEdges.length
-  if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/D/E: removed ${guardsRemoved} bet(s)`)
+  if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/D/E/F: removed ${guardsRemoved} bet(s)`)
+
+  // ── Rule G: market-skepticism edge cap (YES only) ─────────────────────────
+  // When model is >4× more bullish than market on a YES bet, the apparent edge
+  // (~65¢) drives a massive Kelly fraction that's almost certainly wrong. Cap
+  // _edgeVal at 15¢ for sizing so the bet still fires but right-sized.
+  // Sánchez 6+ YES: model=69%, market=4¢ (17× gap) — Kelly sized as 65¢ edge → -$430 start.
+  const RULE_G_MULTIPLE = 4
+  const RULE_G_EDGE_CAP = 0.15
+  let ruleGCapped = 0
+  for (const e of guardedEdges) {
+    if (e.side !== 'YES') continue
+    const mktProb = (e.market_mid ?? 50) / 100
+    if (mktProb <= 0) continue
+    if (e.model_prob > RULE_G_MULTIPLE * mktProb && e._edgeVal > RULE_G_EDGE_CAP) {
+      console.log(`[ks-bets] Rule G: ${e.pitcher} ${e.strike}+ YES model=${(e.model_prob*100).toFixed(0)}% mkt=${(mktProb*100).toFixed(0)}¢ — cap _edgeVal ${e._edgeVal.toFixed(3)}→${RULE_G_EDGE_CAP}`)
+      e._edgeVal = RULE_G_EDGE_CAP
+      ruleGCapped++
+    }
+  }
+  if (ruleGCapped > 0) console.log(`[ks-bets] Rule G: capped ${ruleGCapped} YES bet(s) at ≤${RULE_G_EDGE_CAP} edge`)
 
   // ── Pipeline: emit rule_filters per pitcher ─────────────────────────────
   // Group edges by pitcher to record one pipeline row per pitcher
@@ -293,6 +316,42 @@ async function logEdges() {
     }
   } catch { /* daily_plan not yet created — fall back to local totalEdge */ }
 
+  // ── Portfolio correlation discount ──────────────────────────────────────────
+  // When multiple outdoor games share adverse weather or a K-suppressing umpire,
+  // their outcomes are correlated. Treat them as a cluster and discount Kelly
+  // fractions by 1/√N where N = number of correlated games.
+  const weatherCorrelatedGames = new Set()
+  const umpCorrelatedGames = new Set()
+  try {
+    // Count distinct outdoor games with weather_mult < 0.97 on today's slate
+    const weatherRows = await db.all(
+      `SELECT DISTINCT game, weather_mult FROM ks_bets
+       WHERE bet_date = ? AND live_bet = 0 AND weather_mult IS NOT NULL AND weather_mult < 0.97`,
+      [TODAY],
+    )
+    const weatherGameSet = new Set(weatherRows.map(r => r.game))
+    if (weatherGameSet.size >= 3) {
+      for (const r of weatherRows) weatherCorrelatedGames.add(r.game)
+      console.log(`[ks-bets] Weather correlation: ${weatherGameSet.size} outdoor games with mult<0.97 → discount ${(1 / Math.sqrt(weatherGameSet.size)).toFixed(3)}`)
+    }
+
+    // K-suppressing umpires: same ump_factor < 0.94 across multiple games
+    const umpRows = await db.all(
+      `SELECT DISTINCT game, ump_factor, ump_name FROM ks_bets
+       WHERE bet_date = ? AND live_bet = 0 AND ump_factor IS NOT NULL AND ump_factor < 0.94`,
+      [TODAY],
+    )
+    for (const r of umpRows) umpCorrelatedGames.add(r.game)
+  } catch { /* non-fatal */ }
+
+  function getCorrelationDiscount(game) {
+    const isWeather = weatherCorrelatedGames.has(game)
+    const isUmp     = umpCorrelatedGames.has(game)
+    const N = (isWeather ? weatherCorrelatedGames.size : 0) + (isUmp ? umpCorrelatedGames.size : 0)
+    if (N < 2) return 1.0
+    return 1 / Math.sqrt(N)
+  }
+
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────
   const STAGGER_MS = 45_000   // 45s between users on live orders
   let logged = 0
@@ -373,8 +432,9 @@ async function logEdges() {
     // highest-edge bets first and stopping once the budget is spent.
     const withFace = guardedEdges
       .map(e => {
-        const sideMult  = e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT
-        const riskAlloc = (e._edgeVal * sideMult / denominatorEdge) * dailyBudget
+        const sideMult      = e.side === 'NO' ? NO_SIDE_MULT : YES_SIDE_MULT
+        const corrDiscount  = getCorrelationDiscount(e.game)
+        const riskAlloc     = (e._edgeVal * sideMult / denominatorEdge) * dailyBudget * corrDiscount
         const faceValue = Math.round(riskAlloc / e._fill)
         const face = Math.max(faceValue, MIN_BET_FACE)
         return { ...e, _face: face, _actualRisk: face * e._fill }
@@ -1283,7 +1343,7 @@ async function planPortfolio() {
     await db.run(`ALTER TABLE bet_schedule ADD COLUMN allocated_usd REAL`).catch(() => {})
 
     // Get active bettors to compute their daily budgets
-    const bettors = await db.all(`SELECT id, starting_bankroll, daily_risk_pct, paper FROM users WHERE active = 1`)
+    const bettors = await db.all(`SELECT id, starting_bankroll, daily_risk_pct, paper FROM users WHERE active_bettor = 1`)
     for (const bettor of bettors) {
       const riskPct = bettor.daily_risk_pct ?? DAILY_RISK_PCT
       // Use starting_bankroll as proxy — real Kalshi balance pulled at fire time
