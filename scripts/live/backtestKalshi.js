@@ -137,7 +137,7 @@ async function runSettle() {
     `SELECT b.ticker, b.actual_ks, b.result, b.pnl, b.settled_at
        FROM ks_bets b
        JOIN kalshi_ks_markets k ON k.ticker = b.ticker
-      WHERE b.result IS NOT NULL AND k.result IS NULL`,
+      WHERE b.result IN ('win','loss') AND k.result IS NULL`,
   )
 
   let updated = 0

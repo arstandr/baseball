@@ -143,7 +143,7 @@ async function settleEdges() {
 
   if (settled) {
     const all = await db.all(
-      `SELECT result, pnl FROM ks_bets WHERE bet_date = ? AND model = 'nba_3pt' AND result IS NOT NULL`,
+      `SELECT result, pnl FROM ks_bets WHERE bet_date = ? AND model = 'nba_3pt' AND result IN ('win','loss')`,
       [TODAY],
     )
     const dayPnl = all.reduce((s, b) => s + (b.pnl || 0), 0)
@@ -153,7 +153,7 @@ async function settleEdges() {
 
     const season = await db.one(
       `SELECT SUM(pnl) as pnl, SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as w, SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) as l
-       FROM ks_bets WHERE model='nba_3pt' AND result IS NOT NULL`,
+       FROM ks_bets WHERE model='nba_3pt' AND result IN ('win','loss')`,
     )
     console.log(`[3pt-bets] Season: ${season.w}W-${season.l}L  P&L: ${(season.pnl||0) >= 0 ? '+' : ''}$${(season.pnl||0).toFixed(2)}`)
   }

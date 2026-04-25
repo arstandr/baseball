@@ -93,7 +93,7 @@ async function logEdges() {
     const pnlRow = await db.one(`
       SELECT COALESCE(SUM(pnl), 0) AS pnl
       FROM ks_bets
-      WHERE result IS NOT NULL AND model = 'nba_totals'
+      WHERE result IN ('win','loss') AND model = 'nba_totals'
         AND (? IS NULL OR user_id = ?)`, [bettor.id, bettor.id])
     const bankroll = (bettor.starting_bankroll ?? 5000) + (pnlRow?.pnl ?? 0)
     const dailyBudget = bankroll * (bettor.daily_risk_pct ?? 0.20)
