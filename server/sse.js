@@ -207,6 +207,7 @@ router.get('/events', (req, res) => {
   res.flushHeaders()
 
   _sseClients.add(res)
+  _lastLiveHash = '' // force next interval tick to push current live state to this new client
   res.write(': connected\n\n')
 
   const keepalive = setInterval(() => {
