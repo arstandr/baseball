@@ -98,15 +98,80 @@ setInterval(async () => {
   } catch { /* ignore DB errors */ }
 }, 10_000)
 
+// Settle bets whose outcomes are determined from live data — no need to wait for Kalshi.
+// Conditions: NO bet blown (ks >= strike), YES bet dead (pitcher pulled with ks < strike),
+// or game/appearance final. Runs server-side; result written directly to ks_bets.
+async function settleDeterminedBets(pitchers, date) {
+  const FEE = 0.07
+  const now = new Date().toISOString()
+  let settled = 0
+
+  for (const p of pitchers) {
+    if (p.is_postponed) continue
+    // Determine if this pitcher's appearance is over
+    const pulled  = p.still_in === false
+    const done    = p.is_final || pulled
+    // If game hasn't started yet skip — ks=0 and ip=0 means no data yet
+    if (!done && p.ks === 0 && p.ip === 0) continue
+
+    // Fetch all unsettled bets (morning + live) for this pitcher today
+    const bets = await db.all(
+      `SELECT id, side, strike, market_mid, spread, bet_size, fill_price, filled_contracts
+       FROM ks_bets
+       WHERE pitcher_id = ? AND bet_date = ? AND result IS NULL`,
+      [p.pitcher_id, date],
+    )
+
+    for (const b of bets) {
+      let won = null
+      if (b.side === 'YES') {
+        if (p.ks >= b.strike)      won = true   // covered
+        else if (done)             won = false  // pulled/final without hitting
+      } else {
+        if (p.ks >= b.strike)      won = false  // blown
+        else if (done)             won = true   // done and stayed under
+      }
+      if (won === null) continue
+
+      // P&L using same math as /ks/live route
+      const contracts = b.filled_contracts || 0
+      const mid      = (b.market_mid ?? 50) / 100
+      const hs       = (b.spread ?? 4) / 200
+      const fill     = b.side === 'YES' ? mid + hs : (1 - mid) + hs
+      const fillFrac = contracts > 0 ? (b.fill_price ?? (b.market_mid ?? 50)) / 100 : fill
+      const size     = contracts > 0 ? contracts : (b.bet_size ?? 0)
+      const pnl      = won
+        ? Math.round(size * (1 - fillFrac) * (1 - FEE) * 100) / 100
+        : -Math.round(size * fillFrac * 100) / 100
+
+      const rows = await db.run(
+        `UPDATE ks_bets SET result=?, actual_ks=?, pnl=?, settled_at=?
+         WHERE id=? AND result IS NULL`,
+        [won ? 'win' : 'loss', p.ks, pnl, now, b.id],
+      )
+      if (rows?.rowsAffected ?? 1) {
+        console.log(`[live-settle] ${p.pitcher_name} ${b.side} ${b.strike}+: ${won ? 'WIN' : 'LOSS'} @ ${p.ks}Ks  ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`)
+        settled++
+      }
+    }
+  }
+  return settled
+}
+
 // Push live game data (K counts, innings, scores) to all connected clients.
 // Runs every 20s; only fetches MLB API when there are pending bets today.
 let _lastLiveHash = ''
 setInterval(async () => {
   if (!_sseClients.size) return
   try {
-    const today = todayISO()
+    const today    = todayISO()
     const pitchers = await fetchLivePitcherData(today)
     if (!pitchers.length) return
+
+    // Settle any bets whose outcomes are now determinable
+    const settled = await settleDeterminedBets(pitchers, today)
+    if (settled > 0) broadcastSSE('settled', { lastDataUpdate: new Date().toISOString() })
+
     const hash = pitchers.map(p =>
       `${p.pitcher_id}|${p.ks}|${p.is_final}|${p.inning}|${String(p.still_in)}`
     ).join(',')
