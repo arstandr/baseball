@@ -182,7 +182,7 @@ echo "── 6. Edge finder (lineup fallback: team K%) ──"
 node scripts/live/strikeoutEdge.js --date "$DATE" --json
 
 echo ""
-echo "── 7. Build bet schedule (bets fire at T-2.5h via polling job) ──"
+echo "── 7. Build bet schedule (bets fire within 5min of lineup detection) ──"
 node scripts/live/ksBets.js build-schedule --date "$DATE"
 
 echo ""

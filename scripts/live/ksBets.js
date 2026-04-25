@@ -697,10 +697,10 @@ async function logEdges() {
   // Discord pick notifications suppressed — alerts fire only on confirmed fills/takers (T-120 check)
 }
 
-// ── BUILD-SCHEDULE mode: write T-2.5h entries for all of today's starters ────
+// ── BUILD-SCHEDULE mode: write lineup-gated entries for all of today's starters ────
 
 async function buildSchedule() {
-  const OFFSET_MS = 3.5 * 60 * 60 * 1000  // 210 minutes — T-3.5h to catch lineup posting window
+  const scheduledAt = new Date().toISOString()  // eligible immediately — lineup gate is the sole timing control
 
   const games = await db.all(
     `SELECT g.id, g.game_time, g.team_home, g.team_away, g.pitcher_home_id, g.pitcher_away_id
@@ -723,8 +723,7 @@ async function buildSchedule() {
       console.log(`[build-schedule] Bad game_time for ${g.id}: ${g.game_time} — skipping`)
       continue
     }
-    const scheduledAt = new Date(gameTime.getTime() - OFFSET_MS)
-    const gameLabel   = `${g.team_away}@${g.team_home}`
+    const gameLabel = `${g.team_away}@${g.team_home}`
 
     for (const [side, pitcherId] of [['home', g.pitcher_home_id], ['away', g.pitcher_away_id]]) {
       if (!pitcherId) continue
@@ -739,11 +738,11 @@ async function buildSchedule() {
         `INSERT OR IGNORE INTO bet_schedule
            (bet_date, game_id, game_label, pitcher_id, pitcher_name, pitcher_side, game_time, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
-        [TODAY, g.id, gameLabel, pitcherId, pitcherName, side, g.game_time, scheduledAt.toISOString()],
+        [TODAY, g.id, gameLabel, pitcherId, pitcherName, side, g.game_time, scheduledAt],
       )
       if (inserted?.changes ?? 1) {
-        const etTime = scheduledAt.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })
-        console.log(`[build-schedule] ${pitcherName.padEnd(22)} (${side.padEnd(4)}) ${gameLabel}  → bet at ${etTime} ET`)
+        const gameET = gameTime.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })
+        console.log(`[build-schedule] ${pitcherName.padEnd(22)} (${side.padEnd(4)}) ${gameLabel}  → game ${gameET} ET (lineup-gated)`)
         added++
       } else {
         console.log(`[build-schedule] ${pitcherName} — already scheduled, skipping`)
@@ -751,7 +750,7 @@ async function buildSchedule() {
     }
   }
 
-  console.log(`\n[build-schedule] Done: ${added} new entries. Polling job fires bets at T-3.5h (lineup-gated).`)
+  console.log(`\n[build-schedule] Done: ${added} new entries. Bets fire within 5min of lineup detection.`)
   await db.close()
 }
 

@@ -1,8 +1,9 @@
 // server/scheduler.js — Automated daily pipeline scheduler.
 //
-// Runs four jobs every day (all times ET):
-//   9:00 AM  — morning run (schedule + Savant + edges + log bets + Discord picks)
-//              → spawns live monitor as a background daemon (self-exits when games end)
+// Runs daily jobs (all times ET):
+//   7:00 AM  — early schedule + Savant fetch (slate visibility before Kalshi opens)
+//   8:30 AM  — full morning run (schedule + Savant + edges + build bet_schedule)
+//   */5 min  — firePendingBets: fires pre-game bets immediately when lineup is detected
 //   3:30 PM  — lineup refresh (official 9-man lineups → re-price edges)
 //  11:55 PM  — settle + EOD report (Claude analysis → Discord)
 //
@@ -338,7 +339,7 @@ async function firePendingBets() {
 
 export async function startScheduler() {
   // Safe column migrations for bet_schedule (no-op if already exist)
-  for (const col of ['preflight TEXT', 'notes TEXT', 'allocated_usd REAL']) {
+  for (const col of ['preflight TEXT', 'notes TEXT', 'allocated_usd REAL', 'preflight_outcome TEXT']) {
     await dbRun(`ALTER TABLE bet_schedule ADD COLUMN ${col}`).catch(() => {})
   }
 
@@ -355,7 +356,7 @@ export async function startScheduler() {
     [fourHoursAgo],
   ).catch(() => {})
 
-  if (hm >= 9 * 60) {        // past 9:00am — MLB morning run missed?
+  if (hm >= 8 * 60 + 30) {   // past 8:30am — MLB morning run missed?
     // Skip if either bets OR schedule entries exist for today (morning run writes to bet_schedule now)
     const existingBets  = await dbOne(`SELECT COUNT(*) AS n FROM ks_bets WHERE bet_date = ? AND live_bet = 0`, [date])
     const existingSched = await dbOne(`SELECT COUNT(*) AS n FROM bet_schedule WHERE bet_date = ?`, [date]).catch(() => ({ n: 0 }))
@@ -370,9 +371,9 @@ export async function startScheduler() {
   // NOTE: liveMonitor is managed by The Closer (Windows agent) — not started here
   // NBA morning run disabled
 
-  // If we're in the 9:30am–3:30pm window on startup, run a schedule refresh + bet_schedule
+  // If we're in the 8:30am–3:30pm window on startup, run a schedule refresh + bet_schedule
   // rebuild immediately so any postponed-blip games get corrected right away.
-  if (hm >= 9 * 60 + 30 && hm < 15 * 60 + 30) {
+  if (hm >= 8 * 60 + 30 && hm < 15 * 60 + 30) {
     run('Schedule refresh (startup)', `node scripts/live/fetchSchedule.js --date ${date} --days 1`)
     setTimeout(() => {
       run('bet_schedule rebuild (startup)', `node scripts/live/ksBets.js build-schedule --date ${date}`)
@@ -386,13 +387,23 @@ export async function startScheduler() {
     mlbRun('MLB lineup refresh (catch-up)', '--lineups')
   }
 
-  // 9:00 AM ET — MLB morning run (liveMonitor handled by The Closer)
-  cron.schedule('0 9 * * *', () => {
+  // 7:00 AM ET — early schedule + data fetch so the day's slate is visible before Kalshi opens.
+  // Does not run the edge finder (needs live Kalshi prices) — full pipeline runs at 8:30am.
+  cron.schedule('0 7 * * *', () => {
+    const d = etDate()
+    run('Early schedule fetch', `node scripts/live/fetchSchedule.js --date ${d} --days 1`)
+    setTimeout(() => run('Early Savant fetch', `node scripts/live/fetchPitcherStatcast.js`), 30_000)
+  }, { timezone: 'America/New_York' })
+
+  // 8:30 AM ET — MLB morning run (liveMonitor handled by The Closer).
+  // Moved from 9am: gives early (noon ET) games a full 3.5h+ lead time.
+  // Kalshi K prop markets open by 8:30am; edge finder runs against live prices.
+  cron.schedule('30 8 * * *', () => {
     mlbRun('MLB morning run')
   }, { timezone: 'America/New_York' })
 
   // 10:00 AM ET — portfolio plan: scan ALL of today's edges and write daily_plan.
-  // Each T-2.5h ksBets.js call reads this denominator to size proportionally.
+  // Each ksBets.js call reads this denominator to size proportionally.
   cron.schedule('0 10 * * *', () => {
     const d = etDate()
     run('Portfolio plan (10am)', `node scripts/live/ksBets.js plan --date ${d}`)
@@ -420,7 +431,7 @@ export async function startScheduler() {
   // which would otherwise cause buildSchedule() to skip them (it filters out 'postponed').
   // fetchSchedule.js is a full upsert — idempotent, safe to run repeatedly.
   // build-schedule uses INSERT OR IGNORE — only adds rows for games not yet scheduled.
-  cron.schedule('30 9-15 * * *', async () => {
+  cron.schedule('30 8-15 * * *', async () => {
     const d = etDate()
     run('Schedule refresh', `node scripts/live/fetchSchedule.js --date ${d} --days 1`)
     // Short delay to let fetchSchedule finish before rebuilding bet_schedule
@@ -429,7 +440,7 @@ export async function startScheduler() {
     }, 60_000)
   }, { timezone: 'America/New_York' })
 
-  // Every 5 min — fire any scheduled bets whose T-3.5h window has arrived (lineup-gated)
+  // Every 5 min — fire any scheduled bets whose lineup has been posted (lineup-gated)
   cron.schedule('*/5 * * * *', () => firePendingBets(), { timezone: 'America/New_York' })
 
   // 3:30 PM ET — MLB lineup refresh; 90s later re-run portfolio plan with fresh prices
@@ -458,5 +469,5 @@ export async function startScheduler() {
     run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 9:00am data+schedule | :30 9am-3pm schedule refresh | */5min bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
+  console.log('[scheduler] daily jobs (ET): 7:00am early schedule | 8:30am full pipeline | :30 8am-3pm schedule refresh | */5min lineup-gated bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
 }
