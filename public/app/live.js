@@ -4,7 +4,7 @@ import { fetchJson } from './api.js'
 import { renderTicker } from './ticker.js'
 import {
   renderDaySummary, renderGameCards, loadDay, loadLiveBets,
-  updateBestCaseCard, computeMaxTheoretical, stopLivePolling,
+  updateBestCaseCard, stopLivePolling,
 } from './views/today.js'
 
 // ── Live state tracker (for transition notifications) ───────────────────────
@@ -109,12 +109,6 @@ export function connectSSE() {
           renderGameCards(shared.dailyPitchers, shared.liveBetsPitchers)
           renderLiveBanner({ pitchers: ev.pitchers })
           updateBannerChipColors(ev.pitchers)
-          const maxEl = document.getElementById('day-max-val')
-          if (maxEl && shared.dailyPitchers.length) {
-            const maxT = computeMaxTheoretical(shared.dailyPitchers)
-            maxEl.textContent = (maxT >= 0 ? '+' : '') + fmt$(maxT)
-            maxEl.className = 'day-max-val ' + (maxT >= 0 ? 'good' : 'bad')
-          }
         }
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
       }
@@ -174,13 +168,6 @@ export async function pollLive(date) {
     }
   }
 
-  const maxEl = document.getElementById('day-max-val')
-  if (maxEl && shared.dailyPitchers.length) {
-    const maxT = computeMaxTheoretical(shared.dailyPitchers)
-    maxEl.textContent = (maxT >= 0 ? '+' : '') + fmt$(maxT)
-    maxEl.className = 'day-max-val ' + (maxT >= 0 ? 'good' : 'bad')
-  }
-
   const list = document.getElementById('pitcher-list')
   if (list) {
     const cards = [...list.querySelectorAll('.pitcher-card')]
@@ -222,8 +209,6 @@ export async function pollLive(date) {
     }
     shared.liveBetsPitchers = liveBetsData?.pitchers || []
     renderGameCards(shared.dailyPitchers, shared.liveBetsPitchers)
-    const heroMax = computeMaxTheoretical(shared.dailyPitchers)
-    updateBestCaseCard(heroMax, 1, 0)
     renderTicker()
   } catch {}
 
