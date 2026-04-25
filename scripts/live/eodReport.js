@@ -41,15 +41,27 @@ async function send(payload) {
 async function gatherData() {
   await db.migrate()
 
-  // Today's bets (all, including unsettled)
+  // Today's bets (pre-game + live, real bets only)
   const todayBets = await db.all(
-    `SELECT * FROM ks_bets WHERE bet_date = ? AND live_bet = 0 ORDER BY edge DESC`,
+    `SELECT * FROM ks_bets
+     WHERE bet_date = ? AND (paper = 0 OR paper IS NULL) AND result != 'void'
+     ORDER BY live_bet ASC, edge DESC`,
     [TODAY],
   )
 
-  // Last 30 days settled — for rolling stats
+  // Authoritative today P&L from daily_pnl_events (fills + settlements)
+  const todayPnlRow = await db.one(
+    `SELECT COALESCE(SUM(pnl_usd), 0) AS pnl FROM daily_pnl_events WHERE date = ?`,
+    [TODAY],
+  ).catch(() => ({ pnl: 0 }))
+  const todayKalshiPnl = todayPnlRow?.pnl ?? 0
+
+  // Last 30 days settled — real bets, no voids
   const rollingBets = await db.all(
-    `SELECT * FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days') ORDER BY bet_date DESC`,
+    `SELECT * FROM ks_bets
+     WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)
+       AND bet_date >= date(?, '-30 days')
+     ORDER BY bet_date DESC`,
     [TODAY],
   )
 
@@ -62,7 +74,8 @@ async function gatherData() {
             AVG(edge) as avg_edge,
             AVG(CASE WHEN result IS NOT NULL THEN ABS(actual_ks - strike) END) as avg_lambda_err
      FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
+     WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)
+       AND bet_date >= date(?, '-30 days')
      GROUP BY pitcher_name
      HAVING bets >= 2
      ORDER BY pnl DESC`,
@@ -77,7 +90,8 @@ async function gatherData() {
             SUM(pnl) as pnl,
             AVG(edge) as avg_edge
      FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
+     WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)
+       AND bet_date >= date(?, '-30 days')
      GROUP BY side`,
     [TODAY],
   )
@@ -96,7 +110,8 @@ async function gatherData() {
        SUM(pnl) as pnl,
        AVG(edge) as avg_edge
      FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
+     WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)
+       AND bet_date >= date(?, '-30 days')
      GROUP BY bucket
      ORDER BY avg_edge`,
     [TODAY],
@@ -114,7 +129,8 @@ async function gatherData() {
        SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
        SUM(pnl) as pnl
      FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
+     WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)
+       AND bet_date >= date(?, '-30 days')
      GROUP BY conf_level`,
     [TODAY],
   )
@@ -133,23 +149,25 @@ async function gatherData() {
        SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
        SUM(pnl) as pnl
      FROM ks_bets
-     WHERE result IS NOT NULL AND live_bet = 0 AND bet_date >= date(?, '-30 days')
+     WHERE result IN ('win','loss') AND live_bet = 0 AND (paper = 0 OR paper IS NULL)
+       AND bet_date >= date(?, '-30 days')
      GROUP BY side, bucket
      ORDER BY side, avg(edge)`,
     [TODAY],
   )
 
-  return { todayBets, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats, sideEdgeBuckets }
+  return { todayBets, todayKalshiPnl, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats, sideEdgeBuckets }
 }
 
 // ── Claude analysis ───────────────────────────────────────────────────────────
 
 async function analyzeWithClaude(data) {
-  const { todayBets, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats, sideEdgeBuckets } = data
+  const { todayBets, todayKalshiPnl, rollingBets, pitcherStats, sideStats, edgeBuckets, confStats, sideEdgeBuckets } = data
 
   const todaySettled = todayBets.filter(b => b.result != null)
   const todayWins    = todaySettled.filter(b => b.result === 'win')
-  const todayPnl     = todaySettled.reduce((s, b) => s + (b.pnl || 0), 0)
+  // Use authoritative Kalshi P&L from daily_pnl_events; fall back to ks_bets.pnl sum if unavailable
+  const todayPnl     = todayKalshiPnl !== 0 ? todayKalshiPnl : todaySettled.reduce((s, b) => s + (b.pnl || 0), 0)
 
   const seasonW      = rollingBets.filter(b => b.result === 'win').length
   const seasonL      = rollingBets.filter(b => b.result === 'loss').length
@@ -213,18 +231,19 @@ Keep it under 200 words total. Be direct, like a quant analyst talking to a trad
 // ── Discord post ──────────────────────────────────────────────────────────────
 
 async function postReport(data, analysis) {
-  const { todayBets, rollingBets } = data
+  const { todayBets, todayKalshiPnl, rollingBets } = data
 
   const todaySettled = todayBets.filter(b => b.result != null)
   const todayWins    = todaySettled.filter(b => b.result === 'win')
-  const todayPnl     = todaySettled.reduce((s, b) => s + (b.pnl || 0), 0)
+  // Headline P&L from daily_pnl_events (authoritative); fall back to ks_bets sum
+  const todayPnl     = todayKalshiPnl !== 0 ? todayKalshiPnl : todaySettled.reduce((s, b) => s + (b.pnl || 0), 0)
   const seasonPnl    = rollingBets.reduce((s, b) => s + (b.pnl || 0), 0)
   const seasonW      = rollingBets.filter(b => b.result === 'win').length
   const seasonL      = rollingBets.filter(b => b.result === 'loss').length
 
   const betLines = todaySettled.map(b => {
     const icon = b.result === 'win' ? '✅' : '❌'
-    return `${icon} ${b.pitcher_name} ${b.strike}+ ${b.side}  ${b.actual_ks}K  ${pnlSign(b.pnl)}`
+    return `${icon} ${b.pitcher_name} ${b.strike}+ ${b.side}  ${b.actual_ks ?? '?'}K  ${pnlSign(b.pnl)}`
   }).join('\n') || 'No settled bets.'
 
   const color = todayPnl >= 0 ? 0x2ecc71 : 0xe74c3c

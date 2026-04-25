@@ -88,7 +88,7 @@ async function processDate(date) {
       const realBets = await db.all(
         `SELECT result FROM ks_bets
          WHERE bet_date = ? AND pitcher_id = ? AND live_bet = 0 AND paper = 0
-           AND result IS NOT NULL`,
+           AND result IN ('win','loss')`,
         [date, entry.pitcher_id],
       )
       if (!realBets.length) {

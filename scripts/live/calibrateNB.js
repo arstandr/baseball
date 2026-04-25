@@ -37,7 +37,7 @@ async function main() {
     SELECT model_prob, lambda, strike, side, actual_ks, result, pnl, fill_price, filled_contracts,
            bet_date, pitcher_name
     FROM ks_bets
-    WHERE result IS NOT NULL
+    WHERE result IN ('win','loss')
       AND model_prob IS NOT NULL
       AND actual_ks IS NOT NULL
       AND paper = 0

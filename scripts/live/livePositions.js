@@ -220,7 +220,7 @@ async function render() {
 
       // Per-position rows
       const openBets   = info.bets.filter(b => !b.result)
-      const settledBets = info.bets.filter(b => b.result)
+      const settledBets = info.bets.filter(b => b.result === 'win' || b.result === 'loss')
 
       if (openBets.length) {
         console.log(`  ${'Strike'.padEnd(8)} ${'Side'.padEnd(5)} ${'Qty'.padEnd(5)} ${'Entry'.padEnd(7)} ${'Market'.padEnd(8)} ${'BEven'.padEnd(8)} ${'P(win)'.padEnd(8)} Mode`)
@@ -251,29 +251,28 @@ async function render() {
       }
 
       if (settledBets.length) {
-        const wins  = settledBets.filter(b => b.result === 'win')
+        const wins   = settledBets.filter(b => b.result === 'win')
         const losses = settledBets.filter(b => b.result === 'loss')
-        const pnl   = settledBets.reduce((s, b) => s + (b.capital_at_risk ?? 0) * (b.result === 'win' ? 1 : -1), 0)
-        console.log(`  Settled: ${wins.length}W / ${losses.length}L  pnl≈${pnl >= 0 ? '+' : ''}$${pnl.toFixed(0)}`)
+        const pnl    = settledBets.reduce((s, b) => s + (b.pnl ?? 0), 0)
+        console.log(`  Settled: ${wins.length}W / ${losses.length}L  pnl=${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`)
       }
     }
   }
 
-  // Daily P&L summary
+  // Daily P&L summary — use actual pnl field (not capital_at_risk proxy)
   const dailyRows = await db.all(
-    `SELECT result, SUM(capital_at_risk) AS inv, COUNT(*) AS n
+    `SELECT result, SUM(pnl) AS pnl, COUNT(*) AS n
      FROM ks_bets
-     WHERE bet_date = ? AND paper = 0 AND result IS NOT NULL
+     WHERE bet_date = ? AND (paper = 0 OR paper IS NULL) AND result IN ('win','loss')
      GROUP BY result`,
     [TODAY],
   )
   if (dailyRows.length) {
-    const totalInv  = dailyRows.reduce((s, r) => s + (r.inv ?? 0), 0)
-    const wins      = dailyRows.find(r => r.result === 'win')
-    const losses    = dailyRows.find(r => r.result === 'loss')
-    const pnl       = (wins?.inv ?? 0) - (losses?.inv ?? 0)
+    const wins   = dailyRows.find(r => r.result === 'win')
+    const losses = dailyRows.find(r => r.result === 'loss')
+    const pnl    = (wins?.pnl ?? 0) + (losses?.pnl ?? 0)
     console.log(`\n${'─'.repeat(60)}`)
-    console.log(`Daily settled: ${wins?.n ?? 0}W / ${losses?.n ?? 0}L  pnl≈${pnl >= 0 ? '+' : ''}$${pnl.toFixed(0)}  invested $${totalInv.toFixed(0)}`)
+    console.log(`Daily settled: ${wins?.n ?? 0}W / ${losses?.n ?? 0}L  pnl=${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`)
   }
 
   console.log('')

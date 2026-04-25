@@ -42,7 +42,7 @@ async function main() {
             edge, lambda, fill_price, filled_contracts, capital_at_risk,
             actual_ks, result, pnl, paper
      FROM ks_bets
-     WHERE bet_mode = 'dead-path' AND result IS NOT NULL ${dateFilter}
+     WHERE bet_mode = 'dead-path' AND result IN ('win','loss') ${dateFilter}
      ORDER BY bet_date DESC, pitcher_name, strike`,
   )
 
