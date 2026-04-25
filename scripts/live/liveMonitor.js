@@ -188,6 +188,7 @@ async function fetchLiveKsMarkets(ticker) {
 
 let _dailyLoss = 0
 let _dailyNetPnl = 0  // net P&L today (all settled bets, pre-game + live)
+let _dailyReportSent = false  // gate to prevent duplicate EOD Discord reports on crash+restart
 
 async function loadDailyLoss() {
   const rows = await db.all(
@@ -350,7 +351,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
           bankroll = kb.balance_usd
         } catch {}
       }
-      const cap   = bankroll * (user?.live_daily_risk_pct ?? 0.10)
+      const cap   = bankroll * (user?.live_daily_risk_pct ?? user?.daily_risk_pct ?? 0.20)
       const spent = await db.one(
         `SELECT COALESCE(SUM(capital_at_risk), 0) as total FROM ks_bets WHERE bet_date=? AND live_bet=1 AND user_id=? AND result IS NULL`,
         [TODAY, userId],
@@ -662,7 +663,7 @@ async function rebalancePendingAllocations() {
         } catch {}
       }
 
-      const dailyBudget = bankroll * (user.live_daily_risk_pct ?? 0.10)
+      const dailyBudget = bankroll * (user.live_daily_risk_pct ?? user.daily_risk_pct ?? 0.20)
 
       // Subtract capital already committed to fired pre-game bets
       const spentRow = await db.one(
@@ -712,6 +713,11 @@ async function rebalancePendingAllocations() {
 // ── End-of-day report ─────────────────────────────────────────────────────────
 
 async function sendDailyReport() {
+  if (_dailyReportSent) {
+    console.log('[daily-report] already sent today — skipping duplicate')
+    return
+  }
+  _dailyReportSent = true
   const bets = await db.all(
     `SELECT * FROM ks_bets WHERE bet_date = ? ORDER BY result DESC, edge DESC`,
     [TODAY],
@@ -770,6 +776,12 @@ async function _loadCredsForBets(bets) {
 // T-90 and T-45 checks remain as safety nets but will typically find nothing.
 
 const _convertedBetIds = new Set()
+
+// Module-level cache: written each poll cycle inside the per-game loop so that
+// convertStaleMakers() (which runs BEFORE the game loop) can access the live
+// game state from the previous poll cycle when re-evaluating edge.
+// Map: pitcherId (string) → { currentKs, currentIP, currentPitches, currentBF, scoreDiff, ctx }
+const _liveGameStateCache = new Map()
 
 async function convertStaleMakers() {
   if (!LIVE) return
@@ -831,8 +843,28 @@ async function convertStaleMakers() {
         continue
       }
 
-      const currentAsk  = bet.side === 'YES' ? mkt.ask : (1 - mkt.bid)
-      const modelProb   = bet.model_prob ?? 0.5
+      const currentAsk = bet.side === 'YES' ? mkt.ask : (1 - mkt.bid)
+
+      // B13 fix: use a fresh live-model probability if we have cached game state
+      // from the previous poll cycle; fall back to the stale DB value only when
+      // no live data is available (e.g. pre-game makers or first poll after restart).
+      const liveState = _liveGameStateCache.get(String(bet.pitcher_id))
+      let modelProb
+      if (liveState?.ctx) {
+        const live = computeLiveModel(
+          liveState.ctx,
+          liveState.currentKs,
+          liveState.currentIP,
+          liveState.currentPitches,
+          liveState.currentBF,
+          liveState.scoreDiff,
+        )
+        modelProb = live.probAtLeast(bet.strike)
+        console.log(`  → fresh model_prob=${(modelProb * 100).toFixed(1)}% (was ${((bet.model_prob ?? 0.5) * 100).toFixed(1)}% at placement)`)
+      } else {
+        modelProb = bet.model_prob ?? 0.5
+      }
+
       const currentEdge = modelProb - currentAsk
 
       if (currentEdge < LIVE_EDGE / 2) {
@@ -950,12 +982,18 @@ async function manageRestingOrder(bet, { currentPitches, currentIP, market, cred
   }
 
   // qp > QUEUE_AMEND_THRESHOLD — cancel and take the market
+  // B4 fix: require a live market snapshot before placing the taker so we never
+  // send an order at a fabricated price derived from stale DB data.
+  if (!market) {
+    console.log(`  [queue] ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — no live market snapshot, skipping cancel+taker`)
+    return
+  }
   try {
     await cancelOrder(bet.order_id, creds)
     const contracts = Math.max(1, Math.round(bet.bet_size / ((bet.fill_price ?? bet.market_mid ?? 50) / 100)))
     const takerPrice = bet.side === 'YES'
-      ? Math.min(99, (market?.yes_ask ?? Math.round(currentPrice) + 3) + 1)
-      : Math.min(99, (market?.no_ask  ?? Math.round(currentPrice) + 3) + 1)
+      ? Math.min(99, market.yes_ask + 1)
+      : Math.min(99, market.no_ask  + 1)
     const result = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerPrice, creds)
     const newOrderId = result?.order?.order_id ?? result?.order_id
     await db.run(
@@ -1371,7 +1409,7 @@ async function main() {
 
   // Load active bettors once — refreshed every 50 iterations to pick up config changes
   let activeBettors = await db.all(
-    `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, live_daily_risk_pct
+    `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct
      FROM users WHERE active_bettor=1 ORDER BY id`,
   )
 
@@ -1380,7 +1418,7 @@ async function main() {
     // Refresh active bettors periodically in case creds/paper flag changed
     if (iteration > 0 && iteration % 50 === 0) {
       activeBettors = await db.all(
-        `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, live_daily_risk_pct
+        `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct
          FROM users WHERE active_bettor=1 ORDER BY id`,
       ).catch(() => activeBettors)
     }
@@ -1566,6 +1604,10 @@ async function main() {
           const oppScore       = side === 'away' ? homeScore : awayScore
           const scoreDiff      = (pitcherScore ?? 0) - (oppScore ?? 0)
 
+          // Cache live game state so convertStaleMakers() can compute a fresh
+          // model probability on the next poll cycle (B13 fix).
+          _liveGameStateCache.set(String(pitcherId), { currentKs, currentIP, currentPitches, currentBF, scoreDiff, ctx })
+
           // ── K-delta detection — log when K count changes, flag urgency ──────
           const prevKs = lastKsMap.get(pitcherId) ?? null
           const ksChanged = prevKs !== null && currentKs !== prevKs
@@ -1620,6 +1662,12 @@ async function main() {
                       await placeOrder(bet.ticker, 'yes', bet.filled_contracts, yesBidCents, sellCreds, 'sell')
                       console.log(`[live] 💰 AUTO-CLOSE ${ctx.pitcherName} YES${bet.strike} ${bet.filled_contracts}c @ ${yesBidCents}¢`)
                       db.saveLog({ tag: 'SELL', msg: `${ctx.pitcherName} YES${bet.strike} sold ${bet.filled_contracts}c @ ${yesBidCents}¢ — auto-close`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES' })
+                      // Update pnl to reflect actual early-sale proceeds, not settlement value
+                      const autoClosePnl = Math.round(bet.filled_contracts * ((yesBidCents - (bet.fill_price ?? bet.market_mid ?? 50)) / 100) * 0.93 * 100) / 100
+                      await db.run(
+                        `UPDATE ks_bets SET pnl = ?, result = 'win', order_status = 'closed', settled_at = ? WHERE id = ? AND result IS NULL`,
+                        [autoClosePnl, new Date().toISOString(), bet.id],
+                      ).catch(() => {})
                     }
                   }
                 } catch { /* non-fatal — position still settled above */ }

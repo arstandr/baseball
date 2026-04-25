@@ -484,7 +484,7 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
     pK_season  = savant.k_pct
     const paPerIp = (savant.pa != null && savant.pa > 0) ? savant.pa / savant.ip : LEAGUE_PA_PER_IP
     k9_season  = pK_season * paPerIp * 9
-    w_season   = Math.min(0.60, savant.ip / 50)
+    w_season   = Math.min(0.60, savant.ip / 30)
     savantNote = `K%=${(pK_season*100).toFixed(1)}% IP=${savant.ip.toFixed(1)}`
     if (savant.swstr_pct != null) {
       const k_implied = savant.swstr_pct * (LEAGUE_K_PCT / LEAGUE_WHIFF_PCT)
