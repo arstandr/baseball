@@ -5,7 +5,7 @@
 //   8:30 AM  — full morning run (schedule + Savant + edges + build bet_schedule)
 //   */5 min  — firePendingBets: fires pre-game bets immediately when lineup is detected
 //   3:30 PM  — lineup refresh (official 9-man lineups → re-price edges)
-//  11:55 PM  — settle + EOD report (Claude analysis → Discord)
+//   3:00 AM  — settle + EOD report (Claude analysis → Discord; after west coast games finish)
 //
 // Baked into the server so Railway keeps it alive with the web process.
 // All output is streamed to stdout so Railway logs capture it.
@@ -458,10 +458,14 @@ export async function startScheduler() {
     cron.schedule(`0 ${hour} * * *`, () => mlbRun(`MLB mid-game settle (${hour}:00)`, '--settle'), { timezone: 'America/New_York' })
   }
 
-  // 11:55 PM ET — MLB settle + EOD reports + sanity check
-  cron.schedule('55 23 * * *', () => {
-    mlbRun('MLB settle + EOD', '--settle')
-    setTimeout(() => checkBetSanity(), 5 * 60 * 1000)  // run 5 min after settle finishes
+  // 3:00 AM ET — MLB settle + EOD reports + sanity check.
+  // Runs at 3am (not midnight) so west coast games (start ~10pm ET, 3h+) are finished.
+  // At 3am ET the calendar day has rolled over — explicitly settle the previous ET date.
+  cron.schedule('0 3 * * *', () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      .toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+    run('MLB settle + EOD', `bash scripts/live/dailyRun.sh --settle ${yesterday}`)
+    setTimeout(() => checkBetSanity(), 5 * 60 * 1000)
   }, { timezone: 'America/New_York' })
 
   // Every Monday 8:00 AM ET — NB model calibration check (alerts on drift > 7%)
@@ -469,5 +473,5 @@ export async function startScheduler() {
     run('NB calibration check', 'node scripts/live/calibrateNB.js --days 90 --min-bets 10')
   }, { timezone: 'America/New_York' })
 
-  console.log('[scheduler] daily jobs (ET): 7:00am early schedule | 8:30am full pipeline | :30 8am-3pm schedule refresh | */5min lineup-gated bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 11:55pm settle all')
+  console.log('[scheduler] daily jobs (ET): 7:00am early schedule | 8:30am full pipeline | :30 8am-3pm schedule refresh | */5min lineup-gated bet poll | 3:30pm lineups | 4/6/8/10pm partial settle | 3:00am settle all')
 }
