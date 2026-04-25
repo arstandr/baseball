@@ -788,8 +788,11 @@ function renderGameCard(p, sd) {
 
   let pitchingStatusHtml = ''
   if (live && !live.is_final) {
-    const pitchInfo = [
-      currentInning,
+    // ▲ = top half (away team batting), ▼ = bottom half (home team batting)
+    const halfSym    = inningState === 'Top' ? '▲' : inningState === 'Bottom' ? '▼' : null
+    const inningLabel = halfSym && currentInning ? `${halfSym} ${currentInning}` : currentInning
+    const pitchInfo  = [
+      inningLabel,
       pitchCount != null ? `${pitchCount} pitches` : null,
     ].filter(Boolean).join(' · ')
     const countHtml = isPitching && liveStrikes != null
@@ -801,6 +804,12 @@ function renderGameCard(p, sd) {
       pitchingStatusHtml = `<div class="gc-pitching-out">Out of game${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
     } else if (inningState === 'Middle' || inningState === 'End') {
       pitchingStatusHtml = `<div class="gc-pitching-between">Between innings${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
+    } else if (inningState === 'Bottom') {
+      // Home pitcher is resting while their team bats — make it explicit
+      pitchingStatusHtml = `<div class="gc-pitching-between">Resting${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
+    } else if (inningState === 'Top') {
+      // Away pitcher is resting while their team bats
+      pitchingStatusHtml = `<div class="gc-pitching-between">Resting${pitchInfo ? ' · ' + pitchInfo : ''}</div>`
     } else if (pitchInfo) {
       pitchingStatusHtml = `<div class="gc-pitching-between">${pitchInfo}</div>`
     }
