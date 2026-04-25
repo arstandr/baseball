@@ -288,7 +288,9 @@ function wireScoreboxFilter() {
   if (resetBtn) resetBtn.addEventListener('click', () => applyCardFilter(null))
 }
 
-function applyCardFilter(filter) {
+export function reapplyCardFilter() { applyCardFilter(activeCardFilter) }
+
+export function applyCardFilter(filter) {
   activeCardFilter = filter
   document.querySelectorAll('.sc-scorebox[data-filter]').forEach(box => {
     box.classList.toggle('sc-scorebox-active', filter !== null && box.dataset.filter === filter)
@@ -900,7 +902,11 @@ function renderGameCard(p, sd) {
       </div>`
     }).join('')
 
-  const filterTags = [p.wins > 0 ? 'win' : null, p.losses > 0 ? 'loss' : null, p.pending > 0 ? 'pending' : null].filter(Boolean).join(' ') || 'pending'
+  const allBets    = p.bets || []
+  const liveWins   = allBets.filter(b => b.result === 'win').length
+  const liveLosses = allBets.filter(b => b.result === 'loss').length
+  const livePend   = allBets.filter(b => !b.result).length
+  const filterTags = [liveWins > 0 ? 'win' : null, liveLosses > 0 ? 'loss' : null, livePend > 0 ? 'pending' : null].filter(Boolean).join(' ') || 'pending'
   return `<div class="game-card ${cfg.cls}" id="${cardId}" data-pitcher-id="${p.pitcher_id}" data-pending-risk="${sd.pendingRisk.toFixed(2)}" data-filter-result="${filterTags}" onclick="toggleGcDetails('${cardId}')">
     <div class="gc-status-band ${cfg.cls}">${cfg.label}</div>
     <div class="gc-body">

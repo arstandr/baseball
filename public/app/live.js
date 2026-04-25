@@ -4,7 +4,7 @@ import { fetchJson } from './api.js'
 import { renderTicker } from './ticker.js'
 import {
   renderDaySummary, renderGameCards, loadDay, loadLiveBets,
-  updateBestCaseCard, stopLivePolling,
+  updateBestCaseCard, stopLivePolling, reapplyCardFilter,
 } from './views/today.js'
 
 // ── Live state tracker (for transition notifications) ───────────────────────
@@ -106,10 +106,23 @@ export function connectSSE() {
               inning_state: p.inning_state, is_pitching: p.is_pitching,
               balls: p.balls ?? null, strikes: p.strikes ?? null, outs: p.outs ?? null,
             }
+            // Merge settled bet results from SSE into dailyPitchers so filter tags stay current
+            if (p.bet_statuses?.length) {
+              const dp = shared.dailyPitchers.find(d => String(d.pitcher_id) === String(p.pitcher_id))
+              if (dp?.bets) {
+                for (const bs of p.bet_statuses) {
+                  if (bs.result == null) continue
+                  const bet = dp.bets.find(b => b.id === bs.id)
+                  if (bet && bet.result == null) bet.result = bs.result
+                }
+              }
+            }
           }
           renderGameCards(shared.dailyPitchers, shared.liveBetsPitchers)
           renderLiveBanner({ pitchers: ev.pitchers })
           updateBannerChipColors(ev.pitchers)
+          // Re-apply any active filter so settled cards show/hide correctly after re-render
+          reapplyCardFilter()
         }
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
       }
