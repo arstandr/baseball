@@ -23,20 +23,20 @@ router.get('/ks/summary', wrap(async (req, res) => {
   const [totals, pending, bankrollRow] = await Promise.all([
     db.one(`
       SELECT
-        SUM(CASE WHEN bet_date = ?  AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl,
-        SUM(CASE WHEN bet_date >= ? AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS week_pnl,
-        SUM(CASE WHEN bet_date >= ? AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS month_pnl,
-        SUM(CASE WHEN bet_date >= ? AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS ytd_pnl,
-        SUM(CASE WHEN result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END)                   AS total_pnl,
+        SUM(CASE WHEN bet_date = ?  AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl,
+        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS week_pnl,
+        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS month_pnl,
+        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS ytd_pnl,
+        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END)                   AS total_pnl,
         SUM(CASE WHEN result = 'win'  AND live_bet = 0 THEN 1 ELSE 0 END)                   AS wins,
         SUM(CASE WHEN result = 'loss' AND live_bet = 0 THEN 1 ELSE 0 END)                   AS losses,
-        SUM(CASE WHEN live_bet = 0 AND result IS NOT NULL THEN 1 ELSE 0 END)                AS settled,
+        SUM(CASE WHEN live_bet = 0 AND result IN ('win','loss') THEN 1 ELSE 0 END)           AS settled,
         COUNT(CASE WHEN live_bet = 0 THEN 1 END)                                            AS total_bets,
-        AVG(CASE WHEN live_bet = 0 AND result IS NOT NULL THEN edge END)                    AS avg_edge
+        AVG(CASE WHEN live_bet = 0 AND result IN ('win','loss') THEN edge END)              AS avg_edge
       FROM ks_bets WHERE live_bet = 0 AND paper = 0 ${uf.clause}
     `, [today, weekAgo, monthAgo, yearStart, ...uf.args]),
     db.one(`SELECT COUNT(*) AS n FROM ks_bets WHERE result IS NULL AND live_bet = 0 AND paper = 0 ${uf.clause}`, uf.args),
-    db.one(`SELECT SUM(COALESCE(pnl,0)) AS total FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 ${uf.clause}`, uf.args),
+    db.one(`SELECT SUM(COALESCE(pnl,0)) AS total FROM ks_bets WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 ${uf.clause}`, uf.args),
   ])
 
   const wins   = Number(totals?.wins   || 0)
@@ -44,7 +44,7 @@ router.get('/ks/summary', wrap(async (req, res) => {
   const total  = Number(bankrollRow?.total || 0)
 
   const recentBets = await db.all(
-    `SELECT result FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 ORDER BY settled_at DESC, id DESC LIMIT 10`
+    `SELECT result FROM ks_bets WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 ORDER BY settled_at DESC, id DESC LIMIT 10`
   )
   let streak = 0
   for (const r of recentBets) {
@@ -82,11 +82,11 @@ router.get('/ks/summary', wrap(async (req, res) => {
 
   const liveTotals = await db.one(`
     SELECT
-      SUM(CASE WHEN result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS total_pnl,
+      SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS total_pnl,
       SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) AS wins,
       SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
       SUM(CASE WHEN result IS NULL  THEN 1 ELSE 0 END) AS pending,
-      SUM(CASE WHEN bet_date = ? AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl
+      SUM(CASE WHEN bet_date = ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl
     FROM ks_bets WHERE live_bet = 0 AND paper = 0
   `, [today])
 
@@ -128,10 +128,10 @@ router.get('/ks/bettors', wrap(async (req, res) => {
   const result = await Promise.all(bettors.map(async u => {
     const row = await db.one(`
       SELECT
-        ROUND(SUM(CASE WHEN result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END), 2)           AS total_pnl,
-        ROUND(SUM(CASE WHEN result IS NOT NULL THEN COALESCE(capital_at_risk,0) ELSE 0 END),2) AS total_wagered,
-        ROUND(SUM(CASE WHEN bet_date=? AND result IS NOT NULL THEN COALESCE(pnl,0) ELSE 0 END),2) AS today_pnl,
-        ROUND(SUM(CASE WHEN bet_date=? AND result IS NOT NULL THEN COALESCE(capital_at_risk,0) ELSE 0 END),2) AS today_wagered,
+        ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END), 2)           AS total_pnl,
+        ROUND(SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(capital_at_risk,0) ELSE 0 END),2) AS total_wagered,
+        ROUND(SUM(CASE WHEN bet_date=? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END),2) AS today_pnl,
+        ROUND(SUM(CASE WHEN bet_date=? AND result IN ('win','loss') THEN COALESCE(capital_at_risk,0) ELSE 0 END),2) AS today_wagered,
         SUM(CASE WHEN result='win'  AND live_bet=0 THEN 1 ELSE 0 END) AS wins,
         SUM(CASE WHEN result='loss' AND live_bet=0 THEN 1 ELSE 0 END) AS losses,
         SUM(CASE WHEN result IS NULL AND live_bet=0 THEN 1 ELSE 0 END) AS pending
@@ -259,7 +259,8 @@ router.get('/ks/daily', wrap(async (req, res) => {
             spread, k9_career, k9_season, k9_l5,
             savant_k_pct, savant_whiff, savant_fbv,
             weather_mult, velo_trend_mph, raw_model_prob,
-            order_id, fill_price, filled_at, filled_contracts, order_status, paper
+            order_id, fill_price, filled_at, filled_contracts, order_status, paper,
+            bet_mode, capital_at_risk, live_ks_at_bet, live_ip_at_bet, live_inning
      FROM ks_bets
      WHERE bet_date = ? AND live_bet = 0 AND paper = 0
        AND (order_id IS NOT NULL OR filled_contracts > 0 OR result IS NOT NULL)
@@ -314,6 +315,11 @@ router.get('/ks/daily', wrap(async (req, res) => {
       filled_contracts: b.filled_contracts ?? null,
       order_status:     b.order_status     ?? null,
       paper:            b.paper            ?? 1,
+      bet_mode:         b.bet_mode         ?? null,
+      capital_at_risk:  b.capital_at_risk  ?? null,
+      live_ks_at_bet:   b.live_ks_at_bet   ?? null,
+      live_ip_at_bet:   b.live_ip_at_bet   ?? null,
+      live_inning:      b.live_inning      ?? null,
       live: (() => {
         const lb = liveMap.get(`${b.pitcher_name}|${b.strike}|${b.side}`)
         if (!lb) return null
@@ -426,7 +432,7 @@ router.get('/ks/recent-starts/:pitcher_id', wrap(async (req, res) => {
 
 router.get('/ks/bankroll', wrap(async (req, res) => {
   const { from, to, user_id } = req.query
-  const clauses = ['result IS NOT NULL', 'live_bet = 0', 'paper = 0']
+  const clauses = ["result IN ('win','loss')", 'live_bet = 0', 'paper = 0']
   const args    = []
   if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
   if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
@@ -436,7 +442,7 @@ router.get('/ks/bankroll', wrap(async (req, res) => {
   let startingBalance = STARTING_BANKROLL
   if (from) {
     const prior = await db.all(
-      `SELECT SUM(COALESCE(pnl,0)) AS prior_pnl FROM ks_bets WHERE result IS NOT NULL AND live_bet=0 AND paper=0 AND bet_date < ?`,
+      `SELECT SUM(COALESCE(pnl,0)) AS prior_pnl FROM ks_bets WHERE result IN ('win','loss') AND live_bet=0 AND paper=0 AND bet_date < ?`,
       [from]
     )
     startingBalance = STARTING_BANKROLL + Number(prior[0]?.prior_pnl || 0)
@@ -467,7 +473,7 @@ router.get('/ks/bankroll', wrap(async (req, res) => {
 
 router.get('/ks/monthly', wrap(async (req, res) => {
   const { from, to, user_id } = req.query
-  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const clauses = ['live_bet = 0', "result IN ('win','loss')", 'paper = 0']
   const args    = []
   if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
   if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
@@ -479,7 +485,7 @@ router.get('/ks/monthly', wrap(async (req, res) => {
             SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END)   AS losses,
             SUM(COALESCE(pnl,0))                             AS pnl,
             SUM(COALESCE(capital_at_risk, bet_size))         AS wagered,
-            AVG(CASE WHEN result IS NOT NULL THEN edge END)  AS avg_edge
+            AVG(edge)                                        AS avg_edge
      FROM ks_bets WHERE ${clauses.join(' AND ')}
      GROUP BY ym ORDER BY ym ASC`,
     args
@@ -509,7 +515,7 @@ router.get('/ks/monthly', wrap(async (req, res) => {
 
 router.get('/ks/weekly', wrap(async (req, res) => {
   const { from, to, user_id } = req.query
-  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const clauses = ['live_bet = 0', "result IN ('win','loss')", 'paper = 0']
   const args    = []
   if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
   if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
@@ -545,9 +551,10 @@ router.get('/ks/bets', wrap(async (req, res) => {
   const page   = Math.max(1, Number(req.query.page   || 1))
   const limit  = Math.min(200, Number(req.query.limit || 50))
   const offset = (page - 1) * limit
+  const uf     = userFilter(req)
 
-  let where  = `live_bet = 0 AND paper = 0`
-  const params = []
+  let where  = `live_bet = 0 AND paper = 0 ${uf.clause}`
+  const params = [...uf.args]
   if (req.query.pitcher) { where += ` AND pitcher_name LIKE ?`; params.push(`%${req.query.pitcher}%`) }
   if (req.query.side)    { where += ` AND side = ?`;    params.push(req.query.side.toUpperCase()) }
   if (req.query.result)  { where += ` AND result = ?`;  params.push(req.query.result.toLowerCase()) }
@@ -664,7 +671,7 @@ router.get('/ks/pipeline/:bet_date/:pitcher_id', wrap(async (req, res) => {
 
 router.get('/ks/stats', wrap(async (req, res) => {
   const { from, to, user_id } = req.query
-  const clauses = ['live_bet = 0', 'result IS NOT NULL', 'paper = 0']
+  const clauses = ['live_bet = 0', "result IN ('win','loss')", 'paper = 0']
   const args    = []
   if (user_id) { clauses.push('user_id = ?'); args.push(user_id) }
   if (from)    { clauses.push('bet_date >= ?'); args.push(from) }
@@ -775,7 +782,7 @@ router.get('/ks/edge-breakdown', wrap(async (req, res) => {
     }
   })
 
-  const base = `FROM ks_bets WHERE live_bet=0 AND result IS NOT NULL AND paper=0`
+  const base = `FROM ks_bets WHERE live_bet=0 AND result IN ('win','loss') AND paper=0`
   const agg  = `SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
                 SUM(pnl) AS pnl,
@@ -802,7 +809,7 @@ router.get('/ks/pitcher-leaderboard', wrap(async (req, res) => {
             SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
             SUM(COALESCE(pnl,0))                           AS pnl,
             SUM(bet_size)                                  AS wagered
-     FROM ks_bets WHERE live_bet = 0 AND paper = 0 AND result IS NOT NULL
+     FROM ks_bets WHERE live_bet = 0 AND paper = 0 AND result IN ('win','loss')
      GROUP BY pitcher_name ORDER BY pnl DESC`,
   )
   const all = rows.map(r => {
@@ -888,7 +895,7 @@ router.get('/ks/testing', wrap(async (req, res) => {
         SUM(COALESCE(pnl,0))                              AS pnl,
         AVG(edge)                                         AS avg_edge
       FROM ks_bets
-      WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 AND edge IS NOT NULL
+      WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 AND edge IS NOT NULL
       GROUP BY bucket_cents ORDER BY bucket_cents ASC
     `),
     db.all(`
@@ -901,12 +908,12 @@ router.get('/ks/testing', wrap(async (req, res) => {
         SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
         SUM(COALESCE(pnl,0)) AS pnl
       FROM ks_bets
-      WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 AND lambda IS NOT NULL AND actual_ks IS NOT NULL
+      WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 AND lambda IS NOT NULL AND actual_ks IS NOT NULL
       GROUP BY pitcher_name HAVING bets >= 3 ORDER BY bets DESC
     `),
     db.all(`
       SELECT edge, result, pnl, bet_size, capital_at_risk
-      FROM ks_bets WHERE result IS NOT NULL AND live_bet = 0 AND paper = 0 AND edge IS NOT NULL ORDER BY edge ASC
+      FROM ks_bets WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 AND edge IS NOT NULL ORDER BY edge ASC
     `),
   ])
 
