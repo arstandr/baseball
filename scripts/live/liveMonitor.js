@@ -1277,6 +1277,7 @@ async function main() {
   // Track cover/dead/one-away alerts already sent
   const covered = new Set()
   const dead    = new Set()
+  const noLost  = new Set()   // NO bets already at/past threshold — settled as loss mid-game
   const oneAway = new Set()
   const lastKsMap = new Map()  // pitcherId → last confirmed K count (delta detection)
   const freeMoneySentPerPitcher = new Map()  // pitcherId → total USD risked on free-money takers
@@ -1714,9 +1715,25 @@ async function main() {
               await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: 'starter pulled' }, await getAllWebhooks(db))
             }
 
-            // NO bets are settled at game-end by settleAndNotifyGame — no mid-game
-            // early settlement here. Box scores can briefly lag/correct, and an
-            // early lock is irreversible. Once the game is Final we get exact Ks.
+            // NO bet: if pitcher has already reached or exceeded the threshold the bet is
+            // mathematically lost — K counts never decrease once recorded. Settle immediately
+            // rather than waiting for game-end, which could be hours later.
+            if (bet.side === 'NO' && currentKs >= bet.strike && !noLost.has(key)) {
+              noLost.add(key)
+              const contracts = bet.filled_contracts != null ? bet.filled_contracts : null
+              const fillFrac  = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
+              const pnl = contracts != null
+                ? -Math.round(contracts * fillFrac * 100) / 100
+                : -(bet.bet_size ?? 0)
+              const now = new Date().toISOString()
+              await db.run(
+                `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
+                [currentKs, now, pnl, bet.id],
+              )
+              console.log(`\n[live] ❌ NO LOST ${ctx.pitcherName} NO ${bet.strike}+ already at ${currentKs}K  $${pnl.toFixed(2)}`)
+              db.saveLog({ tag: 'NO_LOST', level: 'warn', msg: `${ctx.pitcherName} NO${bet.strike}+ hit threshold at ${currentKs}K  $${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl })
+              await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl, currentKs, currentIPraw, game: ctx.game, reason: `reached ${currentKs}K` }, await getAllWebhooks(db))
+            }
           }
 
           // Pull detection — two-tier:
@@ -1833,11 +1850,22 @@ async function main() {
 
           // Pre-load today's pre-game bets for this pitcher — used to dedup by (pitcher, strike, side)
           const preGameForPitcher = await db.all(
-            `SELECT strike, side FROM ks_bets
+            `SELECT strike, side, user_id FROM ks_bets
               WHERE bet_date = ? AND pitcher_id = ? AND live_bet = 0`,
             [TODAY, String(pitcherId)],
           )
-          const preGameKeys = new Set(preGameForPitcher.map(r => `${r.strike}-${r.side}`))
+          // Per-bettor pre-game positions — used to avoid mixed positions per user
+          const preGameKeysByUser = new Map()
+          for (const r of preGameForPitcher) {
+            if (!preGameKeysByUser.has(r.user_id)) preGameKeysByUser.set(r.user_id, new Set())
+            preGameKeysByUser.get(r.user_id).add(`${r.strike}-${r.side}`)
+          }
+          // Helper: returns per-bettor key set (empty set if no pre-game bets)
+          const pgKeys = (b) => preGameKeysByUser.get(b.id) ?? new Set()
+          // Qualifying filter uses intersection: skip only when ALL bettors are blocked.
+          // Per-bettor checks in the execution loop handle individual conflicts.
+          const allHave  = (key) => activeBettors.length > 0 && activeBettors.every(b => pgKeys(b).has(key))
+          const anyCanTrade = (noKey, yesKey) => activeBettors.some(b => !pgKeys(b).has(noKey) && !pgKeys(b).has(yesKey))
 
           // ── Pass 1: collect qualifying edges for this pitcher ──
           const qualifying = []
@@ -1861,12 +1889,12 @@ async function main() {
 
             const betKey = `${pitcherId}-${n}-live`  // mode-agnostic dedup key
             if (activeBettors.length > 0 && activeBettors.every(b => placed.has(`${b.id}:${betKey}`))) continue
-            if (preGameKeys.has(`${n}-NO`) && preGameKeys.has(`${n}-YES`)) continue
+            if (allHave(`${n}-NO`) && allHave(`${n}-YES`)) continue  // all bettors fully covered both sides
 
             // ── MODE 1: Pulled pitcher — structurally resolved, stale market arb ──
             if (pitcherPulledEarly && n > currentKs) {
-              if (preGameKeys.has(`${n}-NO`)) continue
-              if (preGameKeys.has(`${n}-YES`)) continue  // pre-game YES already lost — mixed position triggers Kalshi revenue=0 bug
+              if (allHave(`${n}-NO`)) continue  // all bettors already have NO here
+              if (allHave(`${n}-YES`)) continue  // all bettors have pre-game YES — all would get mixed position
               if (noMid >= 90 || noMid <= 5) continue  // already repriced or illiquid
               qualifying.push({
                 n, mkt, midCents, marketPrice, modelProb: 0.02,
@@ -1883,7 +1911,7 @@ async function main() {
             // No conflicting pre-game YES or NO positions (avoid mixed exposure).
             if (currentKs >= n) {
               if (yesAskCents <= CROSSED_YES_MAX_ASK && midCents > 5 &&
-                  !preGameKeys.has(`${n}-NO`) && !preGameKeys.has(`${n}-YES`)) {
+                  anyCanTrade(`${n}-NO`, `${n}-YES`)) {
                 qualifying.push({
                   n, mkt, midCents, marketPrice, modelProb: 1.0,
                   edge: (100 - yesAskCents) / 100 - 0.08,
@@ -1900,7 +1928,7 @@ async function main() {
             // before manager pulls the starter. noMid range guard: not already repriced or illiquid.
             if (isCurrent && scoreDiff <= -BLOWOUT_DEFICIT && currentInn >= BLOWOUT_INNING &&
                 (n - currentKs) >= BLOWOUT_K_GAP) {
-              if (!preGameKeys.has(`${n}-NO`) && noMid < 85 && noMid > 5) {
+              if (!allHave(`${n}-NO`) && noMid < 85 && noMid > 5) {
                 const blowoutEdge = (1 - marketPrice) - 0.08
                 if (blowoutEdge >= 0.10) {
                   qualifying.push({
@@ -1924,7 +1952,7 @@ async function main() {
             // which at 33% K rate gives ~20% probability, not 5%).
             if (isCurrent && currentPitches >= PULL_PITCH_COUNT && currentIP >= PULL_MIN_IP &&
                 n - currentKs >= 3 && modelProb < 0.10) {
-              if (!preGameKeys.has(`${n}-NO`) && noMid < 85 && noMid > 5) {
+              if (!allHave(`${n}-NO`) && noMid < 85 && noMid > 5) {
                 const deadEdge = (1 - marketPrice) - modelProb
                 if (deadEdge >= 0.10) {
                   qualifying.push({
@@ -1941,7 +1969,7 @@ async function main() {
             const betSide   = edgeYES >= edgeNO ? 'YES' : 'NO'
             const edge      = betSide === 'YES' ? edgeYES : edgeNO
 
-            if (preGameKeys.has(`${n}-${betSide}`)) continue
+            if (allHave(`${n}-${betSide}`)) continue  // all bettors already have this position
 
             // ── MODE 2: High-conviction — tiered YES thresholds + ksChanged momentum ──
             // kellyScale < 1 → partial sizing for lower-conviction entries
@@ -2038,6 +2066,20 @@ async function main() {
             for (const bettor of activeBettors) {
               const bettorKey = `${bettor.id}:${q.betKey}`
               if (placed.has(bettorKey)) continue
+
+              // Per-bettor pre-game conflict check — mirrors the qualifying filter but per-user.
+              // Ensures a bettor with a conflicting position is skipped even if others can trade.
+              const myPgKeys = pgKeys(bettor)
+              if (q.mode === 'pulled') {
+                if (myPgKeys.has(`${q.n}-NO`))  { placed.add(bettorKey); continue }  // already have NO
+                if (myPgKeys.has(`${q.n}-YES`)) { placed.add(bettorKey); continue }  // would create mixed position
+              } else if (q.mode === 'crossed-yes') {
+                if (myPgKeys.has(`${q.n}-NO`) || myPgKeys.has(`${q.n}-YES`)) { placed.add(bettorKey); continue }
+              } else if (q.mode === 'blowout' || q.mode === 'dead-path') {
+                if (myPgKeys.has(`${q.n}-NO`)) { placed.add(bettorKey); continue }
+              } else {
+                if (myPgKeys.has(`${q.n}-${q.betSide}`)) { placed.add(bettorKey); continue }
+              }
 
               const betResult = await executeBet({
                 pitcherName:      ctx.pitcherName,

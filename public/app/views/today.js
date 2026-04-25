@@ -173,7 +173,11 @@ function calcPitcherStatus(p, live) {
     } else if (pendingNoBets.length) {
       const no = pendingNoBets[0]
       const safe = no.strike - (ks ?? 0)
-      storySentence = `At ${ks ?? '?'} Ks — needs to stay under ${no.strike}+ (${safe} away from limit).`
+      if (safe <= 0) {
+        storySentence = `At ${ks ?? '?'} Ks — already hit the ${no.strike}+ threshold. NO ${no.strike}+ is a loss.`
+      } else {
+        storySentence = `At ${ks ?? '?'} Ks — needs to stay under ${no.strike}+ (${safe} away from limit).`
+      }
     } else {
       storySentence = wins > 0
         ? `All targets hit — waiting for the game to end.`
@@ -189,7 +193,10 @@ function calcPitcherStatus(p, live) {
       const need = Math.max(0, nextYes.strike - (ks ?? 0))
       whatNeeds = need === 0 ? `${nextYes.strike}+ already covered` : `Needs ${need} more K${need > 1 ? 's' : ''} for ${nextYes.strike}+`
     } else if (pendingNoBets.length) {
-      whatNeeds = `Must stay under ${pendingNoBets[0].strike} Ks`
+      const noSafe = pendingNoBets[0].strike - (ks ?? 0)
+      whatNeeds = noSafe <= 0
+        ? `Already hit ${ks}K — NO ${pendingNoBets[0].strike}+ lost`
+        : `Must stay under ${pendingNoBets[0].strike} Ks`
     }
   }
 
