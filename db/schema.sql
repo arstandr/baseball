@@ -541,10 +541,16 @@ CREATE TABLE IF NOT EXISTS pitcher_statcast (
   gb_pct      REAL,                 -- Ground ball % (0-1)
   k_pct_vs_l  REAL,                 -- K% vs LHB (0-1) — pitcher handedness split
   k_pct_vs_r  REAL,                 -- K% vs RHB (0-1) — pitcher handedness split
+  nb_r        REAL,                 -- Negative binomial dispersion (fit by fitDispersion.js; NULL→use NB_R=30)
+  manager_leash_factor REAL,        -- Pull tendency scalar (fit by buildManagerLeash.js; NULL→1.0)
   UNIQUE(player_id, season, fetch_date)
 );
 CREATE INDEX IF NOT EXISTS idx_pitcher_statcast_pid ON pitcher_statcast(player_id, season);
 CREATE INDEX IF NOT EXISTS idx_pitcher_statcast_date ON pitcher_statcast(fetch_date);
+
+-- Backfill new pitcher_statcast columns for existing databases (safe no-ops)
+ALTER TABLE pitcher_statcast ADD COLUMN nb_r REAL;
+ALTER TABLE pitcher_statcast ADD COLUMN manager_leash_factor REAL;
 
 -- ========================================================================
 -- pitcher_recent_starts: per-start pitch count + BF for leash modeling
@@ -974,7 +980,29 @@ CREATE TABLE IF NOT EXISTS monitor_state (
   pregame_cancelled    INTEGER DEFAULT 0,
   game_settled         INTEGER DEFAULT 0,
   not_current_since    TEXT,           -- ISO timestamp when pitcher was first seen as not-current
+  final_detected_at    TEXT,           -- when we first saw this game as Final
   updated_at           TEXT,
   PRIMARY KEY (game_id, bet_date, pitcher_id)
 );
 CREATE INDEX IF NOT EXISTS idx_monitor_state_date ON monitor_state(bet_date);
+
+-- Backfill new monitor_state columns for existing databases (safe no-ops)
+ALTER TABLE monitor_state ADD COLUMN final_detected_at TEXT;
+
+-- ========================================================================
+-- game_reserves: per-pitcher false-pull budget reserved at game start
+-- Prevents simultaneous pulls from competing for the same cash pool.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS game_reserves (
+  game_id      TEXT NOT NULL,
+  pitcher_id   TEXT NOT NULL,
+  bet_date     TEXT NOT NULL,
+  user_id      INTEGER NOT NULL,
+  reserved_usd REAL NOT NULL DEFAULT 0,
+  used_usd     REAL NOT NULL DEFAULT 0,
+  created_at   TEXT,
+  PRIMARY KEY (game_id, pitcher_id, bet_date, user_id)
+);
+
+-- Backfill new bet_schedule columns for existing databases (safe no-ops)
+ALTER TABLE bet_schedule ADD COLUMN preflight_outcome TEXT;

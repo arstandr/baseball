@@ -102,13 +102,14 @@ async function refreshCloserStatus() {
   const codeStale = data.is_current === false  // null = unknown (closer hasn't reported commit yet)
   dot.className = `closer-dot ${fresh ? (codeStale ? 'stale' : 'online') : 'stale'}`
 
+  const fmtMin = m => m === 0 ? 'just now' : m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`
+
   const metaParts = []
   if (fresh) {
     metaParts.push(hb.status === 'running' ? 'running' : 'idle')
-    if (ago === 0) metaParts.push('just now')
-    else metaParts.push(`${ago}m ago`)
+    metaParts.push(fmtMin(ago))
   } else {
-    metaParts.push(ago != null ? `last seen ${ago}m ago` : 'stale')
+    metaParts.push(ago != null ? `last seen ${fmtMin(ago)}` : 'stale')
   }
 
   if (codeStale) {
@@ -120,7 +121,7 @@ async function refreshCloserStatus() {
     const uRaw = u.ts || u.updated_at || null
     const uTs  = uRaw ? (uRaw.endsWith('Z') ? uRaw : uRaw + 'Z') : null
     const uAgo = uTs && !isNaN(new Date(uTs)) ? Math.floor((Date.now() - new Date(uTs).getTime()) / 60000) : null
-    metaParts.push(`· updated ${uAgo != null ? uAgo + 'm ago' : 'recently'}`)
+    metaParts.push(`· updated ${uAgo != null ? fmtMin(uAgo) : 'recently'}`)
   }
 
   meta.textContent = metaParts.join(' ')

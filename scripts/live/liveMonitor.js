@@ -40,11 +40,11 @@ const MLB_BASE        = 'https://statsapi.mlb.com/api/v1'
 const LS_FIELDS       = 'abstractGameState,currentInning,currentInningOrdinal,teams,offense,defense'
 const BOX_FIELDS      = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players'
 // Max USD risk per free-money taker order per strike threshold (pulled pitcher)
-const PULLED_CAP_USD    = Number(process.env.PULLED_CAP_USD    || 100)
+const PULLED_CAP_USD    = Number(process.env.PULLED_CAP_USD    || 10)
 // Max USD total free-money spend across all strike thresholds for one pulled pitcher
-const FREE_MONEY_PITCHER_CAP = Number(process.env.FREE_MONEY_PITCHER_CAP || 500)
+const FREE_MONEY_PITCHER_CAP = Number(process.env.FREE_MONEY_PITCHER_CAP || 30)
 // Max USD risk per dead-path NO taker (high pitch count, gap structurally uncloseable)
-const DEAD_PATH_CAP_USD = Number(process.env.DEAD_PATH_CAP_USD || 150)
+const DEAD_PATH_CAP_USD = Number(process.env.DEAD_PATH_CAP_USD || 10)
 const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
 
 const PULL_PITCH_COUNT      = Number(process.env.PULL_PITCH_COUNT      || 85)   // pitches at which pull risk becomes real
@@ -121,6 +121,39 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
       return pAtLeast(lambdaRemaining, n - currentKs)
     },
   }
+}
+
+// ── In-game Bayesian probability update ──────────────────────────────────────
+// Updates the remaining K distribution as the game progresses.
+// Prior: pre-game λ (total expected Ks over the start)
+// Likelihood: observed K rate from current in-game data
+// Posterior: blended estimate that starts as pre-game model and moves toward
+//            in-game evidence as the sample size grows.
+//
+// Returns: P(total_Ks >= n | already have currentKs, inning data)
+function computeLiveProb(lambda, currentKs, currentBF, estimatedTotalBF, strike) {
+  if (currentKs >= strike) return 1.0  // already hit threshold
+  if (!lambda || lambda <= 0) return 0
+
+  // Observed K rate per BF so far
+  const observedRate = currentBF > 0 ? currentKs / currentBF : (lambda / Math.max(estimatedTotalBF, 1))
+
+  // Bayesian blend: weight prior by 9 "synthetic" BF (≈ 3 innings of prior belief),
+  // then blend with observed as sample grows. Prior dominates early; observed dominates late.
+  const PRIOR_WEIGHT_BF = 9
+  const priorRate = lambda / Math.max(estimatedTotalBF, 1)
+  const posteriorRate = (priorRate * PRIOR_WEIGHT_BF + observedRate * currentBF) / (PRIOR_WEIGHT_BF + currentBF)
+
+  // Remaining batters faced = estimated total - already faced
+  const remainingBF = Math.max(0, estimatedTotalBF - currentBF)
+  const lambdaRemaining = posteriorRate * remainingBF
+
+  // Need (strike - currentKs) more Ks in remainingBF batters
+  const needed = strike - currentKs
+  if (needed <= 0) return 1.0
+  if (lambdaRemaining <= 0) return 0
+
+  return pAtLeast(lambdaRemaining, needed)
 }
 
 // ── Kalshi live market fetch for KS markets ───────────────────────────────────
@@ -202,7 +235,40 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       // pulled   → pitcher removed, outcome determined (certainty)
       // dead-path → high pitch count, 3+ K gap, market still fat (near-certainty)
       // Speed > fees in both cases; maker orders risk sitting unfilled as market reprices.
-      const capUSD   = mode === 'pulled' ? PULLED_CAP_USD : DEAD_PATH_CAP_USD
+      // Use per-pitcher game reserve if available; fall back to env cap
+      let capUSD = mode === 'pulled' ? PULLED_CAP_USD : DEAD_PATH_CAP_USD
+      if (pitcherId && userId) {
+        const gameRow = await db.one(
+          `SELECT id FROM games WHERE date = ? AND (pitcher_home_id = ? OR pitcher_away_id = ?)`,
+          [TODAY, String(pitcherId), String(pitcherId)],
+        ).catch(() => null)
+        if (gameRow) {
+          const reserve = await db.one(
+            `SELECT reserved_usd, used_usd FROM game_reserves
+             WHERE game_id = ? AND pitcher_id = ? AND bet_date = ? AND user_id = ?`,
+            [gameRow.id, String(pitcherId), TODAY, userId],
+          ).catch(() => null)
+          if (reserve) {
+            capUSD = Math.max(0, reserve.reserved_usd - reserve.used_usd)
+          }
+        }
+      }
+
+      // Dead-path: use Kelly sizing off live posterior probability rather than flat cap.
+      // The posterior is passed in as modelProb (updated by P3-A's computeLiveProb).
+      // Kelly fraction f = (p*b - (1-p)) / b where b = (1/askFrac - 1) = odds
+      // Cap at 2× the pre-game Kelly fraction as sanity limit.
+      if (mode === 'dead-path' && modelProb > 0.5) {
+        const _askFrac    = side === 'NO'
+          ? (100 - marketMid) / 100   // approximate: NO ask ≈ NO mid before orderbook
+          : marketMid / 100
+        const _b          = (1 - _askFrac) / _askFrac   // net odds: win this much per $1 risked
+        const _kellyF     = Math.max(0, (modelProb * (_b + 1) - 1) / _b)
+        const _bankroll   = capUSD > 0 ? capUSD / 0.15 : 1000  // reverse the 15% reserve calc
+        const _kellyBet   = _kellyF * _bankroll * 0.25   // quarter-Kelly conservative
+        capUSD = Math.min(capUSD, Math.max(_kellyBet, 10))  // floor $10, capped by reserve
+      }
+
       const askCents = side === 'NO'
         ? (ob?.best_no_ask  ?? Math.min(99, Math.round(100 - marketMid + 2)))
         : (ob?.best_yes_ask ?? Math.min(99, Math.round(marketMid + 2)))
@@ -237,6 +303,22 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
         console.log(`\n  [${betTag}] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢  profit≈+$${expectedProfit.toFixed(2)}`)
         db.saveLog({ tag: 'BET', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢ taker  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
         freeMoneySummary = { askCents, expectedProfit, yesPrice: Math.round(100 - askCents) }
+
+        // Track spending against this pitcher's reserve
+        if (pitcherId && userId) {
+          const gameRow2 = await db.one(
+            `SELECT id FROM games WHERE date = ? AND (pitcher_home_id = ? OR pitcher_away_id = ?)`,
+            [TODAY, String(pitcherId), String(pitcherId)],
+          ).catch(() => null)
+          if (gameRow2) {
+            const spent = finalContracts * (askCents / 100)
+            await db.run(
+              `UPDATE game_reserves SET used_usd = used_usd + ?
+               WHERE game_id = ? AND pitcher_id = ? AND bet_date = ? AND user_id = ?`,
+              [spent, gameRow2.id, String(pitcherId), TODAY, userId],
+            ).catch(() => {})
+          }
+        }
       } catch (err) {
         console.error(`  [ORDER FAILED] ${user?.name} ${pitcherName} ${strike}+ ${side}: ${err.message}`)
         db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED [FREE MONEY] ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
@@ -796,6 +878,43 @@ async function cancelPreGameOrders(game) {
   db.saveLog({ tag: 'INFO', msg: `${gameLabel} started — cancelled ${restingBets.length} pre-game resting orders` })
 }
 
+// ── Initialize per-pitcher false-pull budget when game goes live ──────────────
+// Reserves a capped slice of each user's daily budget for false-pull/dead-path
+// taker orders. Prevents simultaneous pulls from competing for the same cash.
+async function initGameReserves(game) {
+  const gameLabel = `${game.team_away}@${game.team_home}`
+  const users = await db.all(`SELECT * FROM users WHERE active_bettor = 1`).catch(() => [])
+  const pitcherIds = [game.pitcher_home_id, game.pitcher_away_id].filter(Boolean)
+
+  for (const user of users) {
+    const creds = { keyId: user.kalshi_key_id, privateKey: user.kalshi_private_key }
+    let bankroll = user.starting_bankroll || 1000
+    if (user.kalshi_key_id) {
+      try {
+        const kb = await getKalshiBalance(creds)
+        bankroll = kb.balance_usd
+      } catch {}
+    }
+    // Reserve up to 15% of daily budget per pitcher, capped at $400
+    const dailyBudget = bankroll * (user.daily_risk_pct ?? 0.20)
+    const reservePerPitcher = Math.min(400, dailyBudget * 0.15)
+
+    for (const pitcherId of pitcherIds) {
+      await db.run(
+        `INSERT OR IGNORE INTO game_reserves
+           (game_id, pitcher_id, bet_date, user_id, reserved_usd, used_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?)`,
+        [game.id, String(pitcherId), TODAY, user.id, reservePerPitcher, new Date().toISOString()],
+      ).catch(() => {})
+    }
+  }
+  const sampleUser = users[0]
+  const sampleBankroll = sampleUser ? (sampleUser.starting_bankroll || 1000) : 1000
+  const sampleReserve = sampleUser ? Math.min(400, sampleBankroll * (sampleUser.daily_risk_pct ?? 0.20) * 0.15) : 0
+  const totalReserved = users.length * pitcherIds.length * sampleReserve
+  console.log(`[live] Reserves initialized for ${gameLabel}: $${totalReserved.toFixed(0)} total (${users.length} users × ${pitcherIds.length} pitchers)`)
+}
+
 // ── Main monitor loop ─────────────────────────────────────────────────────────
 
 async function main() {
@@ -908,8 +1027,25 @@ async function main() {
       pregame_cancelled INTEGER DEFAULT 0,
       game_settled      INTEGER DEFAULT 0,
       not_current_since TEXT,
+      final_detected_at TEXT,
       updated_at        TEXT,
       PRIMARY KEY (game_id, bet_date, pitcher_id)
+    )
+  `).catch(() => {})
+  // Add final_detected_at column to existing monitor_state tables (safe no-op)
+  await db.run(`ALTER TABLE monitor_state ADD COLUMN final_detected_at TEXT`).catch(() => {})
+
+  // Ensure game_reserves table exists (safe no-op if already present)
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS game_reserves (
+      game_id      TEXT NOT NULL,
+      pitcher_id   TEXT NOT NULL,
+      bet_date     TEXT NOT NULL,
+      user_id      INTEGER NOT NULL,
+      reserved_usd REAL NOT NULL DEFAULT 0,
+      used_usd     REAL NOT NULL DEFAULT 0,
+      created_at   TEXT,
+      PRIMARY KEY (game_id, pitcher_id, bet_date, user_id)
     )
   `).catch(() => {})
 
@@ -1087,12 +1223,43 @@ async function main() {
           continue
         }
 
-        // ── Game just went Final — settle + Discord ───────────────────────────
+        // ── Game just went Final — wait 10min for boxscore to stabilize, then settle ──
         if (state === 'Final') {
           if (!settledGames.has(game.id)) {
-            await settledGames.add(game.id)
-            await reconcileLiveFills(game).catch(() => {})
-            await settleAndNotifyGame(game, box)
+            // Record when we first saw Final — settle after 10-min delay for boxscore stabilization
+            const finalRow = await db.one(
+              `SELECT final_detected_at FROM monitor_state
+               WHERE game_id = ? AND bet_date = ? AND pitcher_id = '__game__'`,
+              [game.id, TODAY],
+            ).catch(() => null)
+
+            if (!finalRow?.final_detected_at) {
+              // First time seeing Final — record timestamp, don't settle yet
+              await db.run(
+                `INSERT INTO monitor_state (game_id, bet_date, pitcher_id, final_detected_at, updated_at)
+                 VALUES (?, ?, '__game__', ?, ?)
+                 ON CONFLICT(game_id, bet_date, pitcher_id) DO UPDATE SET
+                   final_detected_at = excluded.final_detected_at,
+                   updated_at = excluded.updated_at`,
+                [game.id, TODAY, new Date().toISOString(), new Date().toISOString()],
+              ).catch(() => {})
+              console.log(`\n[live] ${game.team_away}@${game.team_home} Final — waiting 10min for boxscore to stabilize`)
+            } else {
+              const msSinceFinal = Date.now() - new Date(finalRow.final_detected_at).getTime()
+              if (msSinceFinal >= 10 * 60 * 1000) {
+                // 10 minutes passed — settle with a fresh boxscore
+                await settledGames.add(game.id)
+                let freshBox = box
+                try {
+                  freshBox = await mlbGet(`${MLB_BASE}/game/${game.id}/boxscore?fields=${BOX_FIELDS}`)
+                } catch { /* use cached box */ }
+                await reconcileLiveFills(game).catch(() => {})
+                await settleAndNotifyGame(game, freshBox ?? box)
+              } else {
+                const minsLeft = Math.ceil((10 * 60 * 1000 - msSinceFinal) / 60_000)
+                console.log(`\n[live] ${game.team_away}@${game.team_home} Final — ${minsLeft}min until settlement`)
+              }
+            }
           }
           continue
         }
@@ -1105,6 +1272,7 @@ async function main() {
         if (!preGameCancelled.has(game.id)) {
           await preGameCancelled.add(game.id)
           await cancelPreGameOrders(game).catch(() => {})
+          await initGameReserves(game).catch(() => {})
         }
 
         // Check both starters
@@ -1405,6 +1573,22 @@ async function main() {
             const s = sized[i]
             if (!s || s.betSize <= 0) return false
 
+            // ── Bayesian posterior model probability update ──────────────────
+            // For normal high-conviction bets, blend pre-game model with in-game
+            // evidence using computeLiveProb. Pulled/dead-path modes use hardcoded
+            // structural probabilities (0.02 / 0.05) — don't overwrite those.
+            let liveModelProbSide = q.modelProbSide
+            if ((q.mode === 'high-conviction') && ctx.lambda && currentBF > 0) {
+              // Estimate total BF from pre-game λ: lambda = E[BF] × pK, so E[BF] = lambda / pK
+              // Use LEAGUE_K_PCT as the per-BF K rate proxy (conservative denominator).
+              const estTotalBF = Math.round(ctx.lambda / Math.max(LEAGUE_K_PCT, 0.20))
+              const posterior  = computeLiveProb(ctx.lambda, currentKs, currentBF, estTotalBF, q.n)
+              // Only replace if we have meaningful in-game sample (≥6 BF ≈ 2 innings)
+              if (currentBF >= 6 && posterior > 0) {
+                liveModelProbSide = q.betSide === 'YES' ? posterior : 1 - posterior
+              }
+            }
+
             // Per-pitcher free-money cap: stop firing takers once limit reached
             if (q.mode === 'pulled') {
               const alreadySent = freeMoneySentPerPitcher.get(pitcherId) ?? 0
@@ -1435,7 +1619,7 @@ async function main() {
                 game:             ctx.game,
                 strike:           q.n,
                 side:             q.betSide,
-                modelProb:        q.modelProbSide,
+                modelProb:        liveModelProbSide,
                 marketMid:        q.midCents,
                 edge:             q.edge,
                 ticker:           q.mkt.ticker,
@@ -1545,6 +1729,17 @@ async function main() {
       }
 
       await sendDailyReport()
+
+      // Preflight retrospective: fill in would_win/would_lose for skipped pitchers
+      try {
+        const { default: { execSync } } = await import('child_process')
+        execSync(`node scripts/live/preflightRetro.js --date ${TODAY}`, {
+          cwd: process.cwd(), timeout: 30_000, encoding: 'utf8', stdio: 'inherit',
+        })
+      } catch (err) {
+        console.error('[live] preflightRetro failed (non-fatal):', err.message?.slice(0, 80))
+      }
+
       break
     }
 
