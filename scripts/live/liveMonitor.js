@@ -189,21 +189,49 @@ let _dailyNetPnl = 0  // net P&L today (all settled bets, pre-game + live)
 let _dailyReportSent = false  // gate to prevent duplicate EOD Discord reports on crash+restart
 
 async function loadDailyLoss() {
+  // Use actual Kalshi balance delta (snapshot → current) for live bettors.
+  // ks_bets.pnl uses theoretical contract math and diverges from real account
+  // movement — using it caused false halts when theoretical losses > actual losses.
   const rows = await db.all(
-    `SELECT SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses
-       FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss')`,
+    `SELECT u.kalshi_balance, bs.balance_usd AS snapshot_balance
+     FROM users u
+     JOIN balance_snapshots bs ON bs.user_id = u.id AND bs.date = ?
+     WHERE u.active_bettor = 1 AND u.paper = 0 AND u.kalshi_key_id IS NOT NULL`,
     [TODAY],
   )
-  _dailyLoss = rows[0]?.losses || 0
+  if (rows.length) {
+    const netPnl = rows.reduce((s, r) => s + ((r.kalshi_balance ?? 0) - (r.snapshot_balance ?? 0)), 0)
+    _dailyLoss = Math.max(0, -netPnl)
+  } else {
+    // Fallback: no snapshots yet (first run of day before any bets)
+    const fallback = await db.all(
+      `SELECT SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as losses
+         FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss') AND paper = 0`,
+      [TODAY],
+    )
+    _dailyLoss = fallback[0]?.losses || 0
+  }
   return _dailyLoss
 }
 
 async function reloadDailyNetPnl() {
-  const row = await db.one(
-    `SELECT COALESCE(SUM(pnl), 0) as net FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss')`,
+  // Use actual Kalshi balance delta — same source as the dashboard today P&L.
+  const rows = await db.all(
+    `SELECT u.kalshi_balance, bs.balance_usd AS snapshot_balance
+     FROM users u
+     JOIN balance_snapshots bs ON bs.user_id = u.id AND bs.date = ?
+     WHERE u.active_bettor = 1 AND u.paper = 0 AND u.kalshi_key_id IS NOT NULL`,
     [TODAY],
   )
-  _dailyNetPnl = row?.net || 0
+  if (rows.length) {
+    _dailyNetPnl = rows.reduce((s, r) => s + ((r.kalshi_balance ?? 0) - (r.snapshot_balance ?? 0)), 0)
+  } else {
+    const fallback = await db.one(
+      `SELECT COALESCE(SUM(pnl), 0) as net FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss') AND paper = 0`,
+      [TODAY],
+    )
+    _dailyNetPnl = fallback?.net || 0
+  }
   return _dailyNetPnl
 }
 
@@ -277,9 +305,17 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
         capUSD = Math.min(capUSD, Math.max(_kellyBet, 10))  // floor $10, capped by reserve
       }
 
-      const askCents = side === 'NO'
-        ? (ob?.best_no_ask  ?? Math.min(99, Math.round(100 - marketMid + 2)))
-        : (ob?.best_yes_ask ?? Math.min(99, Math.round(marketMid + 2)))
+      // For pulled/crossed-yes (near-certain outcome), the market reprices fast after
+      // the pull is detected. The stale orderbook ask may have already been lifted by
+      // the time our order hits the exchange — leaving us resting below the new ask.
+      // Fix: bid aggressively (ask + 15¢, capped at 97¢) to sweep available depth
+      // even as the market moves. At 97¢ for a ~99% outcome the EV is still strongly +.
+      const AGGRESSIVE_CAP = mode === 'pulled' || mode === 'crossed-yes' ? 97 : 99
+      const AGGRESSIVE_BUFFER = mode === 'pulled' || mode === 'crossed-yes' ? 15 : 2
+      const baseAsk = side === 'NO'
+        ? (ob?.best_no_ask  ?? Math.round(100 - marketMid + 2))
+        : (ob?.best_yes_ask ?? Math.round(marketMid + 2))
+      const askCents = Math.min(AGGRESSIVE_CAP, baseAsk + AGGRESSIVE_BUFFER)
       const maxByDollars = Math.floor(capUSD / (askCents / 100))
       const depth        = ob ? availableDepth(ob, side.toLowerCase(), askCents) : maxByDollars
       finalContracts     = Math.max(1, Math.min(maxByDollars, depth > 0 ? depth : maxByDollars))
@@ -310,12 +346,31 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
                       : mode === 'crossed-yes'? 'CROSSED YES'
                       : mode === 'blowout'    ? 'BLOWOUT'
                       :                        'DEAD PATH'
-        const placed  = await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents, creds)
-        const placedOrder = placed?.order ?? placed
+        let placed  = await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents, creds)
+        let placedOrder = placed?.order ?? placed
         orderId    = placedOrder?.order_id ?? null
         initFilled = Math.round(parseFloat(placedOrder?.fill_count_fp ?? '0'))
-        console.log(`\n  [${betTag}] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢  profit≈+$${expectedProfit.toFixed(2)}`)
-        db.saveLog({ tag: 'BET', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢ taker  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
+
+        // If 0 fills immediately and this is a near-certain structural edge, cancel and
+        // retry at 97¢ — the original ask was likely stale and the market moved past us.
+        if (initFilled === 0 && (mode === 'pulled' || mode === 'crossed-yes') && orderId && AGGRESSIVE_CAP > askCents) {
+          console.log(`  [retry] ${pitcherName} ${strike}+ ${side} — 0 fills @ ${askCents}¢, cancelling and retrying @ ${AGGRESSIVE_CAP}¢`)
+          await cancelOrder(orderId, creds).catch(() => {})
+          try {
+            placed      = await placeOrder(ticker, side.toLowerCase(), finalContracts, AGGRESSIVE_CAP, creds)
+            placedOrder = placed?.order ?? placed
+            orderId     = placedOrder?.order_id ?? null
+            initFilled  = Math.round(parseFloat(placedOrder?.fill_count_fp ?? '0'))
+            orderCents  = AGGRESSIVE_CAP
+            console.log(`  [retry] resubmitted @ ${AGGRESSIVE_CAP}¢ — filled=${initFilled}`)
+            db.saveLog({ tag: 'RETRY', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} retry @ ${AGGRESSIVE_CAP}¢ filled=${initFilled}`, pitcher: pitcherName, strike, side })
+          } catch (retryErr) {
+            console.error(`  [retry-failed] ${pitcherName} ${strike}+ ${side}: ${retryErr.message}`)
+          }
+        }
+
+        console.log(`\n  [${betTag}] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${orderCents}¢  filled=${initFilled}  profit≈+$${expectedProfit.toFixed(2)}`)
+        db.saveLog({ tag: 'BET', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${orderCents}¢ taker  filled=${initFilled}  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
         freeMoneySummary = { askCents, expectedProfit, yesPrice: Math.round(100 - askCents) }
 
         // Track spending against this pitcher's reserve
@@ -480,6 +535,17 @@ async function settleAndNotifyGame(game, boxData) {
     if (!bet.live_bet && !bet.filled_contracts) {
       await db.run(
         `UPDATE ks_bets SET result='void', pnl=0, settled_at=? WHERE id=?`,
+        [now, bet.id],
+      )
+      continue
+    }
+
+    // Live bets with 0 fills — order was placed but never executed on Kalshi.
+    // No real money changed hands; void the bet rather than computing phantom P&L.
+    if (bet.live_bet && !bet.filled_contracts) {
+      console.log(`[settle] VOID (no fill) ${bet.pitcher_name} ${bet.strike}+ ${bet.side} live_bet — order ${bet.order_id ?? 'unknown'} never filled`)
+      await db.run(
+        `UPDATE ks_bets SET result='void', pnl=0, order_status='cancelled', settled_at=? WHERE id=?`,
         [now, bet.id],
       )
       continue
@@ -815,10 +881,14 @@ async function convertStaleMakers() {
 
       if (filled) {
         _convertedBetIds.add(bet.id)
-        const priceDollars   = order?.yes_price_dollars ?? order?.no_price_dollars ?? null
+        const priceDollars   = bet.side?.toUpperCase() === 'NO'
+          ? (order?.no_price_dollars ?? order?.yes_price_dollars ?? null)
+          : (order?.yes_price_dollars ?? order?.no_price_dollars ?? null)
         const fillPriceCents = priceDollars
           ? Math.round(parseFloat(priceDollars) * 100)
-          : (order?.yes_price ?? order?.no_price ?? null)
+          : bet.side?.toUpperCase() === 'NO'
+            ? (order?.no_price ?? order?.yes_price ?? null)
+            : (order?.yes_price ?? order?.no_price ?? null)
         const filledCount = Math.round(parseFloat(order?.fill_count_fp ?? '0'))
         await db.run(
           `UPDATE ks_bets SET order_status='filled', fill_price=COALESCE(?, fill_price), filled_contracts=? WHERE id=?`,
@@ -996,7 +1066,7 @@ async function manageRestingOrder(bet, { currentPitches, currentIP, market, cred
   }
   try {
     await cancelOrder(bet.order_id, creds)
-    const contracts = Math.max(1, Math.round(bet.bet_size / ((bet.fill_price ?? bet.market_mid ?? 50) / 100)))
+    const contracts = Math.max(1, Math.round(bet.bet_size ?? 1))  // bet_size stores contract count
     const takerPrice = bet.side === 'YES'
       ? Math.min(99, market.yes_ask + 1)
       : Math.min(99, market.no_ask  + 1)
@@ -1127,9 +1197,9 @@ async function initGameReserves(game) {
         bankroll = kb.balance_usd
       } catch {}
     }
-    // Reserve up to 15% of daily budget per pitcher, capped at $400
-    const dailyBudget = bankroll * (user.daily_risk_pct ?? 0.20)
-    const reservePerPitcher = Math.min(400, dailyBudget * 0.15)
+    // Reserve 25% of free-money pool per pitcher (free_money_risk_pct defaults to 20%)
+    const freeMoneyCap = bankroll * (user.free_money_risk_pct ?? 0.20)
+    const reservePerPitcher = freeMoneyCap * 0.25
 
     for (const pitcherId of pitcherIds) {
       await db.run(
@@ -1142,7 +1212,7 @@ async function initGameReserves(game) {
   }
   const sampleUser = users[0]
   const sampleBankroll = sampleUser ? (sampleUser.starting_bankroll || 1000) : 1000
-  const sampleReserve = sampleUser ? Math.min(400, sampleBankroll * (sampleUser.daily_risk_pct ?? 0.20) * 0.15) : 0
+  const sampleReserve = sampleUser ? sampleBankroll * (sampleUser.free_money_risk_pct ?? 0.20) * 0.25 : 0
   const totalReserved = users.length * pitcherIds.length * sampleReserve
   console.log(`[live] Reserves initialized for ${gameLabel}: $${totalReserved.toFixed(0)} total (${users.length} users × ${pitcherIds.length} pitchers)`)
 }
@@ -1427,7 +1497,7 @@ async function main() {
 
   // Load active bettors once — refreshed every 50 iterations to pick up config changes
   let activeBettors = await db.all(
-    `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct, kalshi_balance
+    `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct, free_money_risk_pct, kalshi_balance
      FROM users WHERE active_bettor=1 ORDER BY id`,
   )
 
@@ -1436,7 +1506,7 @@ async function main() {
     // Refresh active bettors periodically in case creds/paper flag changed
     if (iteration > 0 && iteration % 50 === 0) {
       activeBettors = await db.all(
-        `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct, kalshi_balance
+        `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct, free_money_risk_pct, kalshi_balance
          FROM users WHERE active_bettor=1 ORDER BY id`,
       ).catch(() => activeBettors)
     }
@@ -1658,7 +1728,12 @@ async function main() {
               covered.add(key)
               const _fcC = bet.filled_contracts != null ? bet.filled_contracts : null
               const _ffC = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
-              const _szC = _fcC != null ? _fcC : Math.round((bet.bet_size ?? 100) / _ffC)
+              // bet_size = contract count; capital_at_risk = dollars spent (preferred fallback)
+              const _szC = _fcC != null
+                ? _fcC
+                : bet.capital_at_risk != null && _ffC > 0
+                  ? Math.round(bet.capital_at_risk / _ffC)
+                  : Math.round(bet.bet_size ?? 0)
               const pnl = Math.round(_szC * (1 - _ffC) * 0.93 * 100) / 100
               const now = new Date().toISOString()
               await db.run(
@@ -1700,9 +1775,12 @@ async function main() {
               const FEE = 0.07
               const contracts = bet.filled_contracts != null ? bet.filled_contracts : null
               const fillFrac  = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
+              // bet_size = contract count; use capital_at_risk (dollars) as fallback, not bet_size
               const pnl = contracts != null
-                ? -Math.round(contracts * fillFrac * 100) / 100  // loss = contracts × cost per contract
-                : -(bet.bet_size ?? 0)                           // loss = capital invested
+                ? -Math.round(contracts * fillFrac * 100) / 100
+                : bet.capital_at_risk != null
+                  ? -bet.capital_at_risk
+                  : -Math.round((bet.bet_size ?? 0) * fillFrac * 100) / 100
               const now = new Date().toISOString()
               await db.run(
                 `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
@@ -1722,7 +1800,9 @@ async function main() {
               const fillFrac  = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
               const pnl = contracts != null
                 ? -Math.round(contracts * fillFrac * 100) / 100
-                : -(bet.bet_size ?? 0)
+                : bet.capital_at_risk != null
+                  ? -bet.capital_at_risk
+                  : -Math.round((bet.bet_size ?? 0) * fillFrac * 100) / 100
               const now = new Date().toISOString()
               await db.run(
                 `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
@@ -2072,12 +2152,14 @@ async function main() {
                 if (myPgKeys.has(`${q.n}-${q.betSide}`)) { placed.add(bettorKey); continue }
               }
 
-              // Per-bettor, per-threshold free-money cap — each bettor gets $30 per strike threshold.
+              // Per-bettor, per-threshold free-money cap — 5% of bankroll per strike threshold
               if (q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout') {
                 const capKey = `${pitcherId}-${q.n}`
                 const alreadySent = freeMoneySentByUserPitcher.get(bettor.id)?.get(capKey) ?? 0
-                if (alreadySent >= FREE_MONEY_PITCHER_CAP) {
-                  console.log(`[live] 🚫 FREE MONEY CAP  ${bettor.name}  ${ctx.pitcherName}  ${q.n}+  $${alreadySent.toFixed(0)}/$${FREE_MONEY_PITCHER_CAP} — skipping  [${q.mode}]`)
+                const bettorBankroll = bettor.kalshi_balance || bettor.starting_bankroll || 1000
+                const freeMoneyCap = bettorBankroll * (bettor.free_money_risk_pct ?? 0.20) * 0.25
+                if (alreadySent >= freeMoneyCap) {
+                  console.log(`[live] 🚫 FREE MONEY CAP  ${bettor.name}  ${ctx.pitcherName}  ${q.n}+  $${alreadySent.toFixed(0)}/$${freeMoneyCap.toFixed(0)} — skipping  [${q.mode}]`)
                   placed.add(bettorKey)
                   continue
                 }

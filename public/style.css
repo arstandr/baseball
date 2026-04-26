@@ -2100,7 +2100,11 @@ a:hover { text-decoration: underline; }
 
 /* Pipeline layout */
 .pipe-layout               { display: flex; gap: 16px; align-items: flex-start; }
-.pipe-rail                 { flex: 0 0 300px; max-height: calc(100vh - 260px); overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+.pipe-rail-wrap            { flex: 0 0 300px; display: flex; flex-direction: column; gap: 0; }
+.pipe-search-box           { background: var(--card); border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0; padding: 8px 10px; }
+.pipe-search-box input     { width: 100%; background: transparent; border: none; outline: none; font-size: 13px; color: var(--text); }
+.pipe-search-box input::placeholder { color: var(--text-dim); opacity: 0.6; }
+.pipe-rail                 { max-height: calc(100vh - 300px); overflow-y: auto; border: 1px solid var(--border); border-radius: 0 0 8px 8px; background: var(--card); }
 .pipe-detail               { flex: 1; min-width: 0; }
 .pipe-empty                { padding: 20px; text-align: center; font-size: 13px; }
 
@@ -2126,7 +2130,8 @@ a:hover { text-decoration: underline; }
 
 @media (max-width: 900px) {
   .pipe-layout             { flex-direction: column; }
-  .pipe-rail               { flex: none; width: 100%; max-height: 260px; }
+  .pipe-rail-wrap          { flex: none; width: 100%; }
+  .pipe-rail               { max-height: 260px; }
 }
 
 /* ── Contract fill strip (pitcher cards) ── */

@@ -3,6 +3,7 @@ import axios from 'axios'
 import * as db from '../../lib/db.js'
 import { getBalance as getKalshiBalance, getAuthHeaders } from '../../lib/kalshi.js'
 import { syncFillsForBettor } from '../../lib/ksFillSync.js'
+import { reconcilePositionsForBettor } from '../../lib/kalshiPositionSync.js'
 import { forceSync } from '../../lib/ksSettlementSync.js'
 import {
   todayISO, roundTo, userFilter, wrap, isoWeekGroup,
@@ -163,35 +164,43 @@ router.get('/ks/bettors', wrap(async (req, res) => {
     if (!existingPnl?.n && (creds.keyId || process.env.KALSHI_KEY_ID)) {
       await seedDailyPnlFromRest(u.id, creds).catch(() => {})
     }
-    const [pnlRow, bestCaseRow] = await Promise.all([
+    const [pnlRow, bestCaseRow, snapshotRow] = await Promise.all([
       db.one(
         `SELECT COALESCE(SUM(pnl_usd), 0) AS pnl FROM daily_pnl_events WHERE user_id = ? AND date = ?`,
         [u.id, today]
       ).catch(() => null),
       db.one(`
         SELECT COALESCE(SUM(
-          CASE WHEN result IS NOT NULL THEN COALESCE(pnl, 0)
+          CASE WHEN side = 'YES' THEN
+            CASE WHEN filled_contracts > 0 AND fill_price IS NOT NULL
+              THEN filled_contracts * MAX((1.0-fill_price/100.0)*0.93, (1.0-fill_price/100.0)-0.0175)
+              ELSE COALESCE(bet_size,0) * (1.0 - (COALESCE(market_mid,50)/100.0 + COALESCE(spread,4)/200.0)) * 0.93
+            END
           ELSE
-            CASE WHEN side = 'YES' THEN
-              CASE WHEN filled_contracts > 0 AND fill_price IS NOT NULL
-                THEN filled_contracts * (1.0 - fill_price/100.0) * 0.93
-                ELSE COALESCE(bet_size,0) * (1.0 - (COALESCE(market_mid,50)/100.0 + COALESCE(spread,4)/200.0)) * 0.93
-              END
-            ELSE
-              CASE WHEN filled_contracts > 0 AND fill_price IS NOT NULL
-                THEN filled_contracts * (fill_price/100.0) * 0.93
-                ELSE COALESCE(bet_size,0) * (1.0 - ((100.0-COALESCE(market_mid,50))/100.0 + COALESCE(spread,4)/200.0)) * 0.93
-              END
+            CASE WHEN filled_contracts > 0 AND fill_price IS NOT NULL
+              THEN filled_contracts * MAX((fill_price/100.0)*0.93, (fill_price/100.0)-0.0175)
+              ELSE COALESCE(bet_size,0) * (1.0 - ((100.0-COALESCE(market_mid,50))/100.0 + COALESCE(spread,4)/200.0)) * 0.93
             END
           END
-        ), 0) AS best_case
+        ), 0) AS open_win_potential
         FROM ks_bets
-        WHERE user_id = ? AND bet_date = ? AND live_bet = 0 AND paper = 0
-          AND (order_id IS NOT NULL OR filled_contracts > 0 OR result IS NOT NULL)
+        WHERE user_id = ? AND bet_date = ? AND paper = 0
+          AND result IS NULL
+          AND (order_id IS NOT NULL OR filled_contracts > 0)
       `, [u.id, today]).catch(() => null),
+      db.one(
+        `SELECT balance_usd FROM balance_snapshots WHERE user_id = ? AND date = ?`,
+        [u.id, today]
+      ).catch(() => null),
     ])
-    const todayPnl     = roundTo(Number(pnlRow?.pnl || 0), 2)
-    const bestCase     = roundTo(Number(bestCaseRow?.best_case || 0), 2)
+    // Balance-snapshot delta is the most accurate today P&L — captures all cash flow
+    // including settlements for Kalshi markets that have no matching ks_bets row.
+    const snapshotBalance = snapshotRow?.balance_usd != null ? Number(snapshotRow.balance_usd) : null
+    const todayPnl = (kalshiBalance != null && snapshotBalance != null)
+      ? roundTo(kalshiBalance - snapshotBalance, 2)
+      : roundTo(Number(pnlRow?.pnl || 0), 2)
+    const openWinPotential = roundTo(Number(bestCaseRow?.open_win_potential || 0), 2)
+    const bestCase         = roundTo(todayPnl + openWinPotential, 2)
     const startBankroll = Number(u.starting_bankroll || 1000)
     // Use fills+settlements based P&L (stored by settlement sync) — includes bets placed outside the system
     const allTimePnl   = u.kalshi_pnl != null ? roundTo(u.kalshi_pnl, 2) : roundTo(Number(row?.total_pnl || 0), 2)
@@ -209,7 +218,7 @@ router.get('/ks/bettors', wrap(async (req, res) => {
       total_wagered:   roundTo(Number(row?.total_wagered || 0), 2),
       today_pnl:       todayPnl,
       best_case:       bestCase,
-      start_balance:   kalshiBalance != null ? roundTo(kalshiBalance - todayPnl, 2) : null,
+      start_balance:   snapshotBalance ?? (kalshiBalance != null ? roundTo(kalshiBalance - todayPnl, 2) : null),
       today_wagered:   roundTo(Number(row?.today_wagered || 0), 2),
       wins:            Number(row?.wins    || 0),
       losses:          Number(row?.losses  || 0),
@@ -248,7 +257,10 @@ router.get('/ks/daily', wrap(async (req, res) => {
   const lastFill = getLastFillEventAt()
   if (uf.userId && date === todayISO() && (!lastFill || Date.now() - lastFill > 60_000)) {
     const u = await db.one(`SELECT id, kalshi_key_id, kalshi_private_key FROM users WHERE id = ?`, [uf.userId])
-    if (u) syncFillsForBettor(u).catch(() => {})
+    if (u) {
+      syncFillsForBettor(u).catch(() => {})
+      reconcilePositionsForBettor(u).catch(() => {})
+    }
   }
 
   const bets = await db.all(

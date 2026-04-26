@@ -170,7 +170,10 @@ setInterval(async () => {
   try {
     const today    = todayISO()
     const pitchers = await fetchLivePitcherData(today)
-    if (!pitchers.length) return
+    if (!pitchers.length) {
+      console.log('[sse] live tick: no pitchers found for', today)
+      return
+    }
 
     // Settle any bets whose outcomes are now determinable
     const settled = await settleDeterminedBets(pitchers, today)
@@ -179,11 +182,18 @@ setInterval(async () => {
     const hash = pitchers.map(p =>
       `${p.pitcher_id}|${p.ks}|${p.is_final}|${p.inning}|${String(p.still_in)}`
     ).join(',')
+
+    const now = new Date().toISOString()
+    const summary = pitchers.map(p => `${p.pitcher_name}(${p.ks}K,${p.inning ?? 'pre'},${p.is_final ? 'final' : p.still_in ? 'in' : 'out'})`).join(' | ')
+    console.log(`[sse] live tick: ${pitchers.length} pitcher(s) — ${summary} — hash ${hash === _lastLiveHash ? 'UNCHANGED' : 'CHANGED'}`)
+
     if (hash === _lastLiveHash) return
     _lastLiveHash = hash
-    broadcastSSE('live_update', { pitchers, date: today })
-    _lastDataUpdate = new Date().toISOString()
-  } catch {}
+    _lastDataUpdate = now
+    broadcastSSE('live_update', { pitchers, date: today, lastDataUpdate: now })
+  } catch (err) {
+    console.error('[sse] live tick error:', err.message)
+  }
 }, 20_000)
 
 router.get('/meta', async (req, res) => {

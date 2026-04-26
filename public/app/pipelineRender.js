@@ -131,7 +131,11 @@ export function renderPreflight(j) {
     newsHtml = `<div class="sc-pipe-news muted" style="margin-top:8px;font-size:11px">No relevant headlines found</div>`
   }
 
-  return `<div class="sc-pipe-kv">
+  const summaryHtml = j.summary_text
+    ? `<div class="sc-pipe-summary" style="margin:10px 0 4px;padding:8px 10px;background:var(--bg2,#1e1e1e);border-radius:6px;font-size:12px;line-height:1.6;color:var(--text)">${esc(j.summary_text)}</div>`
+    : ''
+
+  return `${summaryHtml}<div class="sc-pipe-kv">
     ${kv('Action', badge(j.action ?? '—', actionType))}
     ${kv('Confidence', j.confidence != null ? (j.confidence * 100).toFixed(0) + '%' : '—')}
     ${kv('Reason', `<span class="sc-pipe-reason">${esc(j.reason ?? '—')}</span>`)}

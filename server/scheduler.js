@@ -247,13 +247,11 @@ async function firePendingBets() {
   for (let i = 0; i < eligible.length; i++) {
     const entry = eligible[i]
 
-    // ── Lineup gate: hold until official lineups are posted, or T-90 backstop ─
-    // game_lineups table exists (per schema.sql) — check if lineup row is present.
+    // ── Lineup gate: NEVER fire without both official lineups posted ──────────
     // Refresh game_time from games table in case MLB adjusted the schedule
     const freshGame = await dbOne('SELECT game_time FROM games WHERE id = ?', [entry.game_id]).catch(() => null)
     const gameTime = freshGame?.game_time ?? entry.game_time
     const minsToGame = gameTime ? (new Date(gameTime) - Date.now()) / 60_000 : 0
-    const pastBackstop = minsToGame <= 90
 
     let lineupReady = false
     try {
@@ -265,19 +263,13 @@ async function firePendingBets() {
       lineupReady = (lineupRow?.teams ?? 0) >= 2
     } catch { /* table missing or query failed — treat as not ready */ }
 
-    if (!lineupReady && !pastBackstop) {
-      // Both lineups not posted yet and we're not at the T-90 backstop — hold
+    if (!lineupReady) {
       console.log(`[scheduler] ⏳ HOLD ${entry.pitcher_name} — waiting for both lineups (${minsToGame.toFixed(0)}min to game)`)
-      // Un-claim the row so it can be picked up next poll
       dbRun(`UPDATE bet_schedule SET status='pending', fired_at=NULL WHERE id=?`, [entry.id]).catch(() => {})
       continue
     }
 
-    if (lineupReady) {
-      console.log(`[scheduler] ✓ both lineups posted for ${entry.game_label} — firing ${entry.pitcher_name}`)
-    } else {
-      console.log(`[scheduler] ⚡ T-90 backstop — firing ${entry.pitcher_name} without both lineups (${minsToGame.toFixed(0)}min to game)`)
-    }
+    console.log(`[scheduler] ✓ both lineups posted for ${entry.game_label} — firing ${entry.pitcher_name}`)
     // ─────────────────────────────────────────────────────────────────────────
 
     const check = preflightResults[i].status === 'fulfilled'
@@ -291,6 +283,21 @@ async function firePendingBets() {
 
     const isSkip  = check.action === 'skip'
     const isBoost = check.action === 'boost'
+    const skipCount   = (check.headlines ?? []).filter(h => h.signal === 'skip').length
+    const boostCount  = (check.headlines ?? []).filter(h => h.signal === 'boost').length
+    const totalNews   = (check.headlines ?? []).length
+    const newsLine    = totalNews === 0
+      ? 'No relevant headlines were found.'
+      : `${totalNews} headline${totalNews !== 1 ? 's' : ''} scanned${skipCount ? `, ${skipCount} flagged as cautionary` : ''}${boostCount ? `, ${boostCount} as bullish` : ''}.`
+
+    const actionLine = check.action === 'skip'
+      ? `The preflight check decided to skip this bet.`
+      : check.action === 'boost'
+      ? `The preflight check cleared this bet and flagged it for a boosted stake.`
+      : `The preflight check cleared this bet to proceed normally.`
+
+    const summaryText = [actionLine, check.reason || null, newsLine].filter(Boolean).join(' ')
+
     recordPipelineStep({
       bet_date: date,
       pitcher_id: String(entry.pitcher_id),
@@ -307,6 +314,8 @@ async function firePendingBets() {
         sources: check.sources ?? [],
         k_prop_gap: check.k_prop_gap ?? null,
         dk_line: check.dk_line ?? null,
+        headlines: check.headlines ?? [],
+        summary_text: summaryText,
       },
       summary: isSkip ? {
         final_action: 'preflight_skip',
@@ -321,8 +330,6 @@ async function firePendingBets() {
       dbRun(`UPDATE bet_schedule SET status='skipped' WHERE id=?`, [entry.id]).catch(() => {})
       console.log(`[scheduler] ⏭  SKIP  ${entry.pitcher_name}  —  ${check.reason}`)
       notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'skip', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
-      // Redistribute this pitcher's allocation to remaining pending entries
-      if (entry.allocated_usd > 0) _redistributeAllocation(date, entry.id, entry.allocated_usd).catch(() => {})
       continue
     }
 
@@ -331,37 +338,11 @@ async function firePendingBets() {
       notifyPreflightResult({ pitcherName: entry.pitcher_name, action: 'boost', reason: check.reason, game: entry.game_label, sources: check.sources }, webhooks)
     }
 
-    // Pass the pre-allocated budget so this pitcher only draws from its slate share.
-    // If allocated_usd is NULL (planPortfolio hasn't run yet — e.g. early-morning bets
-    // fire before the 10am plan), cap at dailyBudget / totalPending instead of letting
-    // the fallback path use the full remaining budget for the first bet.
-    let effectiveAlloc = entry.allocated_usd > 0 ? entry.allocated_usd : null
-    if (!effectiveAlloc) {
-      try {
-        const pendingCount = await dbOne(
-          `SELECT COUNT(*) as n FROM bet_schedule WHERE bet_date=? AND status='pending'`,
-          [date],
-        )
-        // Approximate daily budget from first active bettor's bankroll (best available without running ksBets)
-        const firstBettor = await dbOne(
-          `SELECT starting_bankroll, daily_risk_pct FROM users WHERE active_bettor=1 AND paper=0 LIMIT 1`,
-        ).catch(() => null)
-        if (firstBettor?.starting_bankroll) {
-          const DAILY_RISK_PCT = firstBettor.daily_risk_pct ?? 0.04
-          const dailyBudget = firstBettor.starting_bankroll * DAILY_RISK_PCT
-          const totalPending = Math.max(1, (pendingCount?.n ?? 1) + 1) // +1 for self (already fired)
-          effectiveAlloc = Math.round((dailyBudget / totalPending) * 100) / 100
-          console.log(`[scheduler] ⚠ allocated_usd NULL for ${entry.pitcher_name} — safe cap $${effectiveAlloc.toFixed(0)} (budget $${dailyBudget.toFixed(0)} ÷ ${totalPending} entries)`)
-        }
-      } catch { /* safe cap not critical — ksBets will still run, just without the --max-risk flag */ }
-    }
-    // Top-up fires skip --max-risk so natural dailyBudget-spentToday math sizes the delta correctly
-    const maxRiskFlag = (!entry._isTopup && effectiveAlloc > 0) ? ` --max-risk ${effectiveAlloc.toFixed(2)}` : ''
-    console.log(`[scheduler] ▶ ${entry._isTopup ? 'top-up' : 'scheduled'} bet: ${entry.pitcher_name} — ${entry.game_label}${!entry._isTopup && effectiveAlloc ? ` (alloc $${effectiveAlloc.toFixed(0)})` : ''}`)
+    console.log(`[scheduler] ▶ ${entry._isTopup ? 'top-up' : 'scheduled'} bet: ${entry.pitcher_name} — ${entry.game_label}`)
     try {
       await runAsync(
         `Scheduled bet: ${entry.pitcher_name} (${entry.game_label})`,
-        `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}${maxRiskFlag}`,
+        `node scripts/live/ksBets.js log --date ${date} --pitcher-id ${entry.pitcher_id}`,
       )
       // Mark done, or retry if no bet placed yet and game hasn't started
       const placed = await dbOne(
@@ -369,7 +350,7 @@ async function firePendingBets() {
         [date, entry.pitcher_id],
       ).catch(() => null)
       if (placed) {
-        dbRun(`UPDATE bet_schedule SET status='done' WHERE id=? AND status='fired'`, [entry.id]).catch(() => {})
+        await dbRun(`UPDATE bet_schedule SET status='done' WHERE id=? AND status='fired'`, [entry.id]).catch(() => {})
       } else {
         const gameStarted = gameTime && new Date(gameTime) <= new Date()
         if (gameStarted) {
@@ -428,12 +409,31 @@ export async function startScheduler() {
   const date = etDate()
 
   // Cleanup stale 'fired' rows from crashed sessions
-  // 1. Any 'fired' row older than 4h → error unconditionally (process never finished)
+  // 1a. Any 'fired' row older than 4h WITH matching ks_bets → mark done (bets were placed, status update was lost)
   const fourHoursAgo = new Date(Date.now() - 4 * 3600 * 1000).toISOString()
+  await dbRun(
+    `UPDATE bet_schedule SET status='done',
+      notes=COALESCE(notes,'') || ' [recovered-done ' || datetime('now') || ']'
+     WHERE status='fired' AND fired_at IS NOT NULL AND fired_at < ?
+       AND EXISTS (
+         SELECT 1 FROM ks_bets k
+         WHERE k.bet_date = bet_schedule.bet_date
+           AND k.pitcher_id = bet_schedule.pitcher_id
+           AND k.live_bet = 0 AND k.paper = 0
+       )`,
+    [fourHoursAgo],
+  ).catch(() => {})
+  // 1b. Any 'fired' row older than 4h WITHOUT ks_bets → error (process truly never completed)
   await dbRun(
     `UPDATE bet_schedule SET status='error',
       notes=COALESCE(notes,'') || ' [stale-fired ' || datetime('now') || ']'
-     WHERE status='fired' AND fired_at IS NOT NULL AND fired_at < ?`,
+     WHERE status='fired' AND fired_at IS NOT NULL AND fired_at < ?
+       AND NOT EXISTS (
+         SELECT 1 FROM ks_bets k
+         WHERE k.bet_date = bet_schedule.bet_date
+           AND k.pitcher_id = bet_schedule.pitcher_id
+           AND k.live_bet = 0 AND k.paper = 0
+       )`,
     [fourHoursAgo],
   ).catch(() => {})
 
@@ -514,16 +514,6 @@ export async function startScheduler() {
     logCronRun('savant-refresh')
   }
 
-  // Intra-day price check — fires at most once per startup if inside the 11am–5pm window
-  if (hm >= 11 * 60 && hm < 17 * 60 && await cronMissed('intra-day', Math.floor(hm / 60), 0)) {
-    const plan = await dbOne(`SELECT bet_date FROM daily_plan WHERE bet_date = ?`, [date]).catch(() => null)
-    if (plan) {
-      console.log('[scheduler] startup catch-up: intra-day price check (missed hourly window)')
-      run('Intra-day price check (catch-up)', `node scripts/live/ksBets.js log --date ${date} --min-hours 3`)
-      logCronRun('intra-day')
-    }
-  }
-
   // 3:30pm post-lineup portfolio plan
   if (hm >= 15 * 60 + 30 && await cronMissed('portfolio-plan-post-lineup', 15, 30)) {
     const plan = await dbOne(`SELECT bet_date FROM daily_plan WHERE bet_date = ?`, [date]).catch(() => null)
@@ -568,16 +558,6 @@ export async function startScheduler() {
     const d = etDate()
     run('Portfolio plan (10am)', `node scripts/live/ksBets.js plan --date ${d}`)
     logCronRun('portfolio-plan')
-  }, { timezone: 'America/New_York' })
-
-  // Every hour 11am–5pm ET — intra-day price check.
-  // Re-runs the edge finder for pitchers whose game is still >3h away.
-  // If Kalshi prices moved in our favor since morning, buys in early at the better price.
-  // Skips pitchers already bet (dedup in logEdges) and anything inside the T-3.5h window.
-  cron.schedule('0 11-17 * * *', () => {
-    const d = etDate()
-    run('Intra-day price check', `node scripts/live/ksBets.js log --date ${d} --min-hours 3`)
-    logCronRun('intra-day')
   }, { timezone: 'America/New_York' })
 
   // Refresh K prop lines every 30 min during pre-game window (11am–5pm ET)

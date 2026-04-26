@@ -95,6 +95,7 @@ export function connectSSE() {
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
       }
       if (ev.type === 'live_update' && ev.pitchers?.length) {
+        if (ev.lastDataUpdate) _updateLastUpdated(ev.lastDataUpdate)
         _checkTransitions(ev.pitchers)
         if (state.view === 'today') {
           // Update overlay before re-render so renderGameCards picks up fresh live data

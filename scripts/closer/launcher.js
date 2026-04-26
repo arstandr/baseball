@@ -509,8 +509,9 @@ async function main() {
   } catch {
     _currentHash = process.env.COMMIT_SHA || null
   }
-  let commitDate = ''
+  let commitDate = '', commitMsg = ''
   try { commitDate = git('log -1 --format=%cd --date=format:"%b %d %Y %I:%M %p"') } catch {}
+  try { commitMsg  = git('log --oneline -1 HEAD') } catch {}
   console.log(`[closer] commit: ${_currentHash?.slice(0, 7) ?? 'unknown'}  ${commitDate ? `(${commitDate})` : '(git unavailable)'}` )
 
   const today = etDate()
@@ -521,6 +522,12 @@ async function main() {
     commit: _currentHash?.slice(0, 7) ?? 'unknown',
     ...(initStats || {}),
   })
+
+  // Write closer_last_update on every startup so the dashboard reflects
+  // the actual code state regardless of whether an auto-update ran.
+  if (_currentHash && commitMsg) {
+    await writeUpdate(_currentHash.slice(0, 7), commitMsg)
+  }
 
   // Fix 4: Discord startup notification
   try {

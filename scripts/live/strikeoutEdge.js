@@ -58,6 +58,7 @@ import { fetchGameWeather } from '../../lib/weather.js'
 import { VENUES } from '../../agents/park/venues.js'
 import { fetchUmpiresForGames } from './fetchUmpire.js'
 import { getUmpireFactor } from '../../lib/umpireFactors.js'
+import { loadModel, predictPk } from '../../lib/pkModel.js'
 import { correlatedKellyDivide } from '../../lib/kelly.js'
 import {
   NB_R, LEAGUE_K9, LEAGUE_AVG_IP, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, LEAGUE_WHIFF_PCT,
@@ -94,6 +95,8 @@ const NO_MIN_EDGE  = 0.12    // NO bets require edge ≥ 12¢
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
 const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
+
+const _pkModel = loadModel()
 
 
 // Venue coord + dome lookups — derived from agents/park/venues.js (single source of truth)
@@ -531,22 +534,48 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
   const w_l5  = Math.max(0, 1 - w_career - w_season)
   const total = w_career + w_season + w_l5
 
-  let pK_blended
+  let pK_blended_formula
   if (pK_career != null && pK_season != null) {
-    pK_blended = (w_career * pK_career + w_season * pK_season + w_l5 * pK_l5) / total
+    pK_blended_formula = (w_career * pK_career + w_season * pK_season + w_l5 * pK_l5) / total
   } else if (pK_season != null) {
     // Career data missing — re-normalize between season and L5 only.
     // Old code used (1-w_season) as the L5 weight, but w_career was still non-zero
     // (e.g. 0.40 for a rookie), making the complement wrong and inflating L5 share.
     const tSL = w_season + w_l5
-    pK_blended = tSL > 0 ? (w_season * pK_season + w_l5 * pK_l5) / tSL : pK_l5
+    pK_blended_formula = tSL > 0 ? (w_season * pK_season + w_l5 * pK_l5) / tSL : pK_l5
   } else if (pK_career != null) {
     // Season data missing — re-normalize between career and L5 only.
     const tCL = w_career + w_l5
-    pK_blended = tCL > 0 ? (w_career * pK_career + w_l5 * pK_l5) / tCL : pK_l5
+    pK_blended_formula = tCL > 0 ? (w_career * pK_career + w_l5 * pK_l5) / tCL : pK_l5
   } else {
-    pK_blended = pK_l5
+    pK_blended_formula = pK_l5
   }
+
+  // ML model replaces the hand-tuned pK_blended when weights are available.
+  // Requires ≥5 IP of 2026 Statcast coverage — without it, log_ip_proxy=log1p(0)
+  // sits 3+ σ below the training mean and inflates pK to the clip ceiling.
+  const hasSavantCoverage = savant?.ip != null && savant.ip >= 5
+  const ml_pK = (_pkModel && hasSavantCoverage) ? predictPk({
+    k9_l5:               k9_l5,
+    k9_career:           k9_career,
+    k9_season:           k9_season,
+    savant_k_pct:        savant?.k_pct,
+    savant_whiff:        savant?.swstr_pct,
+    savant_fbv:          savant?.fb_velo,
+    savant_gb_pct:       savant?.gb_pct,
+    savant_bb_pct:       savant?.bb_pct,
+    k_pct_vs_l:          savant?.k_pct_vs_l,
+    k_pct_vs_r:          savant?.k_pct_vs_r,
+    savant_ip:           savant?.ip,
+    savant_pa:           savant?.pa,
+    manager_leash_factor: savant?.manager_leash_factor,
+    expected_bf:         expectedBF,
+    early_exit_rate_l5:  earlyExitRate,
+    w_season, w_career, w_l5,
+    pK_blended_prod:     pK_blended_formula,
+  }, _pkModel) : null
+
+  const pK_blended = ml_pK ?? pK_blended_formula
 
   // Apply velocity adjustment to blended K% before computing lambda
   const pK_afterVelo = pK_blended * veloAdj
@@ -582,6 +611,7 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
 
   return {
     lambdaBase, k9, pK_blended: pK_final,
+    pK_formula: pK_blended_formula, ml_pK,
     k9_l5, k9_season, k9_career,
     w_career, w_season, w_l5,
     expectedBF, avgIp, bfSource, avgPitches, leashFlag,

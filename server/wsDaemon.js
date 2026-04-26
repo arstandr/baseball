@@ -1,6 +1,7 @@
 import { createKalshiWsClient } from '../lib/kalshiWs.js'
 import { applyFillEvent, applyOrderEvent, applyPositionEvent } from '../lib/wsFillApplier.js'
 import { forceSyncFillsForBettor } from '../lib/ksFillSync.js'
+import { reconcilePositionsForBettor } from '../lib/kalshiPositionSync.js'
 import * as db from '../lib/db.js'
 
 let _clients = []
@@ -24,6 +25,7 @@ export async function startWsDaemon() {
   for (const bettor of bettors) {
     try {
       await forceSyncFillsForBettor(bettor)
+      reconcilePositionsForBettor(bettor).catch(() => {})
       console.log(`[ws-daemon] cold-start sync done for ${bettor.name}`)
     } catch (err) {
       console.error(`[ws-daemon] cold-start sync failed for ${bettor.name}:`, err.message)
@@ -58,6 +60,7 @@ export async function startWsDaemon() {
           forceSyncFillsForBettor(u).catch(err =>
             console.error(`[ws ${u.name}] post-subscribe sync error:`, err.message)
           )
+          reconcilePositionsForBettor(u).catch(() => {})
         }
       },
     })

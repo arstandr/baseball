@@ -717,10 +717,10 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
   const pitchers    = [...map.values()]
   const bettedIds   = new Set(pitchers.map(p => String(p.pitcher_id)))
 
-  // Schedule cards for pitchers not yet bet — sorted by game time
+  // Schedule cards for pitchers not yet bet — exclude failed/skipped (no contracts placed)
+  // Final sort order is handled below in the unified allItems merge
   const schedItems  = (shared.betSchedule || [])
-    .filter(s => !bettedIds.has(String(s.pitcher_id)))
-    .sort((a, b) => (a.game_time || '').localeCompare(b.game_time || ''))
+    .filter(s => !bettedIds.has(String(s.pitcher_id)) && s.status !== 'error' && s.status !== 'skipped')
 
   if (!pitchers.length && !schedItems.length) {
     if (picksHead) picksHead.hidden = true
@@ -734,11 +734,15 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     return { p, sd: calcPitcherStatus(p, live) }
   })
 
-  // Sort: live games first, then by game_time within each group
+  // Sort: games currently in progress first (has live data AND not final), then by game_time.
+  // Use liveOverlay directly — is_final is the ground truth for "game over", not our bet status.
+  // This keeps pulled-pitcher games and fully-settled games at the top if their game is still running.
   cards.sort((a, b) => {
-    const aLive = a.sd.isLive
-    const bLive = b.sd.isLive
-    if (aLive !== bLive) return aLive ? -1 : 1
+    const aOvl = shared.liveOverlay[String(a.p.pitcher_id)] || null
+    const bOvl = shared.liveOverlay[String(b.p.pitcher_id)] || null
+    const aInProgress = aOvl != null && aOvl.is_final !== true
+    const bInProgress = bOvl != null && bOvl.is_final !== true
+    if (aInProgress !== bInProgress) return aInProgress ? -1 : 1
     return (a.p.game_time || '').localeCompare(b.p.game_time || '')
   })
 
@@ -751,9 +755,26 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
   const maxEl = document.getElementById('day-max-val')
   if (maxEl) maxEl.textContent = `${totalBestCase >= 0 ? '+' : ''}${fmt$(totalBestCase)}`
 
-  container.innerHTML =
-    cards.map(({ p, sd }) => renderGameCard(p, sd)).join('') +
-    schedItems.map(s => renderScheduleCard(s)).join('')
+  // Merge bet-cards and schedule-cards into one unified list sorted by in-progress, then game_time.
+  // This prevents live schedule-cards from appearing after non-live bet-cards.
+  const allItems = [
+    ...cards.map(c => ({ type: 'bet', gameTime: c.p.game_time || '', pitcherId: String(c.p.pitcher_id), card: c })),
+    ...schedItems.map(s => ({ type: 'sched', gameTime: s.game_time || '', pitcherId: String(s.pitcher_id), sched: s })),
+  ]
+  allItems.sort((a, b) => {
+    const aOvl = shared.liveOverlay[a.pitcherId] || null
+    const bOvl = shared.liveOverlay[b.pitcherId] || null
+    const aInProgress = aOvl != null && aOvl.is_final !== true
+    const bInProgress = bOvl != null && bOvl.is_final !== true
+    if (aInProgress !== bInProgress) return aInProgress ? -1 : 1
+    return a.gameTime.localeCompare(b.gameTime)
+  })
+
+  container.innerHTML = allItems.map(item =>
+    item.type === 'bet'
+      ? renderGameCard(item.card.p, item.card.sd)
+      : renderScheduleCard(item.sched)
+  ).join('')
 
   for (const id of openIds) {
     const card = document.getElementById(id)

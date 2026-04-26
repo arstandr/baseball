@@ -14,8 +14,9 @@ const router = express.Router()
 router.get('/users', wrap(async (req, res) => {
   const rows = await db.all(`
     SELECT id, name, created_at,
-           active_bettor, starting_bankroll, daily_risk_pct, paper,
-           kalshi_key_id,
+           active_bettor, starting_bankroll, daily_risk_pct,
+           pregame_risk_pct, live_daily_risk_pct, free_money_risk_pct,
+           paper, kalshi_key_id,
            CASE WHEN kalshi_private_key IS NOT NULL AND kalshi_private_key != '' THEN 1 ELSE 0 END AS has_kalshi_key,
            discord_webhook
     FROM users ORDER BY created_at ASC`)
@@ -39,17 +40,21 @@ router.put('/users/:id', wrap(async (req, res) => {
   const id = Number(req.params.id)
   if (!id) return res.status(400).json({ error: 'invalid id' })
   const {
-    active_bettor, starting_bankroll, daily_risk_pct, paper,
-    kalshi_key_id, kalshi_private_key, discord_webhook, pin,
+    active_bettor, starting_bankroll, daily_risk_pct,
+    pregame_risk_pct, live_daily_risk_pct, free_money_risk_pct,
+    paper, kalshi_key_id, kalshi_private_key, discord_webhook, pin,
   } = req.body || {}
 
   const sets = []
   const vals = []
 
-  if (active_bettor     != null) { sets.push('active_bettor = ?');     vals.push(active_bettor     ? 1 : 0) }
-  if (starting_bankroll != null) { sets.push('starting_bankroll = ?'); vals.push(Number(starting_bankroll)) }
-  if (daily_risk_pct    != null) { sets.push('daily_risk_pct = ?');    vals.push(Number(daily_risk_pct)) }
-  if (paper             != null) { sets.push('paper = ?');             vals.push(paper ? 1 : 0) }
+  if (active_bettor       != null) { sets.push('active_bettor = ?');       vals.push(active_bettor       ? 1 : 0) }
+  if (starting_bankroll   != null) { sets.push('starting_bankroll = ?');   vals.push(Number(starting_bankroll)) }
+  if (daily_risk_pct      != null) { sets.push('daily_risk_pct = ?');      vals.push(Number(daily_risk_pct)) }
+  if (pregame_risk_pct    != null) { sets.push('pregame_risk_pct = ?');    vals.push(Number(pregame_risk_pct)) }
+  if (live_daily_risk_pct != null) { sets.push('live_daily_risk_pct = ?'); vals.push(Number(live_daily_risk_pct)) }
+  if (free_money_risk_pct != null) { sets.push('free_money_risk_pct = ?'); vals.push(Number(free_money_risk_pct)) }
+  if (paper               != null) { sets.push('paper = ?');               vals.push(paper ? 1 : 0) }
   if (kalshi_key_id     != null) { sets.push('kalshi_key_id = ?');     vals.push(String(kalshi_key_id).trim() || null) }
   if (kalshi_private_key != null && String(kalshi_private_key).trim()) {
     sets.push('kalshi_private_key = ?')

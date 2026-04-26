@@ -1,6 +1,6 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
-**Last updated: 2026-04-23**
+**Last updated: 2026-04-25 (Kelly system deployed, NO-bet formula fixed, scheduler cleanup fixed)**
 
 ## System Overview
 
@@ -191,10 +191,25 @@ Re-run calibration yearly: `backtest.js` produces calibration plots.
 
 ### Morning bets (live, real Kalshi money — both accounts)
 
-| Date | Bets | Capital at Risk | P&L | Win Rate |
-|------|------|-----------------|-----|----------|
-| Apr 22 | 47 | $707 | -$174 | 43% |
-| Apr 23 | 28 | $542 | +$114 | 54% |
+| Date | Bets | Capital at Risk | P&L | Win Rate | Notes |
+|------|------|-----------------|-----|----------|-------|
+| Apr 22 | 47 | $707 | -$174 | 43% | Old sizing system |
+| Apr 23 | 28 | $542 | +$114 | 54% | Old sizing system |
+| Apr 24 | ~28 | ~$523 | — | — | Old sizing system |
+| Apr 25 | 28 | $550 | — | — | **Kelly system live** |
+
+### Kelly vs. Old System — Apr 22–25 Retrospective
+
+Smoke test: ran the full Kelly pipeline against all this week's live transactions.
+
+| System | Bets | Risk | P&L | ROI |
+|--------|------|------|-----|-----|
+| Old (edge-weighted flat budget) | 87 | $2,269 | +$878 | 38.7% |
+| Kelly (quarter-Kelly, NO bug fixed) | 72 | $1,274 | +$952 | 74.7% |
+
+Kelly made **$74 more** on **$995 less capital**. ROI nearly doubles.
+Apr 22 was the sharpest divergence: old system -$288, Kelly system +$152. Rule A alone
+blocked ~$178 in Eduardo Rodriguez NO bet losses (mkt=78, mp=0.518 → no conviction).
 
 ### In-game bets — The Closer (paper simulation through Apr 23)
 
@@ -276,6 +291,82 @@ The Closer uses a two-layer dedup:
 
 ---
 
+## Kelly Sizing System Architecture (live as of 2026-04-25)
+
+### Sizing Flow (ksBets.js)
+
+1. Run `strikeoutEdge.js` → raw edges as JSON
+2. Dedup hedges (keep highest-edge side at each pitcher+strike key)
+3. Cap YES bets per pitcher at 3 (sorted by edge descending)
+4. Apply protection rules A/D/E/F
+5. Count pending games in `bet_schedule` → `opportunityDiscount()`
+6. `pregamePool = bankroll × pregameRiskPct`
+7. `effectiveBankroll = pregamePool × discount`
+8. `perPitcherCap = pregamePool × 0.10`
+9. Group edges by pitcher → `correlatedKellyDivide()` per group
+10. Apply per-pitcher cap scale
+11. Portfolio cap: if total > pregamePool → scale all bets down proportionally
+12. For each sized bet: upsert to `ks_bets`, place Kalshi taker order
+
+### Key Constants (.env)
+
+| Constant | Value | Effect |
+|----------|-------|--------|
+| `KELLY_MULT` | 0.25 | Quarter-Kelly multiplier |
+| `MAX_BET_PCT` | 0.05 | 5% of effectiveBankroll per-bet cap |
+| `PER_PITCHER_CAP` | pregamePool × 0.10 | ~$74/pitcher ceiling |
+| `PORTFOLIO_CAP` | pregamePool | ~$742/day absolute ceiling |
+
+At current bankroll ($1,237): individual bets range $4–$24. Full Kelly fractions
+of 25-75% are common — the discount + cap compress these to 2-12% sized fractions.
+
+### NO-Bet Probability Convention (CRITICAL)
+
+`modelProb` in this codebase is **always P(YES wins)** — i.e., P(pitcher reaches
+the threshold). Kelly formula must account for this:
+
+```js
+// Correct (lib/kelly.js as of 2026-04-25):
+const probWin = side === 'YES' ? modelProb : (1 - modelProb)
+const feeEdge = probWin * winPerUnit - (1 - probWin) * losePerUnit
+```
+
+The bug before Apr 25 used `modelProb` directly for NO bets, giving P(win) ≈ 0.18
+for a strong NO (where the actual P(win) was 0.82). All NO bets returned `betSize=0`.
+Any code that calls `kellySizing()` or `correlatedKellyDivide()` with NO bets
+depends on this convention — never change `modelProb` to mean P(NO wins).
+
+### correlatedKellyDivide() — Pitcher Correlation Fix
+
+When a pitcher has edges at 5+, 6+, 7+ Ks simultaneously, these bets are
+near-perfectly correlated (same outcome pays all YES bets below it). Sizing each
+at full Kelly would 3-4× actual exposure.
+
+Fix: **total exposure = max single-threshold Kelly**, allocated proportionally
+within that cap. YES and NO bet groups are sized independently (uncorrelated
+across sides).
+
+### Smoke Test Results — Week of Apr 21-25 ($1,237 bankroll)
+
+| Day | Edges | Kelly bets | Deployed | % of pool |
+|-----|-------|-----------|----------|-----------|
+| Apr 21 | 76 | 76 | $742 | 100% (scaled ×0.846) |
+| Apr 22 | 39 | 39 | $699 | 94% |
+| Apr 23 | 16 | 16 | $302 | 41% (light slate) |
+| Apr 24 | 28 | 28 | $523 | 71% |
+| Apr 25 | 28 | 28 | $550 | 74% |
+| **Week** | **187** | **187** | **$2,816** | — |
+
+### What to Watch When Reviewing Edge System Changes
+
+1. `model_prob` must remain P(YES wins = pitcher reaches threshold). Kelly depends on this.
+2. If the `edge` field calculation changes, re-verify rules A/D/E/F thresholds.
+3. Run `node scripts/smokeTest.js` after any model change — verify sizing stays in $4-$24/bet, total ≤ $742/day.
+4. NO bets need `model_prob` LOW (e.g., 0.15-0.45) for Kelly to correctly size them as high-conviction NO positions.
+5. Full Kelly fractions of 50-75% on individual bets are normal given strong edges — cap and quarter-Kelly compress to safe sizes.
+
+---
+
 ## Kelly Sizing Rationale
 
 **Quarter-Kelly (KELLY_MULT = 0.25)**
@@ -295,40 +386,63 @@ the formula legitimately suggests large fractions.
 
 ---
 
-## Budget Structure (as of 2026-04-23)
+## Budget Structure (as of 2026-04-25)
 
-| Pipeline | Daily Budget | Notes |
-|----------|-------------|-------|
-| Morning picks | 15% of live Kalshi balance | Fetched at run time from Kalshi API |
-| Afternoon refresh (same script) | Remaining morning budget only | Re-run of ksBets.js uses already-spent subtraction |
-| The Closer (in-game) | 20% of live Kalshi balance | Separate cap tracked via `capital_at_risk` sum |
+Bankroll is split into three pools at the user level (`users` table columns):
 
-**Total daily max risk: ~35% of balance per account.**
+| Pool | Column | Default | Daily role |
+|------|--------|---------|-----------|
+| Pre-game | `pregame_risk_pct` | 0.60 | Morning ksBets.js runs |
+| Live (in-game) | `live_daily_risk_pct` | 0.20 | The Closer / liveMonitor.js |
+| Free money | `free_money_risk_pct` | 0.20 | Kalshi promo / bonus bets |
 
-At current balances: Adam $1,350 → $473/day max, Isaiah $1,547 → $542/day max.
+**Key formulas (ksBets.js)**:
+```
+pregamePool       = bankroll × pregame_risk_pct  (~$742 at $1,237)
+effectiveBankroll = pregamePool × opportunityDiscount(remaining_games)
+perPitcherCap     = pregamePool × 0.10           (~$74/pitcher)
+portfolioCap      = pregamePool                  (absolute daily ceiling)
+MAX_BET_PCT = 0.05 of effectiveBankroll          (~$24 per bet)
+```
 
-The morning script already subtracts capital deployed in the current day before
-sizing new bets, so running it twice (9am + 12:30pm) cannot stack beyond the
-daily cap.
+**`opportunityDiscount(remaining)`** — scales down effective bankroll to
+preserve capital for later high-edge games:
+```
+remaining >= 7 → 0.65×   (most common — large slate)
+remaining >= 4 → 0.80×
+remaining >= 2 → 0.90×
+remaining  = 1 → 1.00×
+```
+`remaining` = count of `bet_schedule` rows with `status='pending' AND game_time > now`.
+Buffer: +2 added before noon ET, +1 before 3pm ET.
+
+**At current bankroll ($1,237)**:
+- pregamePool = $742/day max
+- effectiveBankroll ≈ $482 on a large slate (0.65× discount)
+- Per-bet cap ≈ $24.10 (5% × $482)
+- Per-pitcher cap ≈ $74
+
+Running ksBets.js twice (9am + 12:30pm refresh) is safe — portfolio cap
+enforced on total capital deployed that day, not per-run.
 
 ---
 
 ## Risk Management
 
-### Protection Rules (current as of 2026-04-23)
+### Protection Rules — ksBets.js pre-game (as of 2026-04-25)
 
-| Rule | Description | Location | Status |
-|------|-------------|----------|--------|
-| **A** | Ban NO bets where `market_mid ≥ 65 AND model_prob ≤ 0.75` — market already prices the event as likely | `ksBets.js` | **Active** |
-| **B** | ~~Per-pitcher CAR cap at 2%~~ | removed | **Removed** — cuts too much upside |
-| **C** | ~~Skip `strike=3` markets~~ | removed | **Removed 2026-04-23** — live data shows K≤3 bets at 47% ROI, rule was costing money |
-| **D** | Require YES `model_prob ≥ 0.30` | `ksBets.js` | **Active** |
-| **E** | Auto-halt live trading after **-15% daily drawdown** | `liveMonitor.js` | **Active** |
+| Rule | Condition | Rationale |
+|------|-----------|-----------|
+| **A** | Ban NO bets where `market_mid ≥ 65 AND model_prob ≥ 0.50` | Both market and model say YES is favored — no conviction for NO. Single biggest loss-preventer: blocked ~$178 in Eduardo Rodriguez losses Apr 22. |
+| **D** | Ban YES bets where `model_prob < 0.25 AND edge < 0.18` | Low-prob YES with thin edge. Waived if edge ≥ 18¢ (strong signal despite low absolute prob). |
+| **E** | Ban NO bets where `market_mid < 15` | Market near-certain NO already — no exploitable edge to capture. |
+| **F** | Ban NO bets where `strike ≤ 4` | Apr 2026 live data: strike=3 NO at 0% WR, strike=4 NO at 27.8% WR. Structurally bad segment. |
 
-**Rule C removal rationale:** The rule assumed K=3 markets are "structurally mispriced
-by K-first models." Analysis of 3 days of live bets showed K≤3 positions had
-47% ROI — more profitable than the overall average. Rule removed from both
-`ksBets.js` and confirmed absent from `liveMonitor.js`.
+Removed: **B** (per-pitcher CAR cap — cut too much upside), **C** (strike=3 skip — 47% ROI in live data, was costing money).
+
+**Rule A history**: The original GOVERNANCE.md condition was `model_prob ≤ 0.75` (wrong direction). The correct condition deployed in code is `model_prob ≥ 0.50` — banning NO bets where BOTH market AND model agree YES is favored. If model says NO wins outright (`model_prob < 0.50`), the bet passes regardless of market price.
+
+### Risk Rules — liveMonitor.js (in-game)
 
 ### Daily Loss Limit
 
@@ -365,6 +479,22 @@ high if the team is actively managing their starter's workload.
 
 ---
 
+## Deploy Process
+
+The project runs on Railway via direct upload (`railway up`), **not** via a GitHub-connected deploy.
+
+### Standard deploy command
+
+```bash
+railway variables set COMMIT_SHA=$(git rev-parse --short HEAD) && railway up --detach
+```
+
+**Why the variable set:** `liveMonitor.js` writes `process.env.COMMIT_SHA` into the heartbeat so the dashboard can display the running commit next to "THE CLOSER". Railway's built-in `${{RAILWAY_GIT_COMMIT_SHA}}` reference only resolves for git-connected deploys — it stays blank with `railway up`. Setting it manually before each deploy keeps the Closer status header accurate.
+
+**Never `git push` as part of a deploy.** Git commits are separate operations, done only when explicitly requested.
+
+---
+
 ## Code Structure — Shared Libraries
 
 As of April 21, 2026 all shared logic is extracted into `lib/`. Scripts must
@@ -386,6 +516,51 @@ import from there; no duplication allowed.
 | `lib/kalshiWs.js` | WebSocket fill stream daemon |
 | `lib/wsFillApplier.js` | WS event → DB update |
 | `lib/sseBus.js` | Server-Sent Events bus for dashboard real-time updates |
+
+---
+
+## Known Bugs Fixed — 2026-04-25
+
+### 1. Kelly NO-bet formula — all NO bets returned betSize=0
+
+**Bug**: `kellySizing()` computed `feeEdge = modelProb × winPerUnit - (1-modelProb) × losePerUnit`
+for ALL bets. Since `modelProb` is always P(YES wins), for NO bets P(win) = `1-modelProb`.
+Using `modelProb` directly gave P(win) ≈ 0.18 for a strong NO bet (where P(win) should
+be 0.82), so `feeEdge` was deeply negative and `betSize` returned 0 for every NO bet.
+
+**Fix** (`lib/kelly.js`):
+```js
+const probWin = side === 'YES' ? modelProb : (1 - modelProb)
+const feeEdge = probWin * winPerUnit - (1 - probWin) * losePerUnit
+```
+
+**Impact**: Before fix, the Kelly system never placed any NO bets. All NO bets in the
+DB from Apr 21-24 (kf=0.00%) were placed by the old edge-weighted system. After fix,
+NO bets get proper Kelly fractions (typically 2-12% sized Kelly after discounts).
+
+### 2. scheduler.js stale cleanup — all bet_schedule rows marked 'error' on Railway redeploy
+
+**Bug**: On startup, the cleanup marked ALL 'fired' rows older than 4h as `status='error'`
+unconditionally. When Railway redeployed mid-day, all 30+ 'fired' rows (successfully
+placed bets from 8:35 AM) got marked 'error', making the dashboard look broken when
+54 real bets with real Kalshi order IDs existed.
+
+**Fix**: Two-query cleanup distinguishes placed vs. unplaced bets:
+```sql
+-- Rows with matching ks_bets → mark done (bets were placed, just status update was lost)
+UPDATE bet_schedule SET status='done' WHERE status='fired' AND fired_at < ?
+  AND EXISTS (SELECT 1 FROM ks_bets k WHERE k.bet_date = bet_schedule.bet_date
+              AND k.pitcher_id = bet_schedule.pitcher_id AND k.live_bet = 0)
+
+-- Rows without matching ks_bets → mark error (process truly never completed)
+UPDATE bet_schedule SET status='error' WHERE status='fired' AND fired_at < ?
+  AND NOT EXISTS (SELECT 1 FROM ks_bets k WHERE k.bet_date = bet_schedule.bet_date
+                  AND k.pitcher_id = bet_schedule.pitcher_id AND k.live_bet = 0)
+```
+
+Also fixed: the `status='done'` update after successful bet placement was
+fire-and-forget (unawaited). Now `await`ed so the status persists before the
+next iteration.
 
 ---
 
@@ -494,9 +669,7 @@ is the highest-ROI segment of the entire system.
 ## Improvement Roadmap
 
 ### Near-Term
-- **Kelly sizing for morning bets**: currently uses edge-proportional budget
-  allocation. Should call `correlatedKellyDivide()` per-pitcher group instead
-  of flat proportional split. In-game already uses proper Kelly.
+- ~~**Kelly sizing for morning bets**~~: **DONE 2026-04-25** — `ksBets.js` now uses full Kelly pipeline with `correlatedKellyDivide()`, per-pitcher cap, portfolio cap, and opportunity discount. NO-bet formula bug also fixed.
 - **lineup_source flag**: add `lineup_source` column to `ks_bets` to track
   whether each bet used posted lineups vs historical fallback. Needed to
   separate performance by lineup quality.

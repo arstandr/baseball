@@ -56,8 +56,20 @@ function buildUserCard(u, isMe) {
         <label>Starting Bankroll ($)
           <input type="number" class="bf-bankroll" value="${u.starting_bankroll ?? 5000}" min="100" step="100"/>
         </label>
-        <label>Daily Risk %
-          <input type="number" class="bf-risk" value="${Math.round((u.daily_risk_pct ?? 0.20) * 100)}" min="1" max="100"/>
+        <label style="grid-column:1/-1">
+          <span style="font-size:12px;color:var(--text-dim)">Budget Split — must sum to 100%</span>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+            <label style="flex:1;font-size:12px">Pre-game %
+              <input type="number" class="bf-pregame" value="${Math.round((u.pregame_risk_pct ?? 0.60) * 100)}" min="1" max="98" style="width:100%"/>
+            </label>
+            <label style="flex:1;font-size:12px">In-game %
+              <input type="number" class="bf-live" value="${Math.round((u.live_daily_risk_pct ?? 0.20) * 100)}" min="1" max="98" style="width:100%"/>
+            </label>
+            <label style="flex:1;font-size:12px">Free Money %
+              <input type="number" class="bf-freemoney" value="${Math.round((u.free_money_risk_pct ?? 0.20) * 100)}" min="1" max="98" style="width:100%"/>
+            </label>
+          </div>
+          <div class="bf-split-sum" style="font-size:11px;margin-top:3px;color:var(--text-dim)">Sum: <span class="bf-split-val">100</span>%</div>
         </label>
       </div>
       <label class="bf-label-full">Kalshi Key ID
@@ -92,6 +104,18 @@ function buildUserCard(u, isMe) {
     form.style.display = open ? 'none' : 'block'
     editBtn.textContent = open ? 'Edit' : 'Close'
   })
+
+  // Live sum display for the three pool % inputs
+  const splitInputs = [wrap.querySelector('.bf-pregame'), wrap.querySelector('.bf-live'), wrap.querySelector('.bf-freemoney')]
+  const splitVal    = wrap.querySelector('.bf-split-val')
+  const splitSumEl  = wrap.querySelector('.bf-split-sum')
+  function updateSplitSum() {
+    const sum = splitInputs.reduce((s, el) => s + (Number(el.value) || 0), 0)
+    splitVal.textContent = sum
+    splitSumEl.style.color = sum === 100 ? 'var(--green, #4caf50)' : 'var(--red, #f44336)'
+  }
+  splitInputs.forEach(el => el.addEventListener('input', updateSplitSum))
+  updateSplitSum()
   cancelBtn.addEventListener('click', () => {
     form.style.display = 'none'
     editBtn.textContent = 'Edit'
@@ -99,13 +123,22 @@ function buildUserCard(u, isMe) {
 
   saveBtn.addEventListener('click', async () => {
     msg.className = 'form-msg'; msg.textContent = ''
+    const pregamePct   = Number(wrap.querySelector('.bf-pregame').value) || 0
+    const livePct      = Number(wrap.querySelector('.bf-live').value) || 0
+    const freeMoneyPct = Number(wrap.querySelector('.bf-freemoney').value) || 0
+    const splitSum     = pregamePct + livePct + freeMoneyPct
+    if (splitSum !== 100) {
+      msg.className = 'form-msg err'; msg.textContent = `Budget split must sum to 100% (currently ${splitSum}%).`; return
+    }
     const body = {
-      active_bettor:     wrap.querySelector('.bf-active').checked,
-      paper:             wrap.querySelector('.bf-paper').value === '1',
-      starting_bankroll: Number(wrap.querySelector('.bf-bankroll').value),
-      daily_risk_pct:    Number(wrap.querySelector('.bf-risk').value) / 100,
-      kalshi_key_id:     wrap.querySelector('.bf-keyid').value.trim() || null,
-      discord_webhook:   wrap.querySelector('.bf-discord').value.trim() || null,
+      active_bettor:       wrap.querySelector('.bf-active').checked,
+      paper:               wrap.querySelector('.bf-paper').value === '1',
+      starting_bankroll:   Number(wrap.querySelector('.bf-bankroll').value),
+      pregame_risk_pct:    pregamePct / 100,
+      live_daily_risk_pct: livePct / 100,
+      free_money_risk_pct: freeMoneyPct / 100,
+      kalshi_key_id:       wrap.querySelector('.bf-keyid').value.trim() || null,
+      discord_webhook:     wrap.querySelector('.bf-discord').value.trim() || null,
     }
     const pem = wrap.querySelector('.bf-pem').value.trim()
     if (pem) body.kalshi_private_key = pem

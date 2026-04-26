@@ -290,8 +290,13 @@
         </div>
       </div>
       <div class="pipe-layout">
-        <aside class="pipe-rail" id="pipe-rail">
-          <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+        <aside class="pipe-rail-wrap">
+          <div class="pipe-search-box">
+            <input type="text" id="pipe-search" placeholder="Search pitchers…" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="pipe-rail" id="pipe-rail">
+            <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+          </div>
         </aside>
         <section class="pipe-detail" id="pipe-detail">
           <div class="pipe-detail-empty">Pick a pitcher on the left to see the full decision pipeline.</div>
@@ -386,14 +391,14 @@
         <div class="panel">
           <div class="panel-head"><h2>Bet Sizing</h2><span class="panel-sub">How much we risk per bet</span></div>
           <div class="sys-info" id="sys-info">
-            <div class="sys-row"><span>Starting bankroll (per person)</span><b>$5,000</b></div>
-            <div class="sys-row"><span>Bet sizing method</span><b>Quarter Kelly (25%)</b></div>
-            <div class="sys-row"><span>Max bet per pitcher</span><b>5% of bankroll</b></div>
-            <div class="sys-row"><span>Minimum bet</span><b>$25</b></div>
-            <div class="sys-row"><span>Minimum edge (YES or NO)</span><b>12¢ (YES bets with ≥18¢ edge bypass the 30% model conviction requirement)</b></div>
-            <div class="sys-row"><span>NO bets capital weight</span><b>1.25× (structural edge)</b></div>
+            <div class="sys-row"><span>Starting bankroll (per person)</span><b>$5,000 (configurable per user)</b></div>
+            <div class="sys-row"><span>Bet sizing method</span><b>Quarter Kelly (25% of full Kelly)</b></div>
+            <div class="sys-row"><span>Max bet per pitcher</span><b>10% of pre-game pool (~6% of bankroll)</b></div>
+            <div class="sys-row"><span>Minimum bet</span><b>No floor — Kelly drives size; thin edge = tiny bet</b></div>
+            <div class="sys-row"><span>Minimum edge (YES or NO)</span><b>12¢ (YES bets with ≥18¢ edge bypass the 25% model conviction requirement)</b></div>
             <div class="sys-row"><span>Max NO price (pre-game calc)</span><b>80¢ NO mid — above this, risk/reward is too poor</b></div>
             <div class="sys-row"><span>Max NO price (live re-entry)</span><b>55¢ ask — won't pay more mid-game</b></div>
+            <div class="sys-row"><span>pK model</span><b>Ridge regression (33 features, CV R²=0.938) — trained on 882 pitcher-seasons 2022–2024, retrained weekly. Requires ≥5 IP of 2026 Statcast data; falls back to hand-tuned blend otherwise.</b></div>
           </div>
         </div>
       </div>
@@ -527,7 +532,7 @@
               <span class="sched-time rule-badge rule-block">Rule D</span>
               <div class="sched-body">
                 <b>Block low-conviction YES bets — unless the edge is massive</b>
-                <p>YES bets normally require at least 30% model probability. Below that threshold, we skip — backing a long shot at low confidence wastes capital. Exception: if the edge is 18¢ or greater (market is significantly mispriced), the bet is allowed through regardless of model conviction, since large edges override low-confidence calls.</p>
+                <p>YES bets normally require at least 25% model probability. Below that threshold, we skip — backing a long shot at low confidence wastes capital. Exception: if the edge is 18¢ or greater (market is significantly mispriced), the bet is allowed through regardless of model conviction, since large edges override low-confidence calls.</p>
               </div>
             </div>
             <div class="sys-row sched-row">

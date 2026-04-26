@@ -1,6 +1,7 @@
 import express from 'express'
 import * as db from '../../lib/db.js'
 import { syncFillsForBettor } from '../../lib/ksFillSync.js'
+import { reconcilePositionsForBettor } from '../../lib/kalshiPositionSync.js'
 import { todayISO, roundTo, userFilter, wrap } from '../shared.js'
 import { getLastFillEventAt } from '../sse.js'
 
@@ -21,7 +22,10 @@ router.get('/ks/live', wrap(async (req, res) => {
   const lastFill = getLastFillEventAt()
   if (uf.userId && (!lastFill || Date.now() - lastFill > 60_000)) {
     const u = await db.one(`SELECT id, kalshi_key_id, kalshi_private_key FROM users WHERE id = ?`, [uf.userId])
-    if (u) syncFillsForBettor(u).catch(() => {})
+    if (u) {
+      syncFillsForBettor(u).catch(() => {})
+      reconcilePositionsForBettor(u).catch(() => {})
+    }
   }
 
   const allBets = await db.all(

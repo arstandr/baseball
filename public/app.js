@@ -116,12 +116,21 @@ async function refreshCloserStatus() {
     metaParts.push(`· needs update (${hb.commit ?? '?'} → ${data.server_commit ?? '?'})`)
   }
 
-  if (!codeStale && data.last_update?.msg) {
-    const u    = data.last_update
-    const uRaw = u.ts || u.updated_at || null
-    const uTs  = uRaw ? (uRaw.endsWith('Z') ? uRaw : uRaw + 'Z') : null
-    const uAgo = uTs && !isNaN(new Date(uTs)) ? Math.floor((Date.now() - new Date(uTs).getTime()) / 60000) : null
-    metaParts.push(`· updated ${uAgo != null ? fmtMin(uAgo) : 'recently'}`)
+  if (!codeStale) {
+    const rawCommit = hb.commit ?? data.last_update?.hash ?? null
+    const commit = rawCommit && rawCommit !== 'unknown' ? rawCommit : null
+    if (data.last_update?.ts || data.last_update?.updated_at) {
+      const uRaw = data.last_update.ts || data.last_update.updated_at
+      const uTs  = uRaw.endsWith('Z') ? uRaw : uRaw + 'Z'
+      const uAgo = !isNaN(new Date(uTs)) ? Math.floor((Date.now() - new Date(uTs).getTime()) / 60000) : null
+      if (uAgo != null && uAgo < 90) {
+        metaParts.push(`· updated ${fmtMin(uAgo)}`)
+      } else if (commit) {
+        metaParts.push(`· ${commit}`)
+      }
+    } else if (commit) {
+      metaParts.push(`· ${commit}`)
+    }
   }
 
   meta.textContent = metaParts.join(' ')

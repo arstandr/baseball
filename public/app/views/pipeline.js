@@ -8,6 +8,7 @@ const ps = {
   dates: [],
   pitchers: [],
   selectedId: null,
+  query: '',
 }
 
 export async function refreshPipelineView() {
@@ -36,6 +37,9 @@ function renderDateBar() {
     btn.addEventListener('click', async () => {
       ps.date = btn.dataset.date
       ps.selectedId = null
+      ps.query = ''
+      const input = document.getElementById('pipe-search')
+      if (input) input.value = ''
       await Promise.all([loadSlate(), loadDates()])
     })
   })
@@ -69,18 +73,26 @@ function renderRailItem(p) {
   </div>`
 }
 
+function renderRail() {
+  const rail = document.getElementById('pipe-rail')
+  if (!rail) return
+  const q = ps.query.toLowerCase()
+  const visible = q ? ps.pitchers.filter(p => p.pitcher_name.toLowerCase().includes(q)) : ps.pitchers
+  if (!visible.length) {
+    rail.innerHTML = `<div class="pipe-empty">${q ? 'No match.' : 'No pipeline data for this date.'}</div>`
+    return
+  }
+  rail.innerHTML = visible.map(renderRailItem).join('')
+  wireRailClicks()
+}
+
 async function loadSlate() {
   const rail = document.getElementById('pipe-rail')
   if (!rail) return
   try {
     const data = await fetchJson(`/api/ks/pipeline?date=${ps.date}`)
     ps.pitchers = data.pitchers || []
-    if (!ps.pitchers.length) {
-      rail.innerHTML = '<div class="pipe-empty">No pipeline data for this date.</div>'
-      return
-    }
-    rail.innerHTML = ps.pitchers.map(renderRailItem).join('')
-    wireRailClicks()
+    renderRail()
   } catch {
     rail.innerHTML = '<div class="pipe-empty muted">Failed to load slate.</div>'
   }
@@ -101,7 +113,13 @@ function wireRailClicks() {
 }
 
 function wirePipelineClicks() {
-  // date bar re-wiring happens in renderDateBar — nothing else to wire globally
+  const input = document.getElementById('pipe-search')
+  if (!input || input.dataset.wired) return
+  input.dataset.wired = '1'
+  input.addEventListener('input', () => {
+    ps.query = input.value.trim()
+    renderRail()
+  })
 }
 
 async function loadDetail(pitcherId) {
