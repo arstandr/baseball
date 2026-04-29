@@ -14,18 +14,25 @@
 // Run after morning dailyRun.sh. Keeps running until all today's games finish.
 
 import 'dotenv/config'
-import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getMarketPrice, getSettlements, getBalance as getKalshiBalance, getQueuePosition, amendOrder, getOrderbook, availableDepth, listOrders, getFills } from '../../lib/kalshi.js'
-import { mlbGet } from '../../lib/mlb-live.js'
-import { kellySizing, capitalAtRisk, correlatedKellyDivide } from '../../lib/kelly.js'
-import { notifyLiveBet, notifyFreeMoney, notifyCrossedYes, notifyBlowout, notifyScratch, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks } from '../../lib/discord.js'
-import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, ipToDecimal } from '../../lib/strikeout-model.js'
+import { getAuthHeaders, placeOrder, cancelOrder, cancelAllOrders, getOrder, getMarketPrice, getSettlements, getBalance as getKalshiBalance, getQueuePosition, amendOrder, getOrderbook, availableDepth, listOrders, getFills, listMarkets } from '../../lib/kalshi.js'
+import { mlbGet, mlbFeedLive } from '../../lib/mlb-live.js'
+import { createKalshiTickerWs } from '../../lib/kalshiWs.js'
+import { kellySizing, correlatedKellyDivide, config as kellyConfig } from '../../lib/kelly.js'
+import { alertStaleFireBlocked, alertExtremeDivergence } from '../../lib/healthAlerts.js'
+import { notifyLiveBet, notifyFreeMoney, notifyCrossedYes, notifyBlowout, notifyHedge, notifyScratch, notifyCovered, notifyDead, notifyOneAway, notifyGameResult, notifyDailyReport, getAllWebhooks, notifyCertaintyParlay } from '../../lib/discord.js'
+import { buildCertaintyParlay, parlayKey } from '../../lib/dkParlay.js'
+import { NB_R, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, nbCDF, pAtLeast, archetypeR, ipToDecimal } from '../../lib/strikeout-model.js'
+import { buildSnapshotRow, writeSnapshotBatch, linkBetToSnapshot, backfillOutcome } from '../../lib/marketSnapshotWriter.js'
+import { seedDefaults, getRules, invalidateCache as invalidateRulesCache } from '../../lib/bettingRules.js'
 import { parseArgs } from '../../lib/cli-args.js'
+import { getAvailablePool, getPerUserAvailablePool, addCommitted } from '../../lib/bankrollState.js'
+import { acquireBetLock, confirmBetPlaced, releaseBetLock } from '../../lib/betLock.js'
+import { alertError } from '../../lib/errorSentinel.js'
 
 const opts     = parseArgs({
   date: { default: new Date().toISOString().slice(0, 10) },
-  poll: { type: 'number', default: 15 },
+  poll: { type: 'number', default: 5 },
 })
 const TODAY       = opts.date
 const POLL_SEC    = opts.poll
@@ -36,26 +43,323 @@ const LOSS_LIMIT  = Number(process.env.DAILY_LOSS_LIMIT || 500)
 const MLB_BASE        = 'https://statsapi.mlb.com/api/v1'
 // Field filters reduce boxscore payload ~80% — only pull what extractStarterFromBoxscore needs
 const LS_FIELDS       = 'abstractGameState,currentInning,currentInningOrdinal,teams,offense,defense'
-const BOX_FIELDS      = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players'
+const BOX_FIELDS      = 'teams.home.pitchers,teams.away.pitchers,teams.home.players,teams.away.players,teams.home.battingOrder,teams.away.battingOrder'
 // Max USD risk per free-money taker order per strike threshold (pulled pitcher)
-const PULLED_CAP_USD    = Number(process.env.PULLED_CAP_USD    || 10)
+let PULLED_CAP_USD    = Number(process.env.PULLED_CAP_USD    || 10)
 // Max USD total free-money spend across all strike thresholds for one pulled pitcher
-const FREE_MONEY_PITCHER_CAP = Number(process.env.FREE_MONEY_PITCHER_CAP || 30)
+let FREE_MONEY_PITCHER_CAP = Number(process.env.FREE_MONEY_PITCHER_CAP || 30)
 // Max USD risk per dead-path NO taker (high pitch count, gap structurally uncloseable)
-const DEAD_PATH_CAP_USD = Number(process.env.DEAD_PATH_CAP_USD || 10)
+let DEAD_PATH_CAP_USD = Number(process.env.DEAD_PATH_CAP_USD || 10)
 const AVG_PITCHES_PER_IP = 17   // ~17 pitches per IP for starters
 // Max ¢ to pay for YES when threshold is already crossed (Kalshi market lag — near-certain win)
-const CROSSED_YES_MAX_ASK  = Number(process.env.CROSSED_YES_MAX_ASK  || 20)
+// Raised from 20→35: outcome is 100% certain (currentKs >= n), buying at 35¢ still yields ~60¢ net/contract
+let CROSSED_YES_MAX_ASK  = Number(process.env.CROSSED_YES_MAX_ASK  || 35)
 // Blowout NO: team losing by ≥BLOWOUT_DEFICIT runs in inning ≥BLOWOUT_INNING with ≥BLOWOUT_K_GAP still needed
-const BLOWOUT_DEFICIT      = Number(process.env.BLOWOUT_DEFICIT      || 5)
-const BLOWOUT_INNING       = Number(process.env.BLOWOUT_INNING       || 6)
-const BLOWOUT_K_GAP        = Number(process.env.BLOWOUT_K_GAP        || 3)
+let BLOWOUT_DEFICIT      = Number(process.env.BLOWOUT_DEFICIT      || 5)
+let BLOWOUT_INNING       = Number(process.env.BLOWOUT_INNING       || 6)
+let BLOWOUT_K_GAP        = Number(process.env.BLOWOUT_K_GAP        || 3)
+// Early blowout tier: deficit ≥ this in inning ≥ EARLY_BLOWOUT_INNING with K gap ≥ 2
+let EARLY_BLOWOUT_DEFICIT = Number(process.env.EARLY_BLOWOUT_DEFICIT || 7)
+let EARLY_BLOWOUT_INNING  = Number(process.env.EARLY_BLOWOUT_INNING  || 5)
+let EARLY_BLOWOUT_PITCH   = Number(process.env.EARLY_BLOWOUT_PITCH   || 65)
+// Late-inning NO: 9th inning+, needs ≥ 2 more Ks, pitch count ≥ this, model prob < LATE_INN_MAX_PROB
+let LATE_INN_MIN_PITCH    = Number(process.env.LATE_INN_MIN_PITCH    || 70)
+let LATE_INN_MAX_PROB     = Number(process.env.LATE_INN_MAX_PROB     || 0.20)
 
-const PULL_PITCH_COUNT      = Number(process.env.PULL_PITCH_COUNT      || 85)   // pitches at which pull risk becomes real
-const PULL_MIN_IP           = Number(process.env.PULL_MIN_IP           || 4)    // minimum IP before tracking pull risk
+// Apr 28 — lowered from 85 → 70 so hedge arms earlier. At 85 pitches a starter is typically
+// already in the 6th–7th and the NO market has often already moved, making hedge insurance
+// expensive. 70 pitches catches the late-5th window when fatigue starts mattering, NO is
+// still cheap, and the structural ceiling is informative. The 4-signal confidence score
+// (lines 162-227) still gates final arming — lowering this just lets us *consider* sooner.
+let PULL_PITCH_COUNT      = Number(process.env.PULL_PITCH_COUNT      || 70)
+let PULL_MIN_IP           = Number(process.env.PULL_MIN_IP           || 4)    // minimum IP before tracking pull risk
 const QUEUE_GOOD_THRESHOLD  = Number(process.env.QUEUE_GOOD_THRESHOLD  || 10)   // qp ≤ this → leave it
 const QUEUE_AMEND_THRESHOLD = Number(process.env.QUEUE_AMEND_THRESHOLD || 30)   // qp ≤ this → amend price
-const QUEUE_AMEND_CENTS     = Number(process.env.QUEUE_AMEND_CENTS     || 1)    // ¢ to shift when amending
+let QUEUE_AMEND_CENTS     = Number(process.env.QUEUE_AMEND_CENTS     || 1)    // ¢ to shift when amending
+
+// Live Bayesian model cap — max weight given to in-game observed K% (readable from betting_rules)
+let LIVE_BAYESIAN_WEIGHT_CAP = 0.75
+// Pulled cap for two-tier confirmed pulls (reliever on mound or substitution event)
+let PULLED_CAP_CONFIRMED_USD = 60
+// Max USD risk per pull-hedge NO order per bettor (portfolio insurance sizing)
+let PULL_HEDGE_MAX_USD = Number(process.env.PULL_HEDGE_MAX_USD || 60)
+// Hard ceiling on a single live bet (cash USD, before fills). Belt-and-suspenders cap layered
+// on top of MAX_BET_PCT × bankroll. Prevents tonight's Paddack-2+ scenario where a stale model
+// produced a 60% "edge" against a 0.5¢ market and Kelly authorized a $500 cash bet → $666.68 loss.
+let LIVE_HIGH_CONVICTION_CAP_USD = Number(process.env.LIVE_HIGH_CONVICTION_CAP_USD || 200)
+// Per-pitcher cumulative cap for model-driven modes (high-conviction / stack-yes / dead-path).
+// Limits total per-pitcher exposure across all strike thresholds — prevents the case where
+// 5 strikes (2+/3+/4+/5+/6+) each hit the per-bet cap and we end up $1000 deep on one pitcher.
+let LIVE_HC_PITCHER_CAP_USD = Number(process.env.LIVE_HC_PITCHER_CAP_USD || 300)
+// Conservative pitch count ceiling for structural ceiling calculation
+// Managers rarely extend past 105 — use this as worst-case remaining batter estimate
+let CONSERVATIVE_PULL_PITCH = Number(process.env.CONSERVATIVE_PULL_PITCH || 105)
+
+// _computeHedgePlan — pure portfolio-insurance math.
+// Given a bettor's YES position and the current NO market, returns the optimal
+// hedge contract count and whether buying it improves expected value.
+//
+// Returns:
+//   { qualified: true, hedgeContracts, hedgeCost, capped, fullOffset, evHedge, evNoHedge, reason: 'qualified' }
+//   { qualified: false, reason: 'noAsk-out-of-range' | 'fullOffset-zero' | 'ev-gate-fail', ... }
+function _computeHedgePlan({ yesFilledContracts, yesFillCents, noAskCents, modelProb, maxUSD }) {
+  if (noAskCents <= 0 || noAskCents >= 100) return { qualified: false, reason: 'noAsk-out-of-range' }
+  if (!yesFilledContracts || yesFilledContracts <= 0) return { qualified: false, reason: 'fullOffset-zero' }
+
+  const kalshiFee       = 0.93
+  const yesFillFrac     = yesFillCents / 100
+  const noAskFrac       = noAskCents / 100
+  const noNetPerContract = (1 - noAskFrac) * kalshiFee
+
+  // Full offset: NOs needed so that if YES fails, the NO payout covers the YES capital loss
+  const yesExposure  = yesFilledContracts * yesFillFrac
+  const fullOffset   = Math.ceil(yesExposure / noNetPerContract)
+  if (fullOffset <= 0) return { qualified: false, reason: 'fullOffset-zero' }
+
+  // EV gate: the NO leg must itself have positive expected value for the hedge to be worthwhile.
+  // evNoLeg = (1-p)*noNetPerContract - p*noAskFrac
+  // If evNoLeg ≤ 0, paying for the NO destroys more EV than it protects.
+  const evYesPerContract = modelProb * (1 - yesFillFrac) - (1 - modelProb) * yesFillFrac
+  const evNoLeg          = (1 - modelProb) * noNetPerContract - modelProb * noAskFrac
+  const evHedge          = yesFilledContracts * evYesPerContract + fullOffset * evNoLeg
+  const evNoHedge        = yesFilledContracts * evYesPerContract
+  if (evNoLeg <= 0) return { qualified: false, reason: 'ev-gate-fail', evHedge, evNoHedge }
+
+  // Cap: never spend more than maxUSD on NO contracts for a single hedge
+  const rawCost        = fullOffset * noAskFrac
+  const capped         = rawCost > maxUSD
+  const hedgeContracts = capped ? Math.max(1, Math.floor(maxUSD / noAskFrac)) : fullOffset
+  const hedgeCost      = hedgeContracts * noAskFrac
+
+  return { qualified: true, hedgeContracts, hedgeCost, capped, fullOffset, evHedge, evNoHedge, reason: 'qualified' }
+}
+
+// ── Hedge confidence: pure functions (no DB/API deps, fully testable) ─────────
+
+// Signal 1: Maximum additional batters the pitcher can face before a conservative pull.
+// Uses this game's actual pitch efficiency (currentPitches/currentBF) — not a global average.
+// Returns integer: max additional batters. 0 = already at or past pull point.
+function structuralCeiling({ currentPitches, currentBF, conservativePullPitch = CONSERVATIVE_PULL_PITCH }) {
+  if (!currentBF || currentBF <= 0) return 999   // no data — leave open
+  const pitchesPerBF     = currentPitches / currentBF
+  const remainingPitches = Math.max(0, conservativePullPitch - currentPitches)
+  return Math.floor(remainingPitches / pitchesPerBF)
+}
+
+// Signal 2: Poisson-binomial P(getting ≥ needed Ks from these specific batters).
+// Each batter has an independent kPct — this is NOT a simple binomial (each p_i differs).
+// DP runs in O(N²) — N ≤ 5, so it's trivial cost.
+function batterGauntletProb(nextBatters, needed) {
+  const probs = (nextBatters ?? []).map(b => Math.max(0.01, Math.min(0.99, b.kPct ?? 0.20)))
+  const N = probs.length
+  if (needed <= 0) return 1.0
+  if (needed > N)  return 0.0   // mathematically impossible from this many batters
+  const dp = new Array(N + 1).fill(0)
+  dp[0] = 1.0
+  for (let i = 0; i < N; i++) {
+    const p = probs[i]
+    for (let j = i + 1; j >= 1; j--) dp[j] = dp[j] * (1 - p) + dp[j - 1] * p
+    dp[0] *= (1 - p)
+  }
+  let pAtLeast = 0
+  for (let k = needed; k <= N; k++) pAtLeast += dp[k]
+  return Math.max(0, Math.min(1, pAtLeast))
+}
+
+// Combined 4-signal confidence scorer for pull-hedge decisions.
+// Returns { score (0-100), confident (bool), sizeMultiplier (0-1), signals (object) }
+// Score ≥ 45 → confident to hedge. Size scales with score.
+function computeHedgeConfidence({
+  needed, currentPitches, currentBF, noMid, modelProb,
+  nextBatters, scoreDiff, currentInn,
+}) {
+  const signals = {}
+  let score = 0
+
+  // ── Signal 1: Structural ceiling (hard arithmetic) ──────────────────────────
+  const ceiling = structuralCeiling({ currentPitches, currentBF })
+  signals.ceiling  = ceiling
+  signals.needed   = needed
+  if (ceiling < needed) {
+    signals.structural = 'impossible'   // mathematical certainty — threshold can't be reached
+    score += 50
+  } else if (ceiling <= needed) {
+    signals.structural = 'tight'        // exactly enough batters — every one would need a K
+    score += 30
+  } else if (ceiling <= needed + 2) {
+    signals.structural = 'limited'      // 1-2 batter cushion above minimum
+    score += 15
+  } else {
+    signals.structural = 'open'
+  }
+
+  // ── Signal 2: Batter gauntlet (upcoming hitters' K%) ────────────────────────
+  const hasGauntletData = Array.isArray(nextBatters) && nextBatters.some(b => b.kPct != null)
+  if (hasGauntletData) {
+    const pHit = batterGauntletProb(nextBatters.slice(0, 3), needed)
+    signals.gauntletProb = pHit
+    if      (pHit < 0.05) score += 30
+    else if (pHit < 0.10) score += 20
+    else if (pHit < 0.20) score += 10
+    else if (pHit < 0.30) score += 5
+  } else {
+    signals.gauntletProb = null   // no batter data — don't penalize, don't reward
+  }
+
+  // ── Signal 5: Market + model dual confirmation ───────────────────────────────
+  // Both the live model AND the Kalshi market should agree the outcome is unlikely.
+  const marketNoProb = noMid / 100
+  signals.modelProb    = modelProb
+  signals.marketNoProb = marketNoProb
+  if      (marketNoProb >= 0.65 && modelProb <= 0.20) { signals.marketModel = 'strong';   score += 20 }
+  else if (marketNoProb >= 0.55 && modelProb <= 0.30) { signals.marketModel = 'moderate'; score += 10 }
+  else if (marketNoProb >= 0.45 && modelProb <= 0.40) { signals.marketModel = 'weak';     score += 5  }
+  else                                                  { signals.marketModel = 'diverged'              }
+
+  // ── Signal 6: Game state (manager pull incentives) ──────────────────────────
+  const inn = typeof currentInn === 'number' ? currentInn
+    : parseInt(String(currentInn ?? '').replace(/\D/g, '')) || 0
+  signals.inning    = inn
+  signals.scoreDiff = scoreDiff
+  if      (scoreDiff <= -4 && inn >= 6) { signals.gameState = 'blowout-pull'; score += 15 }
+  else if (scoreDiff <= -2 && inn >= 7) { signals.gameState = 'losing-late';  score += 10 }
+  else if (inn >= 8)                    { signals.gameState = 'very-late';     score += 5  }
+  else if (scoreDiff >= 4 && inn >= 6)  { signals.gameState = 'winning-big';   score += 5  }
+  else                                  { signals.gameState = 'normal'                      }
+
+  const confident      = score >= 45
+  const sizeMultiplier = score >= 90 ? 1.00
+                       : score >= 70 ? 0.75
+                       : score >= 45 ? 0.50
+                       : 0
+
+  return { score, confident, sizeMultiplier, signals }
+}
+
+// ── Batter lineup data ─────────────────────────────────────────────────────────
+// Keyed by MLB personId. Stats don't change during a game — 24h TTL is safe.
+const _batterStatsCache = new Map()   // personId → { kPct, name, fetchedAt }
+const BATTER_STATS_TTL_MS = 24 * 60 * 60 * 1000
+
+// Fetch season K% (strikeOuts/atBats) for a batch of batter IDs.
+// Caches per-batter so each player is fetched at most once per day.
+async function fetchBatterKPcts(personIds) {
+  const now = Date.now()
+  const result = {}
+  const toFetch = []
+
+  for (const id of personIds) {
+    const cached = _batterStatsCache.get(id)
+    if (cached && (now - cached.fetchedAt) < BATTER_STATS_TTL_MS) {
+      result[id] = cached.kPct
+    } else {
+      toFetch.push(id)
+    }
+  }
+
+  if (toFetch.length > 0) {
+    const season = new Date().getFullYear()
+    const url = `${MLB_BASE}/people?personIds=${toFetch.join(',')}&hydrate=stats(group=[hitting],type=[season],season=${season})&fields=people,id,fullName,stats,splits,stat,strikeOuts,atBats`
+    const data = await mlbGet(url).catch(() => null)
+    if (data?.people) {
+      for (const person of data.people) {
+        const stat = person.stats?.[0]?.splits?.[0]?.stat
+        const ab   = stat?.atBats ?? 0
+        // Require ≥30 AB before trusting K%; default 0.20 (league average) for small samples
+        const kPct = ab >= 30 ? stat.strikeOuts / ab : null
+        _batterStatsCache.set(person.id, { kPct, name: person.fullName ?? `Player ${person.id}`, fetchedAt: now })
+        result[person.id] = kPct
+      }
+    }
+  }
+
+  return result
+}
+
+// Get the next 2-3 batters the pitcher will face, with their season K%.
+// Returns [] if pitcher is not currently on the mound or data is unavailable.
+async function fetchNextBatters(feed, pitcherSide) {
+  // Which half-inning should this pitcher be pitching?
+  // Home pitcher pitches during 'top' (away bats); away pitcher during 'bottom' (home bats)
+  const inningHalf   = feed?.liveData?.linescore?.inningHalf?.toLowerCase() ?? ''
+  const expectedHalf = pitcherSide === 'home' ? 'top' : 'bottom'
+  if (inningHalf !== expectedHalf) return []   // wrong half — pitcher not currently pitching
+
+  const battingSide  = pitcherSide === 'home' ? 'away' : 'home'
+  const battingOrder = (feed?.liveData?.boxscore?.teams?.[battingSide]?.battingOrder ?? []).map(Number)
+  if (!battingOrder.length) return []
+
+  const currentBatterId = feed?.liveData?.linescore?.offense?.batter?.id
+  if (!currentBatterId) return []
+
+  const currentIdx = battingOrder.indexOf(Number(currentBatterId))
+  if (currentIdx === -1) return []
+
+  // Next 2-3 batters after the current at-bat (lineup wraps around)
+  const nextIds = []
+  for (let i = 1; i <= 3; i++) nextIds.push(battingOrder[(currentIdx + i) % battingOrder.length])
+
+  const statsMap = await fetchBatterKPcts(nextIds)
+  return nextIds.map(id => ({
+    id,
+    kPct: statsMap[id] ?? null,
+    name: _batterStatsCache.get(id)?.name ?? `Player ${id}`,
+  }))
+}
+
+// ── Adaptive polling state ─────────────────────────────────────────────────────
+// Per-pitcher next-check timestamp (ms). Prevents high-frequency polls when a
+// pitcher is far from any threshold (60s). Collapses to 10-15s when ≤5 BF away.
+const _pitcherNextCheckAt = new Map()  // String(pitcherId) → timestamp ms
+
+// Certainty parlay tracking — accumulate crossed-YES legs, fire when 2+ hit from different pitchers
+const _certLegs          = new Map()   // `${pitcherName}-${strike}` → leg object
+const _certParlaySent    = new Set()   // parlayKey strings already notified today
+
+// Returns ms to wait before next check based on BF distance to nearest threshold
+function _adaptivePollMs(currentBF, qualifiedThresholds) {
+  if (!qualifiedThresholds || qualifiedThresholds.length === 0) return 60_000
+  // >= so exact threshold hit (minDist=0) returns 0ms for immediate action
+  const remaining = qualifiedThresholds.filter(t => t >= currentBF)
+  if (!remaining.length) return 90_000   // all crossed — still monitor but less often
+  const minDist = Math.min(...remaining.map(t => t - currentBF))
+  if (minDist === 0) return 0            // exactly at threshold — fire immediately
+  if (minDist <= 2)  return 8_000        // ≤2 BF away — 8s
+  if (minDist <= 5)  return 15_000       // ≤5 BF away — 15s
+  if (minDist <= 10) return 30_000       // ≤10 BF away — 30s
+  return 60_000                          // far away — 60s
+}
+
+// ── Kalshi outage detection ────────────────────────────────────────────────────
+// 3 consecutive API failures → declare outage, halt new orders, Discord alert.
+// Outage clears when any API call succeeds.
+let _kalshiConsecutiveFailures = 0
+let _kalshiOutageStart = null
+const KALSHI_OUTAGE_THRESHOLD = 3
+
+async function _trackKalshiResult(success, webhooksGetter) {
+  if (success) {
+    if (_kalshiOutageStart) {
+      const dur = ((Date.now() - _kalshiOutageStart) / 60000).toFixed(1)
+      console.log(`\n[liveMonitor] ✅ Kalshi API restored after ${dur}min outage`)
+      db.run(`INSERT OR REPLACE INTO system_flags (key, value, updated_at, updated_by) VALUES ('kalshi_outage','0',datetime('now'),'liveMonitor')`).catch(() => {})
+      _kalshiOutageStart = null
+    }
+    _kalshiConsecutiveFailures = 0
+    return
+  }
+  _kalshiConsecutiveFailures++
+  if (_kalshiConsecutiveFailures >= KALSHI_OUTAGE_THRESHOLD && !_kalshiOutageStart) {
+    _kalshiOutageStart = Date.now()
+    console.error(`\n[liveMonitor] ⚠️ Kalshi API OUTAGE — ${_kalshiConsecutiveFailures} consecutive failures. Halting new orders.`)
+    db.run(`INSERT OR REPLACE INTO system_flags (key, value, updated_at, updated_by) VALUES ('kalshi_outage','1',datetime('now'),'liveMonitor')`).catch(() => {})
+    try {
+      const wh = await webhooksGetter()
+      const { notifyAlert } = await import('../lib/discord.js')
+      await notifyAlert({ title: '⚠️ Kalshi API Degraded', description: `${_kalshiConsecutiveFailures} consecutive API failures. New orders halted. Monitoring continues.`, color: 0xff6600 }, wh)
+    } catch {}
+  }
+}
 
 // ── Live λ recalculation ──────────────────────────────────────────────────────
 //
@@ -68,6 +372,8 @@ const QUEUE_AMEND_CENTS     = Number(process.env.QUEUE_AMEND_CENTS     || 1)    
 
 function computeLiveModel(preGame, currentKs, currentIP, currentPitches, currentBF = 0, scoreDiff = 0) {
   const { pK_blended, avgPitches, avgBF } = preGame
+  // Derive NB dispersion r from per-BF K rate (proxy for k_pct when statcast not available).
+  const nbR = pK_blended >= 0.28 ? 20 : pK_blended <= 0.19 ? 50 : 30
 
   // Score-state modifier: managers pull starters earlier when blowout, push them in close games
   let pitchBudget = avgPitches || 90
@@ -92,7 +398,7 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
   let pK_effective = pK_blended
   if (currentBF >= 9) {
     const liveKpct = currentBF > 0 ? currentKs / currentBF : pK_blended
-    const w_live   = Math.min(0.5, currentBF / 36)
+    const w_live   = Math.min(LIVE_BAYESIAN_WEIGHT_CAP, currentBF / 30)
     const blended  = w_live * liveKpct + (1 - w_live) * pK_blended
     pK_effective   = Math.max(0.10, Math.min(0.45, blended))
     // Fast update: pitcher is dominating well above prior → trust live evidence faster
@@ -104,9 +410,11 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
   }
 
   // TTO K-rate penalty: batters have seen this pitcher 2-3× through the order and adjust.
-  // Separate from the pitch-budget penalty above — both effects are real and independent.
-  if      (currentBF >= 24) pK_effective *= 0.75  // deep into 4th time through
-  else if (currentBF >= 18) pK_effective *= 0.85  // 3rd time through
+  // Only the BF≥18 step (TTO3 start) is applied here. The BF≥24 step was removed:
+  // at that depth the Bayesian live blend (now up to 0.75 weight) already captures
+  // observed K-rate regression from TTO fatigue, so applying a fixed penalty on top
+  // double-counts the same signal.
+  if (currentBF >= 18) pK_effective *= 0.85  // 3rd time through lineup
 
   // λ_remaining = remaining BF × K rate
   const lambdaRemaining = Math.max(0, remainingBF * pK_effective)
@@ -122,7 +430,7 @@ function computeLiveModel(preGame, currentKs, currentIP, currentPitches, current
     // P(total ≥ n) = P(additional ≥ n - currentKs) for each threshold
     probAtLeast: (n) => {
       if (currentKs >= n) return 1.0  // already hit
-      return pAtLeast(lambdaRemaining, n - currentKs)
+      return pAtLeast(lambdaRemaining, n - currentKs, nbR)
     },
   }
 }
@@ -171,36 +479,49 @@ async function fetchLiveKsMarkets(ticker) {
   // false-pull system to buy contracts on the wrong pitcher's markets.
   try {
     const eventTicker = ticker.split('-').slice(0, -1).join('-')  // strip pitcher code → event level
-    const headers = getAuthHeaders('GET', `/trade-api/v2/markets`)
-    const res = await axios.get(`https://api.elections.kalshi.com/trade-api/v2/markets`, {
-      params: { event_ticker: eventTicker, series_ticker: 'KXMLBKS', status: 'open', limit: 20 },
-      headers,
-      timeout: 10000,
-    })
-    const all = res.data?.markets || []
+    const res = await listMarkets({ eventTicker, seriesTicker: 'KXMLBKS', status: 'open', limit: 20 })
+    const all = res?.markets || []
     return all.filter(m => m.ticker.startsWith(ticker + '-'))
   } catch { return [] }
 }
+
+// ── Kalshi ticker pull-signal state ──────────────────────────────────────────
+// When the Kalshi WS ticker shows a sharp YES mid drop (≥15¢ or below 8¢),
+// the pitcher was almost certainly pulled by a TV-watching trader before the
+// MLB API boxscore updates. We add the pitcherId to this set and force an
+// urgent poll cycle so the pull confirmation runs within seconds.
+const _kalshiPullSignal = new Set()  // pitcherIds with active Kalshi pull signal
+const _tickerLastMid    = new Map()  // ticker → last YES mid (cents)
+const _pullFired        = new Set()  // pitcherIds where pull free-money has already fired (prevents re-trigger)
+const _openerSkipLogged = new Set()  // pitcherIds where opener exit was detected — log once, then quietly skip free-money
 
 // ── Daily loss guard ─────────────────────────────────────────────────────────
 
 let _dailyLoss = 0
 let _dailyNetPnl = 0  // net P&L today (all settled bets, pre-game + live)
 let _dailyReportSent = false  // gate to prevent duplicate EOD Discord reports on crash+restart
+let _haltLogged = false  // suppress repeated halt log messages
 
 async function loadDailyLoss() {
-  // Use actual Kalshi balance delta (snapshot → current) for live bettors.
-  // ks_bets.pnl uses theoretical contract math and diverges from real account
-  // movement — using it caused false halts when theoretical losses > actual losses.
+  // Use actual Kalshi balance delta (snapshot → current) for live bettors, minus any
+  // manual adjustments (deposits/withdrawals) so a mid-day deposit doesn't hide losses.
   const rows = await db.all(
-    `SELECT u.kalshi_balance, bs.balance_usd AS snapshot_balance
+    `SELECT u.id AS user_id, u.kalshi_balance, bs.balance_usd AS snapshot_balance
      FROM users u
      JOIN balance_snapshots bs ON bs.user_id = u.id AND bs.date = ?
      WHERE u.active_bettor = 1 AND u.paper = 0 AND u.kalshi_key_id IS NOT NULL`,
     [TODAY],
   )
   if (rows.length) {
-    const netPnl = rows.reduce((s, r) => s + ((r.kalshi_balance ?? 0) - (r.snapshot_balance ?? 0)), 0)
+    let netPnl = 0
+    for (const r of rows) {
+      const adjRow = await db.one(
+        `SELECT COALESCE(SUM(amount_usd), 0) AS net_adj FROM manual_balance_adjustments
+         WHERE user_id = ? AND created_at >= ?`,
+        [r.user_id, TODAY + 'T00:00:00.000Z'],
+      ).catch(() => null)
+      netPnl += ((r.kalshi_balance ?? 0) - (r.snapshot_balance ?? 0)) - (adjRow?.net_adj ?? 0)
+    }
     _dailyLoss = Math.max(0, -netPnl)
   } else {
     // Fallback: no snapshots yet (first run of day before any bets)
@@ -214,17 +535,53 @@ async function loadDailyLoss() {
   return _dailyLoss
 }
 
+// Per-user daily loss in USD (positive = lost money).
+// Subtracts any manual balance adjustments (deposits/withdrawals) made since the
+// snapshot so that a mid-day deposit doesn't mask a real trading loss.
+async function getUserDailyLoss(userId) {
+  try {
+    const row = await db.one(
+      `SELECT u.kalshi_balance, bs.balance_usd AS snapshot_balance, bs.date AS snap_date
+       FROM users u
+       JOIN balance_snapshots bs ON bs.user_id = u.id AND bs.date = ?
+       WHERE u.id = ? AND u.paper = 0 AND u.kalshi_key_id IS NOT NULL`,
+      [TODAY, userId],
+    )
+    if (!row) return 0
+    const adjRow = await db.one(
+      `SELECT COALESCE(SUM(amount_usd), 0) AS net_adj
+       FROM manual_balance_adjustments
+       WHERE user_id = ? AND created_at >= ?`,
+      [userId, row.snap_date + 'T00:00:00.000Z'],
+    ).catch(() => null)
+    const netAdj   = adjRow?.net_adj ?? 0
+    const rawDelta = (row.kalshi_balance ?? 0) - (row.snapshot_balance ?? 0)
+    return Math.max(0, -(rawDelta - netAdj))
+  } catch { return 0 }
+}
+
 async function reloadDailyNetPnl() {
-  // Use actual Kalshi balance delta — same source as the dashboard today P&L.
+  // Use actual Kalshi balance delta minus any manual adjustments (deposits/withdrawals)
+  // made since the snapshot — same source as the dashboard today P&L.
   const rows = await db.all(
-    `SELECT u.kalshi_balance, bs.balance_usd AS snapshot_balance
+    `SELECT u.id AS user_id, u.kalshi_balance, bs.balance_usd AS snapshot_balance
      FROM users u
      JOIN balance_snapshots bs ON bs.user_id = u.id AND bs.date = ?
      WHERE u.active_bettor = 1 AND u.paper = 0 AND u.kalshi_key_id IS NOT NULL`,
     [TODAY],
   )
   if (rows.length) {
-    _dailyNetPnl = rows.reduce((s, r) => s + ((r.kalshi_balance ?? 0) - (r.snapshot_balance ?? 0)), 0)
+    let total = 0
+    for (const r of rows) {
+      const adjRow = await db.one(
+        `SELECT COALESCE(SUM(amount_usd), 0) AS net_adj FROM manual_balance_adjustments
+         WHERE user_id = ? AND created_at >= ?`,
+        [r.user_id, TODAY + 'T00:00:00.000Z'],
+      ).catch(() => null)
+      const netAdj = adjRow?.net_adj ?? 0
+      total += ((r.kalshi_balance ?? 0) - (r.snapshot_balance ?? 0)) - netAdj
+    }
+    _dailyNetPnl = total
   } else {
     const fallback = await db.one(
       `SELECT COALESCE(SUM(pnl), 0) as net FROM ks_bets WHERE bet_date = ? AND result IN ('win','loss') AND paper = 0`,
@@ -239,7 +596,59 @@ async function reloadDailyNetPnl() {
 
 
 async function executeBet({ pitcherName, pitcherId, game, strike, side, modelProb, marketMid, edge, ticker, betSize, kellyFraction, capitalRisk,
-  liveKs, liveIP, livePitches, liveBF, liveInning, livePkEffective, liveLambda, liveScore, mode = 'normal', user }) {
+  liveKs, liveIP, livePitches, liveBF, liveInning, livePkEffective, liveLambda, liveScore, mode = 'normal', hedgeOverride = null, user }) {
+  // ── Apr 29 — Belt-and-suspenders mode kill switch ──
+  // The qualifying[] filter at line ~3263 should prevent disabled modes from reaching
+  // executeBet. If they somehow do (race, bug, alternate path), refuse here as a final
+  // safety floor. Triggered by Bradley 8+ YES live bet on 4/29 that escaped the
+  // upstream filter in some still-unexplained path.
+  const _executeBetDisabled = String(process.env.DISABLED_LIVE_MODES || '')
+    .split(',').map(s => s.trim()).filter(Boolean)
+  if (_executeBetDisabled.includes(mode)) {
+    console.log(`[liveMonitor] 🚫 SAFETY-FLOOR refusing executeBet — mode '${mode}' is in DISABLED_LIVE_MODES (${pitcherName} ${strike}+ ${side})`)
+    db.saveLog({
+      tag: 'BUG', level: 'error',
+      msg: `executeBet safety floor caught a disabled-mode bet that escaped upstream filter: ${pitcherName} ${strike}+ ${side} mode=${mode}`,
+      pitcher: pitcherName, strike, side,
+    }).catch(() => {})
+    return { skipped: true, reason: `mode_disabled:${mode}` }
+  }
+  // ── Kill switch (Item 2) ──
+  const haltFlag = await db.one(`SELECT value FROM system_flags WHERE key='trading_halted'`).catch(() => null)
+  if (haltFlag?.value === '1') {
+    console.log(`[liveMonitor] HALTED — skipping ${pitcherName} ${strike}+ ${side}`)
+    // Discord alert (deduped — fires once per halted state regardless of how many bets attempted)
+    import('../../lib/healthAlerts.js').then(m => m.alertTradingHalted({ value: 1 })).catch(() => {})
+    return { halted: true }
+  }
+  // ── Apr 28 stale-fire guards ────────────────────────────────────────────────
+  // Guard 1: game already settled — never fire on a finished game (caused Kochanowicz
+  // 5+ bet at 03:14, 215 min after first pitch, when the game was already over).
+  if (game?.id && settledGames.has(game.id)) {
+    console.log(`[live] 🛑 STALE-FIRE  ${pitcherName} ${strike}+ ${side} skipped — game already settled`)
+    db.saveLog({ tag: 'BUG', level: 'warn', msg: `stale-fire blocked: ${pitcherName} ${strike}+ ${side} (game already final)`, pitcher: pitcherName, strike, side })
+    alertStaleFireBlocked({ pitcherName, strike, side, reason: 'game already settled' }).catch(() => {})
+    return { stale: true }
+  }
+  // Guard 2: game began > 4.5 hours ago — even with extra innings, bets this late are
+  // virtually always processing-stale state (caught Paddack 2+ at 87 min late where
+  // the live model fed on stale lambda/pitch-count snapshots).
+  const gameStartMs = game?.game_time ? Date.parse(game.game_time) : null
+  if (gameStartMs && Date.now() - gameStartMs > 4.5 * 60 * 60 * 1000) {
+    const ageMin = Math.round((Date.now() - gameStartMs) / 60000)
+    console.log(`[live] 🛑 STALE-FIRE  ${pitcherName} ${strike}+ ${side} skipped — game started ${ageMin}min ago`)
+    db.saveLog({ tag: 'BUG', level: 'warn', msg: `stale-fire blocked: ${pitcherName} ${strike}+ ${side} (${ageMin}min after first pitch)`, pitcher: pitcherName, strike, side })
+    alertStaleFireBlocked({ pitcherName, strike, side, reason: `game started ${ageMin} min ago` }).catch(() => {})
+    return { stale: true }
+  }
+  // ── Drawdown scale (Item 6) ──
+  const ddFlag = await db.one(`SELECT value FROM system_flags WHERE key='drawdown_scale'`).catch(() => null)
+  const ddScale = Number(ddFlag?.value ?? 1.0)
+  if (ddScale !== 1.0 && ddScale > 0) {
+    betSize = betSize * ddScale
+    console.log(`[liveMonitor] drawdown scale ${ddScale}× → $${betSize.toFixed(2)} for ${pitcherName}`)
+  }
+
   const isLive = LIVE && user?.paper === 0
   const userId = user?.id ?? null
   const creds  = user?.kalshi_key_id
@@ -247,32 +656,50 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     : {}
   const now    = new Date().toISOString()
 
-  // DB-level dedup
-  const existing = await db.one(
-    `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id IS ?`,
-    [TODAY, pitcherName, strike, side, userId],
-  )
+  // DB-level dedup — use IS for null-safe comparison (libSQL requires explicit IS NULL branch)
+  const dedupQuery = userId != null
+    ? `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id=?`
+    : `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id IS NULL`
+  const dedupParams = userId != null
+    ? [TODAY, pitcherName, strike, side, userId]
+    : [TODAY, pitcherName, strike, side]
+  const existing = await db.one(dedupQuery, dedupParams)
   if (existing) return { dedup: true }
 
-  let finalContracts = Math.max(1, Math.round(betSize))
-  let orderCents     = Math.round(side === 'YES' ? marketMid : 100 - marketMid)  // fallback
+  // betSize is dollars (from kellySizing); convert to integer contract count.
+  // orderCents is the estimated fill price per contract in cents (e.g. 64 → $0.64/contract).
+  let orderCents     = Math.max(1, Math.round(side === 'YES' ? marketMid : 100 - marketMid))
+  let finalContracts = Math.max(1, Math.round((betSize * 100) / orderCents))
   let freeMoneySummary = null  // set below for pulled-mode notifications
   let orderId    = null  // captured from placeOrder response so ksFillSync + WS applier can track it
   let initFilled = 0    // taker orders may fill immediately; capture so the DB row is accurate from the start
 
-  if (isLive) {
-    const ob = await getOrderbook(ticker, 10, creds).catch(() => null)
+  // ── Kalshi outage guard ──
+  if (_kalshiConsecutiveFailures >= KALSHI_OUTAGE_THRESHOLD) {
+    console.log(`  [kalshi-outage] ${pitcherName} ${strike}+ ${side} — API degraded, skipping order`)
+    return { freeMoneySummary: null, kalshiOutage: true }
+  }
 
-    if (mode === 'pulled' || mode === 'dead-path' || mode === 'crossed-yes' || mode === 'blowout') {
+  if (isLive) {
+    // Skip orderbook fetch for time-critical structural modes — saves 200-500ms.
+    // Pulled/crossed-yes windows last ~1s; spending half of it on a roundtrip is costly.
+    // Fallback pricing (mid ± buffer) is still aggressive enough for these near-certain outcomes.
+    const ob = (mode === 'pulled' || mode === 'crossed-yes' || mode === 'blowout')
+      ? null
+      : await getOrderbook(ticker, 10, creds).catch(() => null)
+
+    if (mode === 'pulled' || mode === 'dead-path' || mode === 'crossed-yes' || mode === 'blowout' || mode === 'pull-hedge') {
       // ── STRUCTURAL EDGE: taker order — hit the ask immediately ──
       // pulled      → pitcher removed, outcome determined (certainty)
       // crossed-yes → threshold already crossed, YES market hasn't repriced (certainty)
       // blowout     → large deficit late in game, pull imminent (near-certainty)
       // dead-path   → high pitch count, 3+ K gap, market still fat (near-certainty)
+      // pull-hedge  → portfolio insurance NO, sized to offset YES exposure exactly
       // Speed > fees in all cases; maker orders risk sitting unfilled as market reprices.
       // crossed-yes is a YES taker — skips game_reserves (which track NO-side spending)
-      const usesGameReserves = mode !== 'crossed-yes'
-      let capUSD = mode === 'dead-path' ? DEAD_PATH_CAP_USD : PULLED_CAP_USD
+      // pull-hedge skips game_reserves — it's insurance, not a new directional position
+      const usesGameReserves = mode !== 'crossed-yes' && mode !== 'pull-hedge'
+      let capUSD = mode === 'dead-path' ? DEAD_PATH_CAP_USD : FREE_MONEY_PITCHER_CAP
       if (usesGameReserves && pitcherId && userId) {
         const gameRow = await db.one(
           `SELECT id FROM games WHERE date = ? AND (pitcher_home_id = ? OR pitcher_away_id = ?)`,
@@ -305,82 +732,120 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
         capUSD = Math.min(capUSD, Math.max(_kellyBet, 10))  // floor $10, capped by reserve
       }
 
-      // For pulled/crossed-yes (near-certain outcome), the market reprices fast after
-      // the pull is detected. The stale orderbook ask may have already been lifted by
-      // the time our order hits the exchange — leaving us resting below the new ask.
-      // Fix: bid aggressively (ask + 15¢, capped at 97¢) to sweep available depth
-      // even as the market moves. At 97¢ for a ~99% outcome the EV is still strongly +.
-      const AGGRESSIVE_CAP = mode === 'pulled' || mode === 'crossed-yes' ? 97 : 99
-      const AGGRESSIVE_BUFFER = mode === 'pulled' || mode === 'crossed-yes' ? 15 : 2
-      const baseAsk = side === 'NO'
-        ? (ob?.best_no_ask  ?? Math.round(100 - marketMid + 2))
-        : (ob?.best_yes_ask ?? Math.round(marketMid + 2))
-      const askCents = Math.min(AGGRESSIVE_CAP, baseAsk + AGGRESSIVE_BUFFER)
-      const maxByDollars = Math.floor(capUSD / (askCents / 100))
-      const depth        = ob ? availableDepth(ob, side.toLowerCase(), askCents) : maxByDollars
-      finalContracts     = Math.max(1, Math.min(maxByDollars, depth > 0 ? depth : maxByDollars))
-      orderCents         = askCents
-      const expectedProfit = finalContracts * ((100 - askCents) / 100) * 0.93  // after Kalshi fee
+      if (mode === 'pull-hedge') {
+        // Portfolio insurance: contract count and ask price come from _computeHedgePlan (bettor loop).
+        // Use live orderbook ask if available; fall back to hedgeOverride.noAskCents + 2¢ buffer.
+        const liveNoAsk = ob?.best_no_ask ?? ((hedgeOverride?.noAskCents ?? Math.round(100 - marketMid)) + 2)
+        orderCents     = Math.min(99, liveNoAsk + 2)
+        finalContracts = Math.max(1, hedgeOverride?.hedgeContracts ?? 1)
+      } else {
+        // For pulled/crossed-yes (near-certain outcome), the market reprices fast after
+        // the pull is detected. The stale orderbook ask may have already been lifted by
+        // the time our order hits the exchange — leaving us resting below the new ask.
+        // Fix: bid aggressively (ask + 15¢, capped at 97¢) to sweep available depth
+        // even as the market moves. At 97¢ for a ~99% outcome the EV is still strongly +.
+        const AGGRESSIVE_CAP    = mode === 'pulled' || mode === 'crossed-yes' ? 97 : 99
+        const AGGRESSIVE_BUFFER = mode === 'pulled' || mode === 'crossed-yes' ? 15 : 2
+        const baseAsk = side === 'NO'
+          ? (ob?.best_no_ask  ?? Math.round(100 - marketMid + 2))
+          : (ob?.best_yes_ask ?? Math.round(marketMid + 2))
+        const aggAskCents  = Math.min(AGGRESSIVE_CAP, baseAsk + AGGRESSIVE_BUFFER)
+        const maxByDollars = Math.floor(capUSD / (aggAskCents / 100))
+        const depth        = ob ? availableDepth(ob, side.toLowerCase(), aggAskCents) : maxByDollars
+        finalContracts     = Math.max(1, Math.min(maxByDollars, depth > 0 ? depth : maxByDollars))
+        orderCents         = aggAskCents
+      }
+      const expectedProfit = finalContracts * ((100 - orderCents) / 100) * 0.93  // after Kalshi fee
 
-      // API dedup: skip if we already have fills or resting orders on this ticker+side
+      // API dedup: skip if we already have fills or resting orders on this ticker+side.
+      // For time-critical pulled/crossed-yes modes use fills-only (one API call, ~200ms saved).
+      // The window for free-money orders is ~1s; a full fills+resting check burns half of it.
       try {
         const sideKey = side.toLowerCase()
-        const [existingFills, restingOrders] = await Promise.all([
-          getFills({ ticker, limit: 200 }, creds).catch(() => []),
-          listOrders({ ticker, status: 'resting' }, creds).catch(() => []),
-        ])
-        const filledContracts = existingFills.filter(f => f.side === sideKey).reduce((s, f) => s + Number(f.count_fp || 0), 0)
-        const restingContracts = restingOrders.filter(o => o.side === sideKey).reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
-        if (filledContracts + restingContracts > 0) {
-          console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} (${user?.name}) — already ${filledContracts} filled + ${restingContracts} resting on Kalshi, skipping`)
-          return { freeMoneySummary: null, kalshiDedup: true }
+        if (mode === 'pulled' || mode === 'crossed-yes') {
+          const existingFills = await getFills({ ticker, limit: 20 }, creds).catch(() => [])
+          const filledContracts = existingFills.filter(f => f.side === sideKey).reduce((s, f) => s + Number(f.count_fp || 0), 0)
+          if (filledContracts > 0) {
+            console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} (${user?.name}) — ${filledContracts} already filled, skipping`)
+            return { freeMoneySummary: null, kalshiDedup: true }
+          }
+        } else {
+          const [existingFills, restingOrders] = await Promise.all([
+            getFills({ ticker, limit: 200 }, creds).catch(() => []),
+            listOrders({ ticker, status: 'resting' }, creds).catch(() => []),
+          ])
+          const filledContracts = existingFills.filter(f => f.side === sideKey).reduce((s, f) => s + Number(f.count_fp || 0), 0)
+          const restingContracts = restingOrders.filter(o => o.side === sideKey).reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
+          if (filledContracts + restingContracts > 0) {
+            console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} (${user?.name}) — already ${filledContracts} filled + ${restingContracts} resting on Kalshi, skipping`)
+            return { freeMoneySummary: null, kalshiDedup: true }
+          }
         }
-      } catch { /* non-fatal */ }
+      } catch (dedupErr) {
+        console.error(`  [dedup-err] ${pitcherName} ${strike}+ ${side} (${user?.name}) — API dedup check failed: ${dedupErr.message}`)
+      }
 
+      const _liveLockAcquired = await acquireBetLock(TODAY, String(pitcherId ?? pitcherName), strike, side, userId)
+      if (!_liveLockAcquired) {
+        console.log(`  [lock] SKIP ${pitcherName} ${strike}+ ${side} (${user?.name}) — concurrent process holds lock`)
+        return { freeMoneySummary: null, kalshiDedup: true }
+      }
       try {
         const betTag  = mode === 'pulled'     ? '💰 FREE MONEY TAKER'
                       : mode === 'crossed-yes'? '🟢 CROSSED-YES TAKER'
                       : mode === 'blowout'    ? '🏳️ BLOWOUT TAKER'
+                      : mode === 'pull-hedge' ? '🛡️ PULL-HEDGE TAKER'
                       :                        '🚫 DEAD PATH TAKER'
         const logTag  = mode === 'pulled'     ? 'FREE MONEY'
                       : mode === 'crossed-yes'? 'CROSSED YES'
                       : mode === 'blowout'    ? 'BLOWOUT'
+                      : mode === 'pull-hedge' ? 'PULL HEDGE'
                       :                        'DEAD PATH'
-        let placed  = await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents, creds)
+        let placed  = await placeOrder(ticker, side.toLowerCase(), finalContracts, orderCents, creds)
         let placedOrder = placed?.order ?? placed
         orderId    = placedOrder?.order_id ?? null
         initFilled = Math.round(parseFloat(placedOrder?.fill_count_fp ?? '0'))
+        _trackKalshiResult(true, getAllWebhooks.bind(null, db)).catch(() => {})
 
-        // If 0 fills immediately and this is a near-certain structural edge, cancel and
-        // retry at 97¢ — the original ask was likely stale and the market moved past us.
-        if (initFilled === 0 && (mode === 'pulled' || mode === 'crossed-yes') && orderId && AGGRESSIVE_CAP > askCents) {
-          console.log(`  [retry] ${pitcherName} ${strike}+ ${side} — 0 fills @ ${askCents}¢, cancelling and retrying @ ${AGGRESSIVE_CAP}¢`)
-          await cancelOrder(orderId, creds).catch(() => {})
-          try {
-            placed      = await placeOrder(ticker, side.toLowerCase(), finalContracts, AGGRESSIVE_CAP, creds)
-            placedOrder = placed?.order ?? placed
-            orderId     = placedOrder?.order_id ?? null
-            initFilled  = Math.round(parseFloat(placedOrder?.fill_count_fp ?? '0'))
-            orderCents  = AGGRESSIVE_CAP
-            console.log(`  [retry] resubmitted @ ${AGGRESSIVE_CAP}¢ — filled=${initFilled}`)
-            db.saveLog({ tag: 'RETRY', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} retry @ ${AGGRESSIVE_CAP}¢ filled=${initFilled}`, pitcher: pitcherName, strike, side })
-          } catch (retryErr) {
-            console.error(`  [retry-failed] ${pitcherName} ${strike}+ ${side}: ${retryErr.message}`)
+        // If 0 fills immediately for near-certain structural modes, cancel and retry at 97¢.
+        // Not applicable for pull-hedge (insurance order — no aggressive retry needed).
+        if (initFilled === 0 && (mode === 'pulled' || mode === 'crossed-yes') && orderId) {
+          const RETRY_CAP = 97
+          if (RETRY_CAP > orderCents) {
+            console.log(`  [retry] ${pitcherName} ${strike}+ ${side} — 0 fills @ ${orderCents}¢, cancelling and retrying @ ${RETRY_CAP}¢`)
+            const originalOrderId = orderId
+            const cancelled = await cancelOrder(orderId, creds).then(() => true).catch(() => false)
+            orderId = null
+            try {
+              placed      = await placeOrder(ticker, side.toLowerCase(), finalContracts, RETRY_CAP, creds)
+              placedOrder = placed?.order ?? placed
+              orderId     = placedOrder?.order_id ?? null
+              initFilled  = Math.round(parseFloat(placedOrder?.fill_count_fp ?? '0'))
+              orderCents  = RETRY_CAP
+              console.log(`  [retry] resubmitted @ ${RETRY_CAP}¢ — filled=${initFilled}`)
+              db.saveLog({ tag: 'RETRY', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} retry @ ${RETRY_CAP}¢ filled=${initFilled}`, pitcher: pitcherName, strike, side })
+            } catch (retryErr) {
+              console.error(`  [retry-failed] ${pitcherName} ${strike}+ ${side}: ${retryErr.message} (original ${cancelled ? 'cancelled' : 'cancel-failed'}: ${originalOrderId})`)
+              db.saveLog({ tag: 'ERROR', level: 'error', msg: `RETRY FAILED [${logTag}] ${pitcherName} ${strike}+ ${side} — original ${cancelled ? 'cancelled' : 'may still be resting'} ${originalOrderId}`, pitcher: pitcherName, strike, side })
+            }
           }
         }
 
         console.log(`\n  [${betTag}] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${orderCents}¢  filled=${initFilled}  profit≈+$${expectedProfit.toFixed(2)}`)
         db.saveLog({ tag: 'BET', msg: `[${logTag}] ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${orderCents}¢ taker  filled=${initFilled}  profit≈+$${expectedProfit.toFixed(2)}`, pitcher: pitcherName, strike, side })
-        freeMoneySummary = { askCents, expectedProfit, yesPrice: Math.round(100 - askCents) }
+        freeMoneySummary = { askCents: orderCents, expectedProfit, yesPrice: Math.round(100 - orderCents) }
+        // Debit available_pool for structural taker orders too (including pull-hedge)
+        const structuralCommitted = finalContracts * (orderCents / 100)
+        addCommitted(TODAY, structuralCommitted).catch(() => {})
 
-        // Track spending against this pitcher's reserve
-        if (pitcherId && userId) {
+        // Track spending against this pitcher's reserve — skipped for pull-hedge (insurance, not directional)
+        if (usesGameReserves && pitcherId && userId) {
           const gameRow2 = await db.one(
             `SELECT id FROM games WHERE date = ? AND (pitcher_home_id = ? OR pitcher_away_id = ?)`,
             [TODAY, String(pitcherId), String(pitcherId)],
           ).catch(() => null)
           if (gameRow2) {
-            const spent = finalContracts * (askCents / 100)
+            const spent = finalContracts * (orderCents / 100)
             await db.run(
               `UPDATE game_reserves SET used_usd = used_usd + ?
                WHERE game_id = ? AND pitcher_id = ? AND bet_date = ? AND user_id = ?`,
@@ -389,29 +854,34 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
           }
         }
       } catch (err) {
+        _trackKalshiResult(false, getAllWebhooks.bind(null, db)).catch(() => {})
         console.error(`  [ORDER FAILED] ${user?.name} ${pitcherName} ${strike}+ ${side}: ${err.message}`)
         db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED [FREE MONEY] ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
+        alertError('liveMonitor:orderFailed', err, {
+          type: 'FREE MONEY', user: user?.name, pitcher: pitcherName, strike, side,
+        }).catch(() => {})
         return { freeMoneySummary: null, apiFailed: true }
+      } finally {
+        releaseBetLock(TODAY, String(pitcherId ?? pitcherName), strike, side, userId).catch(() => {})
       }
 
     } else {
       // ── NORMAL EDGE: maker at ask-1¢, 75% fee discount ──
       // Check budget cap for normal bets only; pulled bets are capped by PULLED_CAP_USD above.
-      let bankroll = user?.starting_bankroll || 1000
-      if (user?.kalshi_key_id) {
-        try {
-          const kb = await getKalshiBalance(creds)
-          bankroll = kb.balance_usd
-        } catch {}
-      }
+      // Per-user pool: user's own Kalshi balance minus their own committed capital.
+      const availPool = await getPerUserAvailablePool(TODAY, userId).catch(() => 0)
+      const bankroll  = availPool > 0 ? availPool : (user?.starting_bankroll || 1000)
       const cap   = bankroll * (user?.live_daily_risk_pct ?? user?.daily_risk_pct ?? 0.20)
       const spent = await db.one(
         `SELECT COALESCE(SUM(capital_at_risk), 0) as total FROM ks_bets WHERE bet_date=? AND live_bet=1 AND user_id=? AND result IS NULL`,
         [TODAY, userId],
       )
-      const thisCap = capitalAtRisk(betSize, Math.round(side === 'YES' ? marketMid : 100 - marketMid) / 100, side)
+      // betSize is USD cash to spend (not contract-notional). Capital at risk = cash committed.
+      // Previously used capitalAtRisk(betSize, price, side) which interpreted betSize as notional and
+      // returned betSize × price — undercounting cheap-side bets by 1/price (catastrophic at <5¢ markets).
+      const thisCap = betSize
       if ((spent?.total || 0) + thisCap > cap) {
-        console.log(`  [CAP] ${user?.name} ${pitcherName} ${strike}+ ${side} skipped — live cap $${cap.toFixed(0)} reached`)
+        console.log(`  [CAP] ${user?.name} ${pitcherName} ${strike}+ ${side} skipped — live cap $${cap.toFixed(0)} reached (used=$${(spent?.total || 0).toFixed(0)}, this=$${thisCap.toFixed(0)})`)
         return { freeMoneySummary: null, budget: true }
       }
 
@@ -427,8 +897,16 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
           finalContracts = depth
         }
       }
-      const makerCents = Math.max(1, askCents - 1)
-      orderCents = makerCents
+      orderCents = askCents
+      // Refine contract count using actual ask price.
+      finalContracts = Math.max(1, Math.round((betSize * 100) / askCents))
+      if (ob) {
+        const depth = availableDepth(ob, side.toLowerCase(), askCents)
+        if (depth > 0 && finalContracts > depth) {
+          console.log(`  [depth] ${pitcherName} ${strike}+ ${side}: capping ${finalContracts}→${depth}c`)
+          finalContracts = depth
+        }
+      }
 
       // API dedup: skip if we already have fills or resting orders on this ticker+side
       try {
@@ -443,23 +921,39 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
           console.log(`  [dedup] ${pitcherName} ${strike}+ ${side} (${user?.name}) — already ${filledContracts} filled + ${restingContracts} resting on Kalshi, skipping`)
           return { freeMoneySummary: null, kalshiDedup: true }
         }
-      } catch { /* non-fatal */ }
+      } catch (dedupErr) {
+        console.error(`  [dedup-err] ${pitcherName} ${strike}+ ${side} (${user?.name}) — API dedup check failed: ${dedupErr.message}`)
+      }
 
+      const _normalLockAcquired = await acquireBetLock(TODAY, String(pitcherId ?? pitcherName), strike, side, userId)
+      if (!_normalLockAcquired) {
+        console.log(`  [lock] SKIP ${pitcherName} ${strike}+ ${side} (${user?.name}) — concurrent process holds lock`)
+        return { freeMoneySummary: null, kalshiDedup: true }
+      }
       try {
-        const placed2     = await placeOrder(ticker, side.toLowerCase(), finalContracts, makerCents, creds)
+        const placed2      = await placeOrder(ticker, side.toLowerCase(), finalContracts, askCents, creds)
         const placedOrder2 = placed2?.order ?? placed2
         orderId    = placedOrder2?.order_id ?? null
         initFilled = Math.round(parseFloat(placedOrder2?.fill_count_fp ?? '0'))
-        console.log(`  [LIVE MAKER] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`)
-        db.saveLog({ tag: 'BET', msg: `${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${makerCents}¢ (ask ${askCents}¢)`, pitcher: pitcherName, strike, side })
+        // Do NOT cancel on 0 initial fills — Kalshi fills are async; WS delivers the confirmation.
+        console.log(`  [LIVE TAKER] ${user?.name} ${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢`)
+        db.saveLog({ tag: 'BET', msg: `${pitcherName} ${strike}+ ${side} ${finalContracts}c @ ${askCents}¢ taker`, pitcher: pitcherName, strike, side })
+        // Debit available_pool — keeps bankrollState in sync so next live bet sees correct pool
+        const liveCommitted = finalContracts * (askCents / 100)
+        addCommitted(TODAY, liveCommitted).catch(() => {})
       } catch (err) {
         console.error(`  [ORDER FAILED] ${user?.name} ${pitcherName} ${strike}+ ${side}: ${err.message}`)
         db.saveLog({ tag: 'ERROR', level: 'error', msg: `ORDER FAILED ${pitcherName} ${strike}+ ${side}: ${err.message}`, pitcher: pitcherName, strike, side })
+        alertError('liveMonitor:orderFailed', err, {
+          type: 'NORMAL', user: user?.name, pitcher: pitcherName, strike, side,
+        }).catch(() => {})
         return { freeMoneySummary: null, apiFailed: true }
+      } finally {
+        releaseBetLock(TODAY, String(pitcherId ?? pitcherName), strike, side, userId).catch(() => {})
       }
     }
   } else {
-    const _modeLabel = { pulled: '💰 FREE MONEY', 'crossed-yes': '🟢 CROSSED-YES', blowout: '🏳️ BLOWOUT', 'dead-path': '🚫 DEAD PATH' }[mode] ?? 'EDGE'
+    const _modeLabel = { pulled: '💰 FREE MONEY', 'crossed-yes': '🟢 CROSSED-YES', blowout: '🏳️ BLOWOUT', 'early-blowout': '🏳️ EARLY BLOWOUT', 'dead-path': '🚫 DEAD PATH', 'late-inning-no': '🕙 LATE NO', 'stack-yes': '📚 STACK YES', 'pull-hedge': '🛡️ PULL-HEDGE' }[mode] ?? 'EDGE'
     console.log(`  [PAPER ${_modeLabel}] ${user?.name ?? 'unknown'} ${pitcherName} ${strike}+ ${side} @ ${marketMid}¢  edge=${(edge*100).toFixed(1)}¢  size=$${betSize}`)
     if (mode === 'pulled' || mode === 'crossed-yes' || mode === 'blowout' || mode === 'dead-path') {
       const askCents = side === 'NO' ? Math.round(100 - marketMid) : Math.round(marketMid)
@@ -500,7 +994,14 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     live_score:           liveScore    ?? null,
   }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
 
-  return { freeMoneySummary, finalContracts, orderCents }
+  const insertedBet = await db.one(
+    `SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=1 AND user_id=? ORDER BY id DESC LIMIT 1`,
+    [TODAY, pitcherName, strike, side, userId],
+  ).catch(() => null)
+  const betId = insertedBet?.id ?? null
+
+  const orderStatus = orderId ? (initFilled >= finalContracts ? 'filled' : 'resting') : null
+  return { freeMoneySummary, finalContracts, orderCents, betId, orderStatus, initFilled }
 }
 
 // ── Settle a finished game and post Discord summary ───────────────────────────
@@ -534,7 +1035,7 @@ async function settleAndNotifyGame(game, boxData) {
     // Pre-game resting orders that never filled — void them, no real money was risked.
     if (!bet.live_bet && !bet.filled_contracts) {
       await db.run(
-        `UPDATE ks_bets SET result='void', pnl=0, settled_at=? WHERE id=?`,
+        `UPDATE ks_bets SET result='void', pnl=0, settled_at=? WHERE id=? AND result IS NULL`,
         [now, bet.id],
       )
       continue
@@ -545,7 +1046,7 @@ async function settleAndNotifyGame(game, boxData) {
     if (bet.live_bet && !bet.filled_contracts) {
       console.log(`[settle] VOID (no fill) ${bet.pitcher_name} ${bet.strike}+ ${bet.side} live_bet — order ${bet.order_id ?? 'unknown'} never filled`)
       await db.run(
-        `UPDATE ks_bets SET result='void', pnl=0, order_status='cancelled', settled_at=? WHERE id=?`,
+        `UPDATE ks_bets SET result='void', pnl=0, order_status='cancelled', settled_at=? WHERE id=? AND result IS NULL`,
         [now, bet.id],
       )
       continue
@@ -591,14 +1092,15 @@ async function settleAndNotifyGame(game, boxData) {
     }
     if (pnl == null) {
       const fillFraction = fillPrice / 100
-      const KALSHI_FEE   = 0.07
+      // Fee is paid at fill time; settled P&L = contracts × (1-fill) for wins.
+      // This matches daily_pnl_events (revenue - costBasis, no settlement fee).
       pnl = won
-        ? contracts * (1 - fillFraction) * (1 - KALSHI_FEE * fillFraction)
+        ? contracts * (1 - fillFraction)
         : -contracts * fillFraction
     }
 
     await db.run(
-      `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=?`,
+      `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
       [actualKs, won ? 'win' : 'loss', now, Math.round(pnl * 100) / 100, bet.id],
     )
     // Zero out any provisional debit for this bet — real cash now credited by Kalshi
@@ -615,6 +1117,14 @@ async function settleAndNotifyGame(game, boxData) {
   db.saveLog({ tag: 'SETTLED', msg: `${gameLabel}  ${wins}W/${losses}L  ${gamePnl >= 0 ? '+' : ''}$${gamePnl.toFixed(2)}`, pnl: gamePnl })
 
   await notifyGameResult({ game: gameLabel, bets: settled, gamePnl }, await getAllWebhooks(db))
+
+  // Backfill actual_ks onto market_snapshots for all pitchers settled this game
+  const uniquePitchers = [...new Map(settled.map(b => [b.pitcher_id, b])).values()]
+  for (const b of uniquePitchers) {
+    if (b.pitcher_id && b.actual_ks != null) {
+      backfillOutcome({ pitcherId: b.pitcher_id, gameDate: TODAY, actualKs: b.actual_ks }).catch(() => {})
+    }
+  }
 
   // Rebalance pending allocations now that the account balance has changed
   await rebalancePendingAllocations().catch(() => {})
@@ -716,15 +1226,9 @@ async function rebalancePendingAllocations() {
     const users = await db.all(`SELECT * FROM users WHERE active_bettor = 1`)
 
     for (const user of users) {
-      // Fetch live Kalshi balance
-      let bankroll = user.starting_bankroll || 1000
-      if (user.kalshi_key_id) {
-        try {
-          const creds = { keyId: user.kalshi_key_id, privateKey: user.kalshi_private_key }
-          const kb = await getKalshiBalance(creds)
-          bankroll = kb.balance_usd
-        } catch {}
-      }
+      // Per-user pool: user's own Kalshi balance minus their own committed capital.
+      const availPool = await getPerUserAvailablePool(TODAY, user.id).catch(() => 0)
+      const bankroll  = availPool > 0 ? availPool : (user.starting_bankroll || 1000)
 
       const dailyBudget = bankroll * (user.live_daily_risk_pct ?? user.daily_risk_pct ?? 0.20)
 
@@ -895,6 +1399,12 @@ async function convertStaleMakers() {
           [fillPriceCents, filledCount || null, bet.id],
         )
         console.log(`\n[live] ✓ stale-check: ${bet.pitcher_name} ${bet.side} ${bet.strike}+ filled ${filledCount}c @ ${fillPriceCents ?? '?'}¢ (maker)`)
+        // Apr 28 — REMOVED bogus notifyLiveBet call. The order was a PRE-GAME maker;
+        // routing it through the in-game template produced misleading Discord embeds
+        // ("[LIVE] In-game bet ... nullK · nullIP · nullp · betting hit 6+") for bets
+        // that hadn't started yet. Pre-game bets already get their notification when
+        // originally placed via ksBets.js — no second notification needed when the
+        // resting maker eventually fills.
         continue
       }
 
@@ -943,7 +1453,9 @@ async function convertStaleMakers() {
 
       // Edge still good — take the market
       const takerCents    = Math.min(99, Math.round(currentAsk * 100) + 1)
-      const computedContracts = Math.max(1, Math.round(bet.bet_size ?? 100))
+      // bet.bet_size is in USD dollars — convert to contracts at the current taker price.
+      // Previously this used bet.bet_size directly as contracts (units bug).
+      const computedContracts = Math.max(1, Math.round(((bet.bet_size ?? 10) * 100) / takerCents))
       // Deduct already-filled contracts so we don't over-expose beyond original Kelly intent
       const alreadyFilled  = bet.filled_contracts ?? 0
       const takerContracts = Math.max(0, computedContracts - alreadyFilled)
@@ -1066,10 +1578,16 @@ async function manageRestingOrder(bet, { currentPitches, currentIP, market, cred
   }
   try {
     await cancelOrder(bet.order_id, creds)
-    const contracts = Math.max(1, Math.round(bet.bet_size ?? 1))  // bet_size stores contract count
+    // bet.bet_size is USD cash to spend (NOT contract count). Convert to contracts at the
+    // new taker price, then subtract any already-filled portion so we don't double-buy.
+    // Apr 28 fix — previously `Math.round(bet.bet_size)` was treated as contract count,
+    // creating $500-contract resting orders that never filled (Messick 7+/9+/9+, Kochanowicz 6+).
     const takerPrice = bet.side === 'YES'
       ? Math.min(99, market.yes_ask + 1)
       : Math.min(99, market.no_ask  + 1)
+    const intendedAtTaker = Math.max(1, Math.round((Number(bet.bet_size) || 10) * 100 / takerPrice))
+    const alreadyFilled   = Number(bet.filled_contracts) || 0
+    const contracts       = Math.max(1, intendedAtTaker - alreadyFilled)
     const result = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, takerPrice, creds)
     const newOrderId = result?.order?.order_id ?? result?.order_id
     await db.run(
@@ -1168,7 +1686,7 @@ async function cancelPreGameOrders(game) {
         console.log(`  ⚠ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — partial fill (${bet.filled_contracts}c), cancelling resting portion only`)
       } else {
         await db.run(
-          `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=? WHERE id=?`,
+          `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=? WHERE id=? AND result IS NULL`,
           [new Date().toISOString(), bet.id],
         )
         console.log(`  ✗ ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — pre-game order cancelled at first pitch`)
@@ -1189,17 +1707,13 @@ async function initGameReserves(game) {
   const pitcherIds = [game.pitcher_home_id, game.pitcher_away_id].filter(Boolean)
 
   for (const user of users) {
-    const creds = { keyId: user.kalshi_key_id, privateKey: user.kalshi_private_key }
-    let bankroll = user.starting_bankroll || 1000
-    if (user.kalshi_key_id) {
-      try {
-        const kb = await getKalshiBalance(creds)
-        bankroll = kb.balance_usd
-      } catch {}
-    }
-    // Reserve 25% of free-money pool per pitcher (free_money_risk_pct defaults to 20%)
-    const freeMoneyCap = bankroll * (user.free_money_risk_pct ?? 0.20)
-    const reservePerPitcher = freeMoneyCap * 0.25
+    const availPool = await getPerUserAvailablePool(TODAY, user.id).catch(() => 0)
+    const bankroll  = availPool > 0 ? availPool : (user.starting_bankroll || 1000)
+    // Scale reserve to bankroll: (free_money_risk_pct × bankroll) ÷ pitcher_count,
+    // capped at FREE_MONEY_PITCHER_CAP so large accounts don't over-reserve.
+    const freeMoneyPool     = bankroll * (user.free_money_risk_pct ?? 0.20)
+    const pitcherCount      = Math.max(1, pitcherIds.length)
+    const reservePerPitcher = Math.min(FREE_MONEY_PITCHER_CAP, freeMoneyPool / pitcherCount)
 
     for (const pitcherId of pitcherIds) {
       await db.run(
@@ -1221,6 +1735,7 @@ async function initGameReserves(game) {
 
 async function main() {
   await db.migrate()
+  await seedDefaults()
   await loadDailyLoss()
   await reloadDailyNetPnl()
 
@@ -1234,9 +1749,7 @@ async function main() {
   )
 
   if (!preGameBets.length) {
-    console.log(`[live] No pre-game bets found for ${TODAY} — run dailyRun.sh first`)
-    await db.close()
-    return
+    console.log(`[live] ⚠  No pre-game bets found for ${TODAY} — watching for free money / in-game edge only`)
   }
 
   // Load recent starts for E[BF] and pitch count
@@ -1288,14 +1801,62 @@ async function main() {
     })
   }
 
+  // Declare allPitcherIds early so watch-only loop can add to it
+  const allPitcherIds = new Set(preGameBets.map(b => b.pitcher_id).filter(Boolean))
+
+  // ── Supplement with watch-only pitchers (no pre-game bet, but went through pipeline) ──
+  // Covers: no-edge pitchers, missed bets (game-time mismatch, late schedules, etc.)
+  // These can still trigger free money, dead-path, and in-game edge bets.
+  const watchOnlyRows = await db.all(
+    `SELECT pitcher_id, pitcher_name, game_id, game_label, lambda, edges_json
+       FROM decision_pipeline
+      WHERE bet_date = ?
+        AND (final_action = 'no_edge' OR final_action IS NULL)
+        AND lambda IS NOT NULL AND lambda > 0`,
+    [TODAY],
+  ).catch(() => [])
+
+  for (const w of watchOnlyRows) {
+    if (pitcherContext.has(w.pitcher_id)) continue  // already loaded from pre-game bets
+
+    let baseTicker = null
+    try {
+      const edges = typeof w.edges_json === 'string' ? JSON.parse(w.edges_json) : (w.edges_json ?? [])
+      const firstTicker = edges?.[0]?.ticker
+      if (firstTicker) baseTicker = firstTicker.split('-').slice(0, -1).join('-')
+    } catch { /* malformed edges_json — baseTicker stays null, skipped below */ }
+    if (!baseTicker) continue  // no market data — can't query Kalshi for this pitcher
+
+    const starts      = startsByPitcher.get(String(w.pitcher_id)) || []
+    const pitchStarts = starts.filter(s => s.pitches > 0)
+    const avgPitches  = pitchStarts.length ? pitchStarts.reduce((s, r) => s + r.pitches, 0) / pitchStarts.length : 90
+    const ipStarts    = starts.filter(s => s.ip > 0)
+    const avgIp       = ipStarts.length ? ipStarts.reduce((s, r) => s + Number(r.ip), 0) / ipStarts.length : 5.2
+    const bfStarts    = starts.filter(s => s.bf > 0)
+    const avgBF       = bfStarts.length ? bfStarts.reduce((s, r) => s + r.bf, 0) / bfStarts.length : 22
+    const pK_blended  = avgBF > 0 ? w.lambda / avgBF : LEAGUE_K_PCT
+
+    const numId = Number(w.pitcher_id)
+    pitcherContext.set(numId, {
+      pitcherName: w.pitcher_name,
+      game:        w.game_label,
+      lambda:      w.lambda,
+      pK_blended,
+      avgPitches,
+      avgBF,
+      avgIp,
+      baseTicker,
+    })
+    allPitcherIds.add(numId)
+    console.log(`[live] 👁  watch-only: ${w.pitcher_name} (${w.game_label ?? w.game_id}) λ=${Number(w.lambda).toFixed(2)} — free money + in-game edge eligible`)
+  }
+
   // Load today's game IDs
   const games = await db.all(
     `SELECT id, team_home, team_away, pitcher_home_id, pitcher_away_id, game_time
        FROM games WHERE date = ?`,
     [TODAY],
   )
-
-  const allPitcherIds = new Set(preGameBets.map(b => b.pitcher_id).filter(Boolean))
 
   console.log(`[live] Monitoring ${allPitcherIds.size} pitchers across ${games.length} games`)
   console.log(`[live] Mode: ${LIVE ? '🔴 LIVE TRADING' : '📄 PAPER TRADING'} | Min edge: ${(LIVE_EDGE*100).toFixed(0)}¢ | Daily loss limit: $${LOSS_LIMIT}`)
@@ -1329,12 +1890,15 @@ async function main() {
   process.on('SIGINT',  () => { clearInterval(_hbTimer); writeHeartbeat('offline').finally(() => process.exit(0)) })
   process.on('SIGTERM', () => { clearInterval(_hbTimer); writeHeartbeat('offline').finally(() => process.exit(0)) })
 
+  // Kalshi ticker monitor is started after activeBettors is loaded (below)
+
   // Track which in-game bets we've already placed this session (avoid dups)
   const placed = new Set()
-  // Hydrate from DB so restarts don't re-place bets already submitted this session
+  // Hydrate from DB so restarts don't re-place bets already submitted this session.
+  // Include paper bets (order_status IS NULL for paper) so paper mode doesn't re-fire on restart.
   const todayLiveBets = await db.all(
     `SELECT user_id, pitcher_id, strike FROM ks_bets
-     WHERE bet_date = ? AND live_bet = 1 AND order_status IS NOT NULL`,
+     WHERE bet_date = ? AND live_bet = 1 AND (order_status IS NOT NULL OR paper = 1)`,
     [TODAY],
   ).catch(() => [])
   for (const b of todayLiveBets) {
@@ -1346,9 +1910,21 @@ async function main() {
   const covered = new Set()
   const dead    = new Set()
   const noLost  = new Set()   // NO bets already at/past threshold — settled as loss mid-game
+  const noWon   = new Set()   // NO bets where pitcher pulled below threshold — settled as win mid-game
   const oneAway = new Set()
+  // Notification dedup — fire Discord/log once per event (pitcher+strike), not once per bet row.
+  // Two active bettors produce two bet rows for the same event; without this, every COVER/DEAD
+  // fires 2–4× producing identical Discord alerts.
+  const coveredNotified = new Set()   // `${pitcherId}:${strike}`
+  const deadNotified    = new Set()   // `${pitcherId}:${strike}`
+  const noLostNotified  = new Set()   // `${pitcherId}:${strike}`
+  const noWonNotified   = new Set()   // `${pitcherId}:${strike}`
+  const oneAwayNotified = new Set()   // `${pitcherId}:${strike}`
   const lastKsMap = new Map()  // pitcherId → last confirmed K count (delta detection)
   const freeMoneySentByUserPitcher = new Map()  // userId → Map(pitcherId → USD risked on free-money takers)
+  // Apr 28 — per-pitcher cumulative spend on model-driven modes (high-conviction / stack-yes / dead-path).
+  // Map(userId → Map(pitcherId → USD)). Prevents stacking $200 caps across 5 strikes for one pitcher.
+  const hcSentByUserPitcher = new Map()
   const _scratchCandidates = new Map()       // `${pitcherId}:${gameId}` → { seenAt } (2-poll scratch confirmation)
   const _scratchFired = new Set()            // `${pitcherId}:${gameId}` — scratch NO orders already placed
 
@@ -1389,6 +1965,20 @@ async function main() {
   `).catch(() => {})
   await db.run(`ALTER TABLE game_reserves ADD COLUMN provisional_usd REAL NOT NULL DEFAULT 0`).catch(() => {})
 
+  // manual_balance_adjustments: records deposits/withdrawals made mid-day so the
+  // balance-delta P&L calculation can subtract them (they inflate the apparent balance
+  // without reflecting trading gains/losses).
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS manual_balance_adjustments (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id     INTEGER NOT NULL,
+      amount_usd  REAL NOT NULL,
+      note        TEXT,
+      created_at  TEXT NOT NULL
+    )
+  `).catch(() => {})
+
+
   const _settledGames      = new Set()  // game_id
   const _preGameCancelled  = new Set()  // game_id
   const _notCurrentSince   = new Map()  // pitcherId → { ip, ks, seenAt, gameId }
@@ -1411,6 +2001,45 @@ async function main() {
         }
       }
       console.log(`[live] Monitor state loaded: ${_settledGames.size} settled, ${_preGameCancelled.size} pre-game cancelled, ${_notCurrentSince.size} possible-pull tracked`)
+
+      // Hydrate freeMoneySentByUserPitcher from today's DB so the per-threshold cap still
+      // applies after a liveMonitor restart (the in-memory Map resets on every cold start).
+      const fmRows = await db.all(
+        `SELECT user_id, pitcher_id, strike, fill_price, filled_contracts
+         FROM ks_bets
+         WHERE bet_date = ? AND live_bet = 1 AND paper = 0
+           AND bet_mode IN ('pulled', 'crossed-yes', 'blowout', 'early-blowout', 'late-inning-no')
+           AND filled_contracts > 0`,
+        [TODAY],
+      ).catch(() => [])
+      for (const row of fmRows) {
+        const capKey = `${row.pitcher_id}-${row.strike}`
+        const spent  = row.filled_contracts * (row.fill_price / 100)
+        if (!freeMoneySentByUserPitcher.has(row.user_id)) freeMoneySentByUserPitcher.set(row.user_id, new Map())
+        const bMap = freeMoneySentByUserPitcher.get(row.user_id)
+        bMap.set(capKey, (bMap.get(capKey) ?? 0) + spent)
+      }
+      if (fmRows.length > 0) {
+        console.log(`[live] Free-money cap hydrated: ${fmRows.length} prior bet(s) across ${freeMoneySentByUserPitcher.size} bettor(s)`)
+      }
+
+      // Hydrate hcSentByUserPitcher (high-conviction per-pitcher cap) from today's DB.
+      const hcRows = await db.all(
+        `SELECT user_id, pitcher_id, capital_at_risk
+         FROM ks_bets
+         WHERE bet_date = ? AND live_bet = 1 AND paper = 0
+           AND bet_mode IN ('high-conviction', 'stack-yes', 'dead-path')
+           AND capital_at_risk > 0`,
+        [TODAY],
+      ).catch(() => [])
+      for (const row of hcRows) {
+        if (!hcSentByUserPitcher.has(row.user_id)) hcSentByUserPitcher.set(row.user_id, new Map())
+        const bMap = hcSentByUserPitcher.get(row.user_id)
+        bMap.set(row.pitcher_id, (bMap.get(row.pitcher_id) ?? 0) + Number(row.capital_at_risk))
+      }
+      if (hcRows.length > 0) {
+        console.log(`[live] HC pitcher-cap hydrated: ${hcRows.length} prior bet(s) across ${hcSentByUserPitcher.size} bettor(s)`)
+      }
     } catch (err) {
       console.warn('[live] Could not load monitor_state:', err.message)
     }
@@ -1479,11 +2108,10 @@ async function main() {
   console.log('[live] Checking for games that finished before monitor started...')
   for (const game of games) {
     try {
-      const [ls, box] = await Promise.all([
-        mlbGet(`${MLB_BASE}/game/${game.id}/linescore?fields=${LS_FIELDS}`),
-        mlbGet(`${MLB_BASE}/game/${game.id}/boxscore?fields=${BOX_FIELDS}`),
-      ])
-      if (ls?.abstractGameState === 'Final' && !settledGames.has(game.id)) {
+      const feed = await mlbFeedLive(game.id)
+      const abstractGameState = feed?.gameData?.status?.abstractGameState ?? null
+      const box = feed?.liveData?.boxscore ?? null
+      if (abstractGameState === 'Final' && !settledGames.has(game.id)) {
         await settledGames.add(game.id)
         await reconcileLiveFills(game).catch(() => {})
         await settleAndNotifyGame(game, box)
@@ -1501,38 +2129,205 @@ async function main() {
      FROM users WHERE active_bettor=1 ORDER BY id`,
   )
 
+  let activeBettingRules = await getRules().catch(() => ({}))
+
+  // ── Kalshi ticker monitor — parallel pull-signal source ──────────────────
+  // Subscribes to YES market tickers for today's open bets. When another trader
+  // watching TV sees a pull and reprices, the YES mid drops sharply — we detect
+  // that 15–30s before the MLB API boxscore updates and trigger an urgent cycle.
+  // Apr 28 — `tickerWs` and `tickerToPitcher` lifted to outer scope so the pitcher
+  // refresh loop (R1 fix) can extend the WS subscription with late-added tickers.
+  let tickerWs = null
+  const tickerToPitcher = new Map()
+  ;(async () => {
+    try {
+      const bettor = activeBettors.find(b => b.kalshi_key_id && b.paper === 0)
+      if (!bettor) return
+      const openYesBets = await db.all(
+        `SELECT DISTINCT pitcher_id, ticker FROM ks_bets
+         WHERE bet_date=? AND side='YES' AND result IS NULL AND ticker IS NOT NULL`,
+        [TODAY],
+      )
+      if (!openYesBets.length) return
+      for (const b of openYesBets) tickerToPitcher.set(b.ticker, String(b.pitcher_id))
+      const marketTickers = openYesBets.map(b => b.ticker)
+      console.log(`[live] Kalshi ticker WS: watching ${marketTickers.length} markets for pull signals`)
+      // Track WS connection state for Discord alerting (Apr 28 — Adam asked).
+      // _wsClosedAt set when state leaves 'subscribed'; cleared on return.
+      // Watchdog fires alertWsDown every 60s while still down (deduped 3 min in healthAlerts).
+      let _wsClosedAt = null
+      const _wsWatchdog = setInterval(async () => {
+        if (_wsClosedAt && Date.now() - _wsClosedAt > 30_000) {
+          const secsDown = (Date.now() - _wsClosedAt) / 1000
+          import('../../lib/healthAlerts.js').then(m =>
+            m.alertWsDown({ source: 'kalshi-ticker', secsDown })
+          ).catch(() => {})
+        }
+      }, 60_000)
+      tickerWs = createKalshiTickerWs({
+        keyId: bettor.kalshi_key_id,
+        privateKey: bettor.kalshi_private_key,
+        marketTickers,
+        onTicker: ({ ticker, yesMid }) => {
+          const pitcherId = tickerToPitcher.get(ticker)
+          if (!pitcherId) return
+          const lastMid = _tickerLastMid.get(ticker)
+          _tickerLastMid.set(ticker, yesMid)
+          if (lastMid == null || lastMid <= 15) return  // no baseline or already near floor
+          const drop = lastMid - yesMid
+          if (drop >= 15 || yesMid <= 8) {
+            const name = pitcherContext.get(pitcherId)?.pitcherName ?? pitcherId
+            console.log(`\n[live] 🚨 KALSHI PULL SIGNAL  ${name}  mid ${lastMid.toFixed(0)}→${yesMid.toFixed(0)}¢`)
+            db.saveLog({ tag: 'KALSHI_SIGNAL', level: 'warn',
+              msg: `Kalshi pull signal: mid ${lastMid.toFixed(0)}→${yesMid.toFixed(0)}¢  drop=${drop.toFixed(0)}¢`,
+              pitcher: name }).catch(() => {})
+            _kalshiPullSignal.add(pitcherId)
+          }
+        },
+        onStatus: (s) => {
+          if (s !== 'subscribed') console.log(`[live] Kalshi ticker WS: ${s}`)
+          if (s === 'subscribed') {
+            // Reconnect — if we tracked a close window, alert with the duration
+            if (_wsClosedAt) {
+              const secsDown = (Date.now() - _wsClosedAt) / 1000
+              if (secsDown > 5) {
+                import('../../lib/healthAlerts.js').then(m =>
+                  m.alertWsDown({ source: 'kalshi-ticker (reconnected after)', secsDown })
+                ).catch(() => {})
+              }
+              _wsClosedAt = null
+            }
+          } else if (s === 'closed' || s === 'connecting') {
+            if (!_wsClosedAt) _wsClosedAt = Date.now()
+          }
+        },
+      })
+      tickerWs.connect()
+    } catch (err) {
+      console.error(`[live] Kalshi ticker monitor failed to start: ${err.message}`)
+    }
+  })()
+
+  function _applyRulesToGlobals(r) {
+    if (r.pulled_cap_usd         != null) PULLED_CAP_USD         = r.pulled_cap_usd
+    if (r.free_money_pitcher_cap != null) FREE_MONEY_PITCHER_CAP = r.free_money_pitcher_cap
+    if (r.dead_path_cap_usd      != null) DEAD_PATH_CAP_USD      = r.dead_path_cap_usd
+    if (r.crossed_yes_max_ask    != null) CROSSED_YES_MAX_ASK    = r.crossed_yes_max_ask
+    if (r.blowout_deficit        != null) BLOWOUT_DEFICIT        = r.blowout_deficit
+    if (r.blowout_inning         != null) BLOWOUT_INNING         = r.blowout_inning
+    if (r.blowout_k_gap          != null) BLOWOUT_K_GAP          = r.blowout_k_gap
+    if (r.pull_pitch_count       != null) PULL_PITCH_COUNT       = r.pull_pitch_count
+    if (r.pull_min_ip            != null) PULL_MIN_IP            = r.pull_min_ip
+    if (r.queue_amend_cents      != null) QUEUE_AMEND_CENTS      = r.queue_amend_cents
+    if (r.live_bayesian_weight_cap != null) LIVE_BAYESIAN_WEIGHT_CAP = r.live_bayesian_weight_cap
+    if (r.pulled_cap_confirmed_usd != null) PULLED_CAP_CONFIRMED_USD = r.pulled_cap_confirmed_usd
+  }
+  _applyRulesToGlobals(activeBettingRules)
+
   let iteration = 0
   while (true) {
-    // Refresh active bettors periodically in case creds/paper flag changed
+    // Refresh active bettors and rules periodically in case config changed
     if (iteration > 0 && iteration % 50 === 0) {
       activeBettors = await db.all(
         `SELECT id, name, paper, kalshi_key_id, kalshi_private_key, starting_bankroll, daily_risk_pct, live_daily_risk_pct, free_money_risk_pct, kalshi_balance
          FROM users WHERE active_bettor=1 ORDER BY id`,
       ).catch(() => activeBettors)
+      invalidateRulesCache()
+      activeBettingRules = await getRules().catch(() => activeBettingRules)
+      _applyRulesToGlobals(activeBettingRules)
     }
+
+    // Refresh pitcher list every 10 iterations — picks up pre-game bets placed by the pipeline
+    // after the monitor started. Without this, pitchers whose bets are placed post-startup
+    // (lineup-gated pipeline fires 15min–2h after monitor starts) are never tracked.
+    if (iteration % 10 === 0) {
+      try {
+        const newBets = await db.all(
+          `SELECT DISTINCT pitcher_id, pitcher_name, ticker, lambda, game FROM ks_bets
+           WHERE bet_date = ? AND live_bet = 0`,
+          [TODAY],
+        )
+        const newWsTickers = []   // collect new tickers for WS resub (R1 fix)
+        for (const b of newBets) {
+          const numId = Number(b.pitcher_id)
+          if (!numId || allPitcherIds.has(numId)) continue
+          const starts     = startsByPitcher.get(String(b.pitcher_id)) || []
+          const pitchS     = starts.filter(s => s.pitches > 0)
+          const ipS        = starts.filter(s => s.ip > 0)
+          const bfS        = starts.filter(s => s.bf > 0)
+          const avgPitches = pitchS.length ? pitchS.reduce((s, r) => s + r.pitches, 0) / pitchS.length : 90
+          const avgIp      = ipS.length    ? ipS.reduce((s, r) => s + Number(r.ip), 0) / ipS.length : 5.2
+          const avgBF      = bfS.length    ? bfS.reduce((s, r) => s + r.bf, 0) / bfS.length : 22
+          const pK_blended = avgBF > 0 ? (b.lambda ?? 0) / avgBF : LEAGUE_K_PCT
+          pitcherContext.set(numId, {
+            pitcherName: b.pitcher_name,
+            game:        b.game,
+            lambda:      b.lambda,
+            pK_blended,
+            avgPitches,
+            avgBF,
+            avgIp,
+            baseTicker: b.ticker ? b.ticker.split('-').slice(0, -1).join('-') : null,
+          })
+          allPitcherIds.add(numId)
+          // Register the late pitcher's YES ticker with the Kalshi WS so we get pull signals
+          // for them too (otherwise they fall back to ~30s API polling — caused Apr 27 misses).
+          if (b.ticker && !tickerToPitcher.has(b.ticker)) {
+            tickerToPitcher.set(b.ticker, String(b.pitcher_id))
+            newWsTickers.push(b.ticker)
+          }
+          console.log(`\n[live] ➕ Late-added pitcher: ${b.pitcher_name} (id=${b.pitcher_id}) — bets placed after monitor start`)
+        }
+        if (newWsTickers.length && tickerWs?.addTickers) {
+          const ok = tickerWs.addTickers(newWsTickers)
+          console.log(`[live] Kalshi ticker WS: ${ok ? '+' : 'failed +'}${newWsTickers.length} late ticker(s)`)
+        }
+      } catch (err) {
+        console.warn('[live] pitcher refresh failed:', err.message)
+      }
+    }
+
     iteration++
-    // Fast mode: shorten sleep if anyone is 1 K away from a threshold or a pitcher was pulled
-    // (oneAway persists once set; urgentThisCycle is re-evaluated each iteration for pulled pitchers)
-    let urgentThisCycle = oneAway.size > 0
+    // Heartbeat write — sentinel cron in scheduler.js reads this to detect stalls.
+    // Fire-and-forget; if Turso is briefly unreachable we don't want the loop to stall on it.
+    db.run(
+      `INSERT INTO system_flags (key, value, updated_at, updated_by) VALUES ('liveMonitor_heartbeat', ?, ?, 'liveMonitor')
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+      [String(Date.now()), new Date().toISOString()],
+    ).catch(() => {})
+    // Fast mode: shorten sleep if anyone is 1 K away from a threshold, a pitcher was pulled,
+    // or Kalshi ticker signaled a sharp YES mid drop (probable pull by TV-watching traders)
+    let urgentThisCycle = oneAway.size > 0 || _kalshiPullSignal.size > 0
     const now = new Date().toISOString().slice(11, 16)
     process.stdout.write(`\r[live] ${now} UTC | poll #${iteration} | daily loss: $${_dailyLoss.toFixed(0)}/$${LOSS_LIMIT}  `)
 
     if (_dailyLoss >= LOSS_LIMIT) {
       console.log(`\n[live] Daily loss limit hit ($${_dailyLoss.toFixed(0)}). Stopping.`)
-      // Cancel all open orders on halt
-      try {
-        const creds = {}  // uses env-var KALSHI_KEY_ID for Adam-Live (live monitor runs as single user)
-        await cancelAllOrders({ status: 'resting' }, creds)
-        console.log('[live] Cancelled all resting orders after loss limit hit')
-      } catch { /* non-fatal */ }
+      // Cancel all open orders for every live bettor (not just the env-var default user)
+      for (const u of activeBettors.filter(u => u.paper === 0 && u.kalshi_key_id)) {
+        try {
+          await cancelAllOrders({ status: 'resting' }, { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key })
+          console.log(`[live] Cancelled all resting orders for ${u.name} after loss limit hit`)
+        } catch { /* non-fatal */ }
+      }
       break
     }
 
     // Rule E: Auto-halt after -15% daily drawdown (net across all bets today)
     await reloadDailyNetPnl()
     const DRAWDOWN_HALT_PCT = 0.15
-    // For live users, prefer kalshi_balance (reflects real P&L over time) over starting_bankroll
-    const totalBankroll = activeBettors.reduce((s, u) => s + ((LIVE && u.kalshi_balance > 0) ? u.kalshi_balance : (u.starting_bankroll ?? 1000)), 0)
+    // Use today's opening snapshot as the drawdown baseline so losses already
+    // taken don't silently shrink the 15% floor. Falls back to current balance
+    // if no snapshot exists (e.g. first run of the day before capture fires).
+    const _snapshots = await db.all(
+      `SELECT user_id, balance_usd FROM balance_snapshots WHERE date = ?`, [TODAY],
+    ).catch(() => [])
+    const _snapshotByUser = new Map(_snapshots.map(r => [r.user_id, Number(r.balance_usd)]))
+    const totalBankroll = activeBettors.reduce((s, u) => {
+      const opening = _snapshotByUser.get(u.id)
+      if (opening != null && opening > 0) return s + opening
+      return s + ((LIVE && u.kalshi_balance > 0) ? u.kalshi_balance : (u.starting_bankroll ?? 1000))
+    }, 0)
     const drawdownLimit = -(totalBankroll * DRAWDOWN_HALT_PCT)
     if (_dailyNetPnl < drawdownLimit) {
       console.log(`\n[live] Rule E: Drawdown halt — today's P&L $${_dailyNetPnl.toFixed(2)} exceeds -${(DRAWDOWN_HALT_PCT*100).toFixed(0)}% limit. Stopping new bets.`)
@@ -1553,14 +2348,26 @@ async function main() {
 
     for (const game of games) {
       try {
-        // Get live box score
-        const [ls, box] = await Promise.all([
-          mlbGet(`${MLB_BASE}/game/${game.id}/linescore`),
-          mlbGet(`${MLB_BASE}/game/${game.id}/boxscore`),
-        ])
+        // Single feed/live call replaces separate linescore + boxscore fetches.
+        // Also gives us the plays array for substitution fast-path pull detection.
+        const feed = await mlbFeedLive(game.id)
+        const abstractGameState = feed?.gameData?.status?.abstractGameState ?? null
+        const ls  = feed?.liveData?.linescore ? { abstractGameState, ...feed.liveData.linescore } : null
+        const box = feed?.liveData?.boxscore ?? null
+        // Last 5 plays — detect pitching substitutions 15–30s before isCurrentPitcher flag updates
+        const recentPlays = feed?.liveData?.plays?.allPlays?.slice(-5) ?? []
+        const hasRecentSubstitution = recentPlays.some(p => {
+          const ev = (p?.result?.event ?? '').toLowerCase()
+          return ev.includes('substitut') || ev.includes('pitching change')
+        })
         const state = ls?.abstractGameState
 
         if (state === 'Preview') {
+          // Apr 28 — keep monitor alive through pre-game hours. Previously this just
+          // skipped without touching allDone, so a fresh start at 8am with all games in
+          // Preview hit the "allDone && iteration > 1" exit and the process died after
+          // two ticks. Treat Preview as "not done — waiting for first pitch."
+          allDone = false
           continue
         }
 
@@ -1684,6 +2491,12 @@ async function main() {
           const currentPitches = Number(player.stats?.pitching?.numberOfPitches || 0)
           const currentBF      = Number(player.stats?.pitching?.battersFaced || 0)
           const isCurrent      = player.gameStatus?.isCurrentPitcher
+          // Apr 28: pitch-count staleness flag. MLB API doesn't update numberOfPitches
+          // mid-inning while a batter is on the mound — for a pitcher already deep in the
+          // game (IP ≥ 5), a 0 pitch count means stale data, not a real read. Skip the
+          // live model evaluation this tick rather than feeding stale lambda to Kelly.
+          // (Caused Paddack 2+ disaster: model said 60.7% on stale state vs 0.5¢ market.)
+          const pitchCountStale = currentPitches === 0 && currentIP >= 5
           const currentInning  = ls?.currentInning != null ? `${ls.inningHalf?.slice(0,3) ?? ''}${ls.currentInning}` : null
           const awayScore      = ls?.teams?.away?.runs ?? null
           const homeScore      = ls?.teams?.home?.runs ?? null
@@ -1697,6 +2510,11 @@ async function main() {
           // model probability on the next poll cycle (B13 fix).
           _liveGameStateCache.set(String(pitcherId), { currentKs, currentIP, currentPitches, currentBF, scoreDiff, ctx })
 
+          // Fetch next 2-3 batters for pull-hedge confidence scoring.
+          // Cached per-batter (24h TTL) — actual MLB API call only for new batters.
+          // Returns [] gracefully if pitcher not currently pitching or data unavailable.
+          const nextBatters = await fetchNextBatters(feed, side).catch(() => [])
+
           // ── K-delta detection — log when K count changes, flag urgency ──────
           const prevKs = lastKsMap.get(pitcherId) ?? null
           const ksChanged = prevKs !== null && currentKs !== prevKs
@@ -1706,6 +2524,29 @@ async function main() {
             urgentThisCycle = true
           }
 
+          // Pre-compute pull confirmation for use in dead-bet below.
+          // MLB API sets isCurrentPitcher=false between half-innings (team is at bat),
+          // so we must NOT rely on raw !isCurrent alone — we need a corroborating signal.
+          const _teamPlayersEarly   = team?.players ?? {}
+          const _relieverOnMoundEarly = Object.entries(_teamPlayersEarly).some(
+            ([pid, p]) => pid !== `ID${pitcherId}` && p.gameStatus?.isCurrentPitcher === true,
+          )
+          const _notCurrentEntry    = notCurrentSince.get(String(pitcherId))
+          // Apr 28 — pulse cross-check: gamePulse is the slate-wide truth on pull state.
+          // If pulse hasn't flagged the pitcher as pulled, defer settlement even if local
+          // signals look like a pull. Prevents false-DEAD from API hiccups (Martinez 4/28).
+          const _pulsePulled = await db.one(
+            `SELECT CASE WHEN home_pitcher_id = ? THEN home_pitcher_pulled
+                         WHEN away_pitcher_id = ? THEN away_pitcher_pulled
+                         ELSE 0 END AS pulled
+             FROM game_pulse WHERE bet_date = ? AND (home_pitcher_id = ? OR away_pitcher_id = ?) LIMIT 1`,
+            [String(pitcherId), String(pitcherId), TODAY, String(pitcherId), String(pitcherId)],
+          ).catch(() => null)
+          const _pulseSaysPulled = _pulsePulled?.pulled === 1
+          const _pullConfirmedEarly = _pulseSaysPulled && (_relieverOnMoundEarly || hasRecentSubstitution)
+          const _pullConfirmedStale = _pulseSaysPulled && !isCurrent && _notCurrentEntry &&
+            _notCurrentEntry.ip === currentIP && _notCurrentEntry.ks === currentKs && currentIP >= 5
+
           // ── Cover / dead detection for pre-game bets ───────────────────────
           const openBets = await db.all(
             `SELECT * FROM ks_bets WHERE bet_date = ? AND pitcher_id = ? AND result IS NULL`,
@@ -1714,19 +2555,33 @@ async function main() {
 
           for (const bet of openBets) {
             const key = `${bet.id}`
+            const eventKey = `${pitcherId}:${bet.strike}`  // dedup notifications — one per event, not per bet row
 
             // One away: YES bet needs exactly 1 more K (still pitching)
             if (bet.side === 'YES' && isCurrent && currentKs === bet.strike - 1 && !oneAway.has(key) && !covered.has(key)) {
               oneAway.add(key)
-              const pnl = bet.bet_size * (1 - (bet.market_mid ?? 50) / 100)
-              console.log(`\n[live] 🔥 ONE AWAY ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)`)
-              await notifyOneAway({ pitcherName: ctx.pitcherName, strike: bet.strike, pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
+              if (!oneAwayNotified.has(eventKey)) {
+                oneAwayNotified.add(eventKey)
+                const pnl = bet.bet_size * (1 - (bet.market_mid ?? 50) / 100)
+                console.log(`\n[live] 🔥 ONE AWAY ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)`)
+                await notifyOneAway({ pitcherName: ctx.pitcherName, strike: bet.strike, pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
+              }
             }
 
             // Cover: pitcher already has enough Ks — settle immediately, don't wait for game to end
             if (bet.side === 'YES' && currentKs >= bet.strike && !covered.has(key)) {
               covered.add(key)
-              const _fcC = bet.filled_contracts != null ? bet.filled_contracts : null
+              if ((bet.filled_contracts ?? 0) === 0) {
+                // Resting/unfilled order — void it without P&L (no money was at risk)
+                await db.run(
+                  `UPDATE ks_bets SET actual_ks=?, result='void', pnl=0, order_status=COALESCE(order_status,'cancelled'), settled_at=? WHERE id=? AND result IS NULL`,
+                  [currentKs, new Date().toISOString(), bet.id],
+                )
+                console.log(`[live] ⊘ COVER VOID (no fill) ${ctx.pitcherName} ${bet.strike}+ at ${currentKs}K — resting order never filled`)
+                db.saveLog({ tag: 'COVER', msg: `${ctx.pitcherName} ${bet.strike}+ YES resting voided at ${currentKs}K (no fill)`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl: 0 })
+                continue
+              }
+              const _fcC = bet.filled_contracts
               const _ffC = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
               // bet_size = contract count; capital_at_risk = dollars spent (preferred fallback)
               const _szC = _fcC != null
@@ -1734,18 +2589,12 @@ async function main() {
                 : bet.capital_at_risk != null && _ffC > 0
                   ? Math.round(bet.capital_at_risk / _ffC)
                   : Math.round(bet.bet_size ?? 0)
-              const pnl = Math.round(_szC * (1 - _ffC) * 0.93 * 100) / 100
-              const now = new Date().toISOString()
-              await db.run(
-                `UPDATE ks_bets SET actual_ks=?, result='win', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
-                [currentKs, now, pnl, bet.id],
-              )
-              console.log(`\n[live] ✅ COVERED + SETTLED ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)  +$${pnl.toFixed(2)}`)
-              db.saveLog({ tag: 'COVER', msg: `${ctx.pitcherName} ${bet.strike}+ YES covered at ${currentKs}K  +$${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl })
-              await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
+              const settlementPnl = Math.round(_szC * (1 - _ffC) * 0.93 * 100) / 100
 
-              // Auto-close: sell YES position early if bid ≥ 88¢ — lock near-max profit now
-              if (LIVE && bet.filled_contracts > 0 && bet.ticker && bet.paper === 0) {
+              // Auto-close disabled — let covered bets settle naturally via Kalshi settlement.
+              let autoCloseSucceeded = false
+              let autoClosePnl = null
+              if (false && LIVE && _fcC > 0 && bet.ticker && bet.paper === 0) {
                 try {
                   const closeMkt = await getMarketPrice(bet.ticker).catch(() => null)
                   const yesBidCents = closeMkt?.bid != null ? Math.round(closeMkt.bid * 100) : null
@@ -1753,42 +2602,99 @@ async function main() {
                     const userRow = activeBettors.find(b => b.id === bet.user_id)
                     if (userRow?.kalshi_key_id) {
                       const sellCreds = { keyId: userRow.kalshi_key_id, privateKey: userRow.kalshi_private_key }
-                      await placeOrder(bet.ticker, 'yes', bet.filled_contracts, yesBidCents, sellCreds, 'sell')
-                      console.log(`[live] 💰 AUTO-CLOSE ${ctx.pitcherName} YES${bet.strike} ${bet.filled_contracts}c @ ${yesBidCents}¢`)
-                      db.saveLog({ tag: 'SELL', msg: `${ctx.pitcherName} YES${bet.strike} sold ${bet.filled_contracts}c @ ${yesBidCents}¢ — auto-close`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES' })
-                      // Update pnl to reflect actual early-sale proceeds, not settlement value
-                      const autoClosePnl = Math.round(bet.filled_contracts * ((yesBidCents - (bet.fill_price ?? bet.market_mid ?? 50)) / 100) * 0.93 * 100) / 100
-                      await db.run(
-                        `UPDATE ks_bets SET pnl = ?, result = 'win', order_status = 'closed', settled_at = ? WHERE id = ? AND result IS NULL`,
-                        [autoClosePnl, new Date().toISOString(), bet.id],
-                      ).catch(() => {})
+                      await placeOrder(bet.ticker, 'yes', _fcC, yesBidCents, sellCreds, 'sell')
+                      autoCloseSucceeded = true
+                      autoClosePnl = Math.round(_fcC * ((yesBidCents - (bet.fill_price ?? bet.market_mid ?? 50)) / 100) * 0.93 * 100) / 100
+                      console.log(`[live] 💰 AUTO-CLOSE ${ctx.pitcherName} YES${bet.strike} ${_fcC}c @ ${yesBidCents}¢  pnl=$${autoClosePnl.toFixed(2)}`)
+                      db.saveLog({ tag: 'SELL', msg: `${ctx.pitcherName} YES${bet.strike} sold ${_fcC}c @ ${yesBidCents}¢ — auto-close  pnl=$${autoClosePnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES' })
                     }
                   }
-                } catch { /* non-fatal — position still settled above */ }
+                } catch { /* non-fatal — fall through to settlement P&L */ }
+              }
+
+              const finalPnl = autoCloseSucceeded ? autoClosePnl : settlementPnl
+              const now = new Date().toISOString()
+              if (autoCloseSucceeded) {
+                await db.run(
+                  `UPDATE ks_bets SET actual_ks=?, result='win', settled_at=?, pnl=?, order_status='closed' WHERE id=? AND result IS NULL`,
+                  [currentKs, now, finalPnl, bet.id],
+                )
+              } else {
+                await db.run(
+                  `UPDATE ks_bets SET actual_ks=?, result='win', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
+                  [currentKs, now, finalPnl, bet.id],
+                )
+              }
+              console.log(`\n[live] ✅ COVERED + SETTLED ${ctx.pitcherName} ${bet.strike}+ (${currentKs}K)  +$${finalPnl.toFixed(2)}${autoCloseSucceeded ? ' [early sell]' : ''}`)
+              if (!coveredNotified.has(eventKey)) {
+                coveredNotified.add(eventKey)
+                db.saveLog({ tag: 'COVER', msg: `${ctx.pitcherName} ${bet.strike}+ YES covered at ${currentKs}K  +$${finalPnl.toFixed(2)}${autoCloseSucceeded ? ' [early sell]' : ''}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl: finalPnl })
+                await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl: finalPnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
               }
             }
 
-            // Dead: YES bet, starter pulled and can't reach threshold — settle as loss immediately
-            // Require 3+ IP before trusting isCurrent=false; MLB API flag is unreliable in early innings
-            if (bet.side === 'YES' && !isCurrent && currentKs < bet.strike && currentIP >= 3 && !dead.has(key)) {
+            // Dead: YES bet, starter pulled and can't reach threshold — settle as loss immediately.
+            // Require confirmed pull (reliever on mound OR pitching-change play) OR stale fallback
+            // (same IP/Ks two consecutive cycles AND ≥5 IP). Raw !isCurrent alone is NOT sufficient
+            // because MLB API sets isCurrentPitcher=false between half-innings (team at bat).
+            if (bet.side === 'YES' && !isCurrent && (_pullConfirmedEarly || _pullConfirmedStale) && currentKs < bet.strike && !dead.has(key)) {
               dead.add(key)
-              const FEE = 0.07
-              const contracts = bet.filled_contracts != null ? bet.filled_contracts : null
+              if ((bet.filled_contracts ?? 0) === 0) {
+                // Unfilled resting order — void without P&L
+                await db.run(
+                  `UPDATE ks_bets SET actual_ks=?, result='void', pnl=0, order_status=COALESCE(order_status,'cancelled'), settled_at=? WHERE id=? AND result IS NULL`,
+                  [currentKs, new Date().toISOString(), bet.id],
+                )
+                console.log(`[live] ⊘ DEAD VOID (no fill) ${ctx.pitcherName} ${bet.strike}+ pulled at ${currentKs}K — resting order never filled`)
+                db.saveLog({ tag: 'DEAD', msg: `${ctx.pitcherName} ${bet.strike}+ YES resting voided pulled at ${currentKs}K (no fill)`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl: 0 })
+                continue
+              }
+              const contracts = bet.filled_contracts  // guaranteed > 0 by guard above
               const fillFrac  = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
-              // bet_size = contract count; use capital_at_risk (dollars) as fallback, not bet_size
-              const pnl = contracts != null
-                ? -Math.round(contracts * fillFrac * 100) / 100
-                : bet.capital_at_risk != null
-                  ? -bet.capital_at_risk
-                  : -Math.round((bet.bet_size ?? 0) * fillFrac * 100) / 100
+              const pnl       = -Math.round(contracts * fillFrac * 100) / 100
               const now = new Date().toISOString()
               await db.run(
                 `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
                 [currentKs, now, pnl, bet.id],
               )
               console.log(`\n[live] ❌ DEAD + SETTLED ${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)  $${pnl.toFixed(2)}`)
-              db.saveLog({ tag: 'DEAD', level: 'warn', msg: `${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)  $${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl })
-              await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: 'starter pulled' }, await getAllWebhooks(db))
+              if (!deadNotified.has(eventKey)) {
+                deadNotified.add(eventKey)
+                db.saveLog({ tag: 'DEAD', level: 'warn', msg: `${ctx.pitcherName} pulled at ${currentKs}K (needed ${bet.strike}+)  $${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'YES', pnl })
+                await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: bet.side, pnl, currentKs, currentIPraw, game: ctx.game, reason: 'starter pulled' }, await getAllWebhooks(db))
+              }
+            }
+
+            // NO bet: if pitcher is pulled below the threshold the NO is structurally WON —
+            // pitcher can't accumulate more Ks once out of the game. Settle immediately so
+            // capital is freed and ledger is accurate. Mirrors the YES-dead logic above.
+            // Requires same pull confirmation as YES-dead — raw !isCurrent is false between
+            // half-innings (team at bat) and would cause false settlements.
+            if (bet.side === 'NO' && !isCurrent && (_pullConfirmedEarly || _pullConfirmedStale) && currentKs < bet.strike && currentIP >= 3 && !noWon.has(key)) {
+              noWon.add(key)
+              if ((bet.filled_contracts ?? 0) === 0) {
+                await db.run(
+                  `UPDATE ks_bets SET actual_ks=?, result='void', pnl=0, order_status=COALESCE(order_status,'cancelled'), settled_at=? WHERE id=? AND result IS NULL`,
+                  [currentKs, new Date().toISOString(), bet.id],
+                )
+                console.log(`[live] ⊘ NO WON VOID (no fill) ${ctx.pitcherName} NO ${bet.strike}+ — pitcher pulled at ${currentKs}K, resting order never filled`)
+                db.saveLog({ tag: 'NO_WON', msg: `${ctx.pitcherName} NO${bet.strike}+ resting voided (pitcher pulled at ${currentKs}K, no fill)`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl: 0 })
+                continue
+              }
+              const contracts = bet.filled_contracts
+              const fillFrac  = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
+              const pnl       = Math.round(contracts * (1 - fillFrac) * 0.93 * 100) / 100
+              const now = new Date().toISOString()
+              await db.run(
+                `UPDATE ks_bets SET actual_ks=?, result='win', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
+                [currentKs, now, pnl, bet.id],
+              )
+              console.log(`\n[live] ✅ NO WON (pitcher pulled) ${ctx.pitcherName} NO ${bet.strike}+ at ${currentKs}K  +$${pnl.toFixed(2)}`)
+              if (!noWonNotified.has(eventKey)) {
+                noWonNotified.add(eventKey)
+                db.saveLog({ tag: 'NO_WON', msg: `${ctx.pitcherName} NO${bet.strike}+ won — pitcher pulled at ${currentKs}K  +$${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl })
+                await notifyCovered({ pitcherName: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl, currentKs, game: ctx.game }, await getAllWebhooks(db))
+              }
             }
 
             // NO bet: if pitcher has already reached or exceeded the threshold the bet is
@@ -1796,50 +2702,83 @@ async function main() {
             // rather than waiting for game-end, which could be hours later.
             if (bet.side === 'NO' && currentKs >= bet.strike && !noLost.has(key)) {
               noLost.add(key)
-              const contracts = bet.filled_contracts != null ? bet.filled_contracts : null
+              if ((bet.filled_contracts ?? 0) === 0) {
+                // Unfilled resting order — void without P&L
+                await db.run(
+                  `UPDATE ks_bets SET actual_ks=?, result='void', pnl=0, order_status=COALESCE(order_status,'cancelled'), settled_at=? WHERE id=? AND result IS NULL`,
+                  [currentKs, new Date().toISOString(), bet.id],
+                )
+                console.log(`[live] ⊘ NO LOST VOID (no fill) ${ctx.pitcherName} NO ${bet.strike}+ at ${currentKs}K — resting order never filled`)
+                db.saveLog({ tag: 'NO_LOST', msg: `${ctx.pitcherName} NO${bet.strike}+ resting voided at ${currentKs}K (no fill)`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl: 0 })
+                continue
+              }
+              const contracts = bet.filled_contracts  // guaranteed > 0 by guard above
               const fillFrac  = ((bet.fill_price ?? bet.market_mid ?? 50)) / 100
-              const pnl = contracts != null
-                ? -Math.round(contracts * fillFrac * 100) / 100
-                : bet.capital_at_risk != null
-                  ? -bet.capital_at_risk
-                  : -Math.round((bet.bet_size ?? 0) * fillFrac * 100) / 100
+              const pnl       = -Math.round(contracts * fillFrac * 100) / 100
               const now = new Date().toISOString()
               await db.run(
                 `UPDATE ks_bets SET actual_ks=?, result='loss', settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
                 [currentKs, now, pnl, bet.id],
               )
               console.log(`\n[live] ❌ NO LOST ${ctx.pitcherName} NO ${bet.strike}+ already at ${currentKs}K  $${pnl.toFixed(2)}`)
-              db.saveLog({ tag: 'NO_LOST', level: 'warn', msg: `${ctx.pitcherName} NO${bet.strike}+ hit threshold at ${currentKs}K  $${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl })
-              await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl, currentKs, currentIPraw, game: ctx.game, reason: `reached ${currentKs}K` }, await getAllWebhooks(db))
+              if (!noLostNotified.has(eventKey)) {
+                noLostNotified.add(eventKey)
+                db.saveLog({ tag: 'NO_LOST', level: 'warn', msg: `${ctx.pitcherName} NO${bet.strike}+ hit threshold at ${currentKs}K  $${pnl.toFixed(2)}`, pitcher: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl })
+                await notifyDead({ pitcherName: ctx.pitcherName, strike: bet.strike, side: 'NO', pnl, currentKs, currentIPraw, game: ctx.game, reason: `reached ${currentKs}K` }, await getAllWebhooks(db))
+              }
             }
           }
 
-          // Pull detection — two-tier:
-          // Tier 1 (definitive): a different pitcher has isCurrentPitcher=true for this team → real pull
-          // Tier 2 (fallback): same IP/Ks two consecutive cycles AND deep in game (≥5 IP) → pulled
-          // MLB API sets isCurrentPitcher=false between half-innings (team at bat), so we need
-          // either a confirmed reliever on mound or multiple stale readings before trusting a pull.
+          // Pull detection — strong signals only.
+          // MLB API sets isCurrentPitcher=false between half-innings (team at bat), so a single
+          // !isCurrent reading is NOT a pull. We require one of three confirmation signals:
+          //   1. relieverOnMound: a different pitcher has isCurrentPitcher=true for this team
+          //   2. hasRecentSubstitution: a pitching-change play event was logged
+          //   3. kalshiSignalled: Kalshi WS gave us a pull market signal
+          //
+          // Apr 28: stale-fallback branch (same IP/Ks two cycles AND IP≥5) REMOVED. Caused
+          // Kochanowicz 3K false-pull disaster (cost $499.85 NO 5+ insurance, then he got
+          // 4th and 5th K). The signals above already cover real pulls; we'd rather miss
+          // free money than fire false free-money against an inning-break stale reading.
           const teamPlayers = team?.players ?? {}
           const relieverOnMound = Object.entries(teamPlayers).some(
             ([pid, p]) => pid !== `ID${pitcherId}` && p.gameStatus?.isCurrentPitcher === true,
           )
 
+          const kalshiSignalled = _kalshiPullSignal.has(String(pitcherId))
           let pitcherPulledEarly = false
-          if (!isCurrent && currentIP >= 2) {
-            if (relieverOnMound) {
-              pitcherPulledEarly = true  // definitive: different pitcher confirmed on mound
-              console.log(`[live] ✅ PULL CONFIRMED (reliever)  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP — firing free money`)
+          let pitcherPullConfirmed = false
+          // Opener detection: pitcher exits with very low pitch count + low IP →
+          // this is by-design (opener strategy, e.g., Rays / Astros), not an injury
+          // pull. The bullpen will continue racking up Ks for the same listed
+          // starter, so NO bets at low strikes lose. 4/24 incident: Rasmussen,
+          // Valdez, Abbott pulled-mode on inning-1 exits → -$766 across 5 bets.
+          const isOpenerExit = currentPitches > 0 && currentPitches < 30 && currentIP < 3
+          if (_pullFired.has(String(pitcherId))) {
+            // pull already fired this session — skip re-detection entirely
+          } else if (!isCurrent && isOpenerExit) {
+            // Opener: log once, then quietly skip on subsequent ticks. Do NOT set
+            // _pullFired (that would trip the line ~2939 NO-strike fire path —
+            // the exact bug this guard is meant to prevent).
+            if (!_openerSkipLogged.has(String(pitcherId))) {
+              _openerSkipLogged.add(String(pitcherId))
+              console.log(`[live] 🎭 OPENER EXIT  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP ${currentPitches}p — skipping free-money (bullpen continues racking Ks for listed starter)`)
+              db.saveLog({ tag: 'OPENER', level: 'info', msg: `${ctx.pitcherName} opener exit detected (${currentPitches}p / ${currentIPraw}IP) — free money skipped`, pitcher: ctx.pitcherName }).catch(() => {})
+            }
+          } else if (!isCurrent && currentIP >= 2 && !isOpenerExit) {
+            if (relieverOnMound || hasRecentSubstitution || kalshiSignalled) {
+              pitcherPulledEarly = true
+              pitcherPullConfirmed = relieverOnMound || hasRecentSubstitution
+              const _trigger = relieverOnMound ? 'reliever' : hasRecentSubstitution ? 'substitution' : 'kalshi-signal'
+              console.log(`[live] ✅ PULL CONFIRMED (${_trigger}${pitcherPullConfirmed ? '' : ' — unconfirmed'})  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP — firing free money`)
+              _kalshiPullSignal.delete(String(pitcherId))  // consume signal
               notCurrentSince.delete(pitcherId)
+              _pullFired.add(String(pitcherId))
             } else {
-              const prev = notCurrentSince.get(pitcherId)
-              if (!prev) {
+              // Track for diagnostics only — no auto-fire on stale readings
+              if (!notCurrentSince.has(pitcherId)) {
                 notCurrentSince.set(pitcherId, { ip: currentIP, ks: currentKs, seenAt: Date.now() }, game.id)
-                console.log(`[live] 👀 POSSIBLE PULL  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP — waiting for confirmation`)
-              } else if (prev.ip === currentIP && prev.ks === currentKs && currentIP >= 5) {
-                pitcherPulledEarly = true  // fallback: same IP/Ks two cycles, deep enough in game
-                console.log(`[live] ✅ PULL CONFIRMED (stale)  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP — firing free money`)
-              } else {
-                notCurrentSince.set(pitcherId, { ip: currentIP, ks: currentKs, seenAt: Date.now() }, game.id)
+                console.log(`[live] 👀 POSSIBLE PULL  ${ctx.pitcherName}  ${currentKs}K ${currentIPraw}IP — waiting for confirmed signal (reliever / substitution / Kalshi)`)
               }
             }
           } else if (isCurrent) {
@@ -1848,7 +2787,23 @@ async function main() {
               notCurrentSince.delete(pitcherId)
             }
           }
-          if (pitcherPulledEarly) urgentThisCycle = true  // free money window — stay fast
+          // Suppress pull execution if the game is already settled — a restart with stale
+          // IP/Ks data should not re-fire free-money bets for a game that finished hours ago.
+          if (pitcherPulledEarly && settledGames.has(game.id)) {
+            console.log(`[live] 🛑 PULL skip  ${ctx.pitcherName} — game already settled, suppressing free-money execution`)
+            pitcherPulledEarly = false
+          }
+          if (pitcherPulledEarly) {
+            urgentThisCycle = true  // free money window — stay fast
+            // Clear any oneAway entries for this pitcher — pull means YES bets are dead, no longer urgent
+            for (const bet of openBets) {
+              const key = `${bet.id}`
+              if (oneAway.has(key)) {
+                oneAway.delete(key)
+                console.log(`[live] ↩  oneAway cleared for bet #${bet.id} (${ctx.pitcherName} ${bet.strike}+) — pitcher pulled`)
+              }
+            }
+          }
 
           // Post provisional debits for locked winning NO bets when pull is confirmed
           // and game is official (≥5 innings). Idempotent — UNIQUE constraint deduplicates.
@@ -1879,18 +2834,20 @@ async function main() {
                 [TODAY, String(pitcherId)],
               )
               for (const bet of openYes) {
-                for (const bettor of activeBettors) {
-                  await executeBet({
-                    pitcherName: ctx.pitcherName, pitcherId, game: ctx.game,
-                    strike: bet.strike, side: 'NO',
-                    modelProb: 0.99, marketMid: bet.market_mid ?? 50, edge: 0.90,
-                    ticker: bet.ticker, betSize: PULLED_CAP_USD,
-                    kellyFraction: 0, capitalRisk: 0,
-                    liveKs: 0, liveIP: 0, livePitches: 0, liveBF: 0,
-                    liveInning: ls?.currentInning ?? 0, livePkEffective: null, liveLambda: null, liveScore: null,
-                    mode: 'pulled', user: bettor,
-                  }).catch(() => {})
-                }
+                // Only hedge the bettor who actually holds this YES position — not every active bettor.
+                // Buying NO for a user with no YES exposure creates an orphan position.
+                const betOwner = activeBettors.find(b => b.id === bet.user_id)
+                if (!betOwner) continue
+                await executeBet({
+                  pitcherName: ctx.pitcherName, pitcherId, game: ctx.game,
+                  strike: bet.strike, side: 'NO',
+                  modelProb: 0.99, marketMid: bet.market_mid ?? 50, edge: 0.90,
+                  ticker: bet.ticker, betSize: PULLED_CAP_USD,
+                  kellyFraction: 0, capitalRisk: 0,
+                  liveKs: 0, liveIP: 0, livePitches: 0, liveBF: 0,
+                  liveInning: ls?.currentInning ?? 0, livePkEffective: null, liveLambda: null, liveScore: null,
+                  mode: 'pulled', user: betOwner,
+                }).catch(() => {})
               }
               await notifyScratch({
                 pitcherName: ctx.pitcherName, game: ctx.game,
@@ -1910,6 +2867,15 @@ async function main() {
 
           // Fetch current Kalshi prices for this pitcher's markets
           if (!ctx.baseTicker) continue
+
+          // ── Halt gate: check system_flags before any bet placement ──
+          const haltRow = await db.one(`SELECT value FROM system_flags WHERE key='trading_halted'`).catch(() => null)
+          if (haltRow?.value === '1') {
+            if (!_haltLogged) { console.log('[liveMonitor] HALTED via system_flags — skipping bet placement'); _haltLogged = true }
+            continue
+          }
+          if (_haltLogged) { console.log('[liveMonitor] HALT lifted — resuming'); _haltLogged = false }
+
           const markets = await fetchLiveKsMarkets(ctx.baseTicker)
           if (!markets.length) continue
 
@@ -1927,16 +2893,33 @@ async function main() {
           }
 
           // Pre-load today's pre-game bets for this pitcher — used to dedup by (pitcher, strike, side)
+          // model_prob + fill_price included so stack-yes and pull-hedge can use them.
           const preGameForPitcher = await db.all(
-            `SELECT strike, side, user_id FROM ks_bets
+            `SELECT strike, side, user_id, model_prob, fill_price, filled_contracts, order_status FROM ks_bets
               WHERE bet_date = ? AND pitcher_id = ? AND live_bet = 0`,
             [TODAY, String(pitcherId)],
           )
           // Per-bettor pre-game positions — used to avoid mixed positions per user
           const preGameKeysByUser = new Map()
+          // Per-strike max pre-game YES model_prob — stack-yes requires live prob ≥ this + 0.15
+          const preGameProbByStrike = new Map()
+          // Per-user, per-strike YES position for filled bets — pull-hedge portfolio sizing.
+          // Map<userId, Map<strike, {fillPriceCents, filledContracts}>>
+          const preGameYesByUserStrike = new Map()
           for (const r of preGameForPitcher) {
             if (!preGameKeysByUser.has(r.user_id)) preGameKeysByUser.set(r.user_id, new Set())
             preGameKeysByUser.get(r.user_id).add(`${r.strike}-${r.side}`)
+            if (r.side === 'YES' && r.model_prob != null) {
+              const prev = preGameProbByStrike.get(r.strike) ?? 0
+              if (r.model_prob > prev) preGameProbByStrike.set(r.strike, r.model_prob)
+            }
+            if (r.side === 'YES' && r.fill_price != null && r.order_status === 'filled') {
+              if (!preGameYesByUserStrike.has(r.user_id)) preGameYesByUserStrike.set(r.user_id, new Map())
+              preGameYesByUserStrike.get(r.user_id).set(r.strike, {
+                fillPriceCents:  r.fill_price,
+                filledContracts: r.filled_contracts ?? 0,
+              })
+            }
           }
           // Helper: returns per-bettor key set (empty set if no pre-game bets)
           const pgKeys = (b) => preGameKeysByUser.get(b.id) ?? new Set()
@@ -1946,12 +2929,37 @@ async function main() {
           const anyCanTrade = (noKey, yesKey) => activeBettors.some(b => !pgKeys(b).has(noKey) && !pgKeys(b).has(yesKey))
 
           // ── Pass 1: collect qualifying edges for this pitcher ──
-          const qualifying = []
+          const qualifying      = []
+          const snapshotRows    = []
+          const capturedAt      = new Date().toISOString()
+          const rejectReasonByN = new Map()  // n → reason string for snapshot
+
+          // Read current rules from cache (10-min TTL)
+          const R = activeBettingRules
+          const yesMaxStrike    = R.yes_max_strike        ?? 6
+          const noMaxStrike     = R.no_max_strike         ?? 6
+          const noMaxMarketMid  = R.no_max_market_mid     ?? 45
+          const yesMinProbBase  = R.yes_min_prob          ?? 0.60
+          const yesMinProbMom   = R.yes_min_prob_momentum ?? 0.55
+          const yesMinEdgeBase  = R.yes_min_edge_base     ?? 0.12
+          const yesMinEdgeMom   = R.yes_min_edge_momentum ?? 0.10
+          const yesMinEdgeFull  = R.yes_min_edge_full_conv ?? 0.20
+          const yesFullConvProb = R.yes_full_conv_prob    ?? 0.75
+          const noMaxModelProb  = R.no_max_model_prob     ?? 0.15
+          const noMaxAskCents   = R.no_max_ask_cents      ?? 55
+          const noMinEdge       = R.no_min_edge           ?? 0.15
 
           for (const mkt of markets) {
             const parts = mkt.ticker.split('-')
             const n = parseInt(parts[parts.length - 1])
             if (!Number.isInteger(n) || n < 2 || n > 15) continue
+
+            // Pulled & below threshold: market is structurally dead, model hasn't caught up.
+            // Block ALL new bets (YES and NO edge) to prevent buying YES at 1¢ with 60% model.
+            // Crossed-YES (n ≤ currentKs) and NO for uncrossed thresholds still handled below.
+            if (_pullFired.has(String(pitcherId)) && !isCurrent && n > currentKs) {
+              rejectReasonByN.set(n, 'pulled_dead'); continue
+            }
 
             // Harden bid/ask parsing — Kalshi returns either integer cents or *_dollars string fields
             const yesBidCents = mkt.yes_bid != null ? mkt.yes_bid
@@ -1966,14 +2974,24 @@ async function main() {
             const noMid       = 100 - midCents
 
             const betKey = `${pitcherId}-${n}-live`  // mode-agnostic dedup key
-            if (activeBettors.length > 0 && activeBettors.every(b => placed.has(`${b.id}:${betKey}`))) continue
-            if (allHave(`${n}-NO`) && allHave(`${n}-YES`)) continue  // all bettors fully covered both sides
+            if (activeBettors.length > 0 && activeBettors.every(b => placed.has(`${b.id}:${betKey}`))) {
+              rejectReasonByN.set(n, 'already_covered'); continue
+            }
+            if (allHave(`${n}-NO`) && allHave(`${n}-YES`)) {
+              rejectReasonByN.set(n, 'already_covered'); continue
+            }
 
             // ── MODE 1: Pulled pitcher — structurally resolved, stale market arb ──
+            // YES-only block intentionally removed: when we hold YES and the pitcher is pulled
+            // with K < strike, YES is structurally dead. Buying NO here recovers part of the
+            // loss (free-money hedge). The double-sided block above (NO+YES) already prevents
+            // adding when both sides are held. Per-user conflict check in execution loop handles
+            // users who already hold NO on this market.
+            // IMPORTANT: always `continue` when pitcher is pulled — even if NO is illiquid —
+            // so we never fall through to MODE 2 edge detection and buy YES on a dead market.
             if (pitcherPulledEarly && n > currentKs) {
-              if (allHave(`${n}-NO`)) continue  // all bettors already have NO here
-              if (allHave(`${n}-YES`)) continue  // all bettors have pre-game YES — all would get mixed position
-              if (noMid >= 90 || noMid <= 5) continue  // already repriced or illiquid
+              if (allHave(`${n}-NO`)) { rejectReasonByN.set(n, 'already_covered'); continue }
+              if (noMid >= 96 || noMid <= 5) { rejectReasonByN.set(n, 'illiquid_pulled'); continue }
               qualifying.push({
                 n, mkt, midCents, marketPrice, modelProb: 0.02,
                 edge: 1 - marketPrice - 0.02, betSide: 'NO', betKey, mode: 'pulled',
@@ -2019,6 +3037,25 @@ async function main() {
               continue  // blowout: skip normal model for this n
             }
 
+            // ── MODE 1.8: Early blowout — larger deficit, one inning earlier ──
+            // Deficit ≥7 in inning ≥5 with K gap ≥2 and pitch count ≥65.
+            // Pitch-count+deficit combo gives ~88% confidence even before the 6th.
+            // Separate from MODE 1.7 so each can be independently calibrated.
+            if (isCurrent && scoreDiff <= -EARLY_BLOWOUT_DEFICIT && currentInn >= EARLY_BLOWOUT_INNING &&
+                currentPitches >= EARLY_BLOWOUT_PITCH && (n - currentKs) >= 2) {
+              if (!allHave(`${n}-NO`) && noMid < 80 && noMid > 5) {
+                const earlyBlowoutEdge = (1 - marketPrice) - 0.12  // ~88% confidence → ~12% miss rate
+                if (earlyBlowoutEdge >= 0.10) {
+                  qualifying.push({
+                    n, mkt, midCents, marketPrice, modelProb: 0.12,
+                    edge: earlyBlowoutEdge, betSide: 'NO', betKey, mode: 'early-blowout',
+                    modelProbSide: 0.88, marketPriceSide: 1 - marketPrice,
+                  })
+                }
+              }
+              continue
+            }
+
             if (!live) continue  // pulled pitcher — no high-conviction model available
 
             const modelProb = live.probAtLeast(n)
@@ -2042,24 +3079,131 @@ async function main() {
               }
               continue
             }
+
+            // ── MODE 1.55: Late-inning structural NO — 9th+ inning, pitcher running out of batters ──
+            // 9th inning or later, still active, needs ≥2 more Ks, pitch count ≥LATE_INN_MIN_PITCH.
+            // Even in a close game, a starter needing 2+ Ks in the 9th at 70+ pitches is ~90%+
+            // to fail — managers almost never extend in this scenario. Dead-path catches <10% model
+            // prob; this catches the 10-20% range specifically in late innings where blowout ≠ required.
+            if (isCurrent && currentInn >= 9 && currentPitches >= LATE_INN_MIN_PITCH &&
+                (n - currentKs) >= 2 && modelProb < LATE_INN_MAX_PROB) {
+              if (!allHave(`${n}-NO`) && noMid < 80 && noMid > 5) {
+                const lateEdge = (1 - marketPrice) - modelProb
+                if (lateEdge >= 0.10) {
+                  qualifying.push({
+                    n, mkt, midCents, marketPrice, modelProb,
+                    edge: lateEdge, betSide: 'NO', betKey, mode: 'late-inning-no',
+                    modelProbSide: 1 - modelProb, marketPriceSide: 1 - marketPrice,
+                  })
+                }
+              }
+              continue
+            }
+
+            // ── MODE 1.6: Pull-hedge NO — protect a pre-game YES when pitcher nearing pull ──
+            // Four-signal convergence gate:
+            //   1. Structural ceiling (arithmetic: remaining batters vs. Ks needed)
+            //   2. Batter gauntlet (upcoming hitters' K% → binomial probability)
+            //   5. Market + model dual confirmation
+            //   6. Game state (score diff, inning → manager pull incentives)
+            // All four feed into a 0-100 confidence score. Score ≥ 45 → hedge.
+            // Size scales with score: 0.5× at 45, 0.75× at 70, 1.0× at 90+.
+            if (isCurrent && currentPitches >= PULL_PITCH_COUNT && currentIP >= PULL_MIN_IP) {
+              const anyBettorNeedsHedge = activeBettors.some(b => {
+                const pos = preGameYesByUserStrike.get(b.id)?.get(n)
+                if (pos == null) return false
+                return _computeHedgePlan({
+                  yesFilledContracts: pos.filledContracts,
+                  yesFillCents:       pos.fillPriceCents,
+                  noAskCents, modelProb, maxUSD: PULL_HEDGE_MAX_USD,
+                }).qualified
+              })
+              if (anyBettorNeedsHedge && noMid > 5 && noMid < 75 && !allHave(`${n}-NO`)) {
+                const needed     = n - currentKs
+                const confidence = computeHedgeConfidence({
+                  needed, currentPitches, currentBF,
+                  noMid, modelProb, nextBatters,
+                  scoreDiff, currentInn: ls?.currentInning ?? 0,
+                })
+                if (!confidence.confident) {
+                  rejectReasonByN.set(n, `hedge-low-confidence:score=${confidence.score}:${confidence.signals.structural}`)
+                  continue
+                }
+                const noEdge = (1 - modelProb) - (1 - marketPrice)
+                qualifying.push({
+                  n, mkt, midCents, marketPrice, modelProb,
+                  edge: noEdge, betSide: 'NO', betKey, mode: 'pull-hedge',
+                  noAskCents, yesBidCents, confidence,
+                  modelProbSide: 1 - modelProb, marketPriceSide: 1 - marketPrice,
+                })
+                continue
+              }
+            }
+
             const edgeYES   = modelProb - marketPrice
             const edgeNO    = (1 - modelProb) - (1 - marketPrice)
             const betSide   = edgeYES >= edgeNO ? 'YES' : 'NO'
             const edge      = betSide === 'YES' ? edgeYES : edgeNO
 
-            if (allHave(`${n}-${betSide}`)) continue  // all bettors already have this position
+            // Stacking gate: block if all bettors already hold this side pre-game.
+            // EXCEPTION (YES only): allow a half-sized stack when the live model is materially
+            // more confident than pre-game (≥ +0.15 prob lift), edge is healthy (≥ 0.15),
+            // and fill is reasonable (mid ≤ 65¢). Emitted directly, bypasses MODE 2 gates.
+            if (allHave(`${n}-${betSide}`)) {
+              let allowStack = false
+              if (betSide === 'YES') {
+                const pgProb = preGameProbByStrike.get(n)
+                if (pgProb != null && modelProb >= pgProb + 0.15 && edge >= 0.15 && midCents <= 65) {
+                  allowStack = true
+                }
+              }
+              if (!allowStack) {
+                rejectReasonByN.set(n, 'already_covered'); continue
+              }
+              qualifying.push({
+                n, mkt, midCents, marketPrice, modelProb, edge, betSide, betKey,
+                mode: 'stack-yes', kellyScale: 0.50,
+                modelProbSide: modelProb, marketPriceSide: marketPrice,
+              })
+              continue
+            }
+
+            // ── Rule-based bans (from betting_rules table) ──
+            if (betSide === 'YES' && yesMaxStrike > 0 && n > yesMaxStrike) {
+              rejectReasonByN.set(n, `yes_strike_ban:${n}>${yesMaxStrike}`); continue
+            }
+            if (betSide === 'NO' && noMaxStrike > 0 && n > noMaxStrike) {
+              rejectReasonByN.set(n, `no_strike_ban:${n}>${noMaxStrike}`); continue
+            }
+            if (betSide === 'NO' && noMaxMarketMid > 0 && midCents > noMaxMarketMid) {
+              rejectReasonByN.set(n, `no_mid_cap:mid=${midCents.toFixed(0)}>${noMaxMarketMid}`); continue
+            }
 
             // ── MODE 2: High-conviction — tiered YES thresholds + ksChanged momentum ──
             // kellyScale < 1 → partial sizing for lower-conviction entries
             if (betSide === 'YES') {
+              // Apr 28 — pitch-count staleness gate. If MLB API returned 0 pitches for a
+              // pitcher with IP ≥ 5, the lambda calc is built on stale data. Don't size off it.
+              if (pitchCountStale) {
+                rejectReasonByN.set(n, `pitch_count_stale:0p@${currentIP}IP`); continue
+              }
+              // Extreme divergence guard: when YES market < 5¢ AND model edge > 30¢, the divergence
+              // almost always reflects model staleness (pitcher pulled / about to be pulled, model
+              // still believes he's pitching) rather than a real edge. The market in that regime is
+              // far more informative than the live model.
+              if (marketPrice < 0.05 && edge > 0.30) {
+                rejectReasonByN.set(n, `extreme_divergence:mkt=${(marketPrice*100).toFixed(1)}¢<5¢ model=${(modelProb*100).toFixed(0)}%`)
+                alertExtremeDivergence({ pitcherName: ctx.pitcherName, strike: n, modelProb, marketPrice }).catch(() => {})
+                continue
+              }
               const onKMomentum = ksChanged   // pitcher just added a K this cycle
-              const yesMinProb  = onKMomentum ? 0.55 : 0.60
-              const yesFullConv = modelProb >= 0.75
+              const yesMinProb  = onKMomentum ? yesMinProbMom  : yesMinProbBase
+              const yesFullConv = modelProb >= yesFullConvProb
               const yesMinEdge  = yesFullConv
-                ? Math.max(0.20, halfSpread + 0.04)
-                : onKMomentum ? Math.max(0.10, halfSpread + 0.03) : Math.max(0.12, halfSpread + 0.03)
-              if (modelProb < yesMinProb) continue
-              if (edge < yesMinEdge) continue
+                ? Math.max(yesMinEdgeFull, halfSpread + 0.04)
+                : onKMomentum ? Math.max(yesMinEdgeMom, halfSpread + 0.03) : Math.max(yesMinEdgeBase, halfSpread + 0.03)
+              if (modelProb < yesMinProb) { rejectReasonByN.set(n, `yes_low_prob:${modelProb.toFixed(3)}<${yesMinProb}`); continue }
+              if (edge < yesMinEdge) { rejectReasonByN.set(n, `yes_low_edge:${edge.toFixed(3)}<${yesMinEdge.toFixed(3)}`); continue }
               const kellyScale  = yesFullConv ? 1.0 : onKMomentum ? 0.35 : 0.50
               qualifying.push({
                 n, mkt, midCents, marketPrice, modelProb, edge, betSide, betKey,
@@ -2067,9 +3211,10 @@ async function main() {
                 modelProbSide: modelProb, marketPriceSide: marketPrice,
               })
             } else {
-              if (modelProb > 0.15) continue
-              if (noAskCents > 55) continue   // don't pay >55¢ for a NO — cost = 100 - yes_bid
-              if (edge < Math.max(0.15, halfSpread + 0.04)) continue
+              if (modelProb > noMaxModelProb) { rejectReasonByN.set(n, `no_high_prob:${modelProb.toFixed(3)}>${noMaxModelProb}`); continue }
+              if (noAskCents > noMaxAskCents) { rejectReasonByN.set(n, `no_high_ask:${noAskCents}>${noMaxAskCents}`); continue }
+              const noMinEdgeCalc = Math.max(noMinEdge, halfSpread + 0.04)
+              if (edge < noMinEdgeCalc) { rejectReasonByN.set(n, `no_low_edge:${edge.toFixed(3)}<${noMinEdgeCalc.toFixed(3)}`); continue }
               qualifying.push({
                 n, mkt, midCents, marketPrice, modelProb, edge, betSide, betKey,
                 mode: 'high-conviction', kellyScale: 1.0,
@@ -2078,8 +3223,97 @@ async function main() {
             }
           }
 
-          if (!qualifying.length) continue
+          // ── Snapshot: capture every evaluated market this tick (fire-and-forget) ──
+          for (const mkt of markets) {
+            const parts = mkt.ticker.split('-')
+            const n = parseInt(parts[parts.length - 1])
+            if (!Number.isInteger(n) || n < 2 || n > 15) continue
+            const yesBid = mkt.yes_bid ?? (mkt.yes_bid_dollars != null ? Math.round(parseFloat(mkt.yes_bid_dollars) * 100) : null)
+            const yesAsk = mkt.yes_ask ?? (mkt.yes_ask_dollars != null ? Math.round(parseFloat(mkt.yes_ask_dollars) * 100) : null)
+            if (yesBid == null || yesAsk == null) continue
+            const midC     = (yesBid + yesAsk) / 2
+            const mProb    = pitcherPulledEarly ? 0.02 : (live ? live.probAtLeast(n) : null)
+            if (mProb == null) continue
+            const mp       = midC / 100
+            const eYes     = mProb - mp
+            const eNo      = (1 - mProb) - (1 - mp)
+            const bSide    = eYes >= eNo ? 'YES' : 'NO'
+            const bEdge    = Math.max(eYes, eNo)
+            const qItem    = qualifying.find(q => q.n === n)
+            snapshotRows.push(buildSnapshotRow({
+              ticker:       mkt.ticker,
+              pitcherId,
+              pitcherName:  ctx.pitcherName,
+              strike:       n,
+              gameDate:     TODAY,
+              capturedAt,
+              gameId:       game?.id    ?? null,
+              gameLabel:    ctx.game    ?? null,
+              gameStatus:   game?.status?.abstractGameState ?? null,
+              yesBidCents:  yesBid,
+              yesAskCents:  yesAsk,
+              midCents:     midC,
+              openInterest: mkt.open_interest ?? null,
+              volume:       mkt.volume        ?? null,
+              modelProb:    mProb,
+              edgeYes:      eYes,
+              edgeNo:       eNo,
+              bestSide:     bSide,
+              bestEdge:     bEdge,
+              kellyFraction: qItem?.kellyScale ?? null,
+              evalMode:     qItem?.mode ?? (pitcherPulledEarly ? 'pulled' : 'scan'),
+              qualified:    qItem ? 1 : 0,
+              rejectReason: qItem ? null : (rejectReasonByN.get(n) ?? null),
+              liveKs:       currentKs,
+              liveIp:       currentIP,
+              liveBf:       currentBF,
+              livePitches:  currentPitches,
+              stillIn:      isCurrent,
+              currentInning,
+              homeScore,
+              awayScore,
+            }))
+          }
+          writeSnapshotBatch(snapshotRows).catch(() => {})
 
+          // Apr 29 — env-gated mode kill switch. Set DISABLED_LIVE_MODES (comma-list)
+          // to skip specific live modes without code changes. Currently used to disable
+          // high-conviction et al. while live model is being recalibrated; pulled (free
+          // money) and pull-hedge are intentionally left active.
+          const _disabledModes = String(process.env.DISABLED_LIVE_MODES || '')
+            .split(',').map(s => s.trim()).filter(Boolean)
+          if (_disabledModes.length && qualifying.length) {
+            const before = qualifying.length
+            for (let qi = qualifying.length - 1; qi >= 0; qi--) {
+              if (_disabledModes.includes(qualifying[qi].mode)) {
+                rejectReasonByN.set(qualifying[qi].n, `mode_disabled:${qualifying[qi].mode}`)
+                qualifying.splice(qi, 1)
+              }
+            }
+            if (qualifying.length < before) {
+              console.log(`[live] mode kill switch dropped ${before - qualifying.length} of ${before} qualifying signals (DISABLED=${_disabledModes.join(',')})`)
+            }
+          }
+
+          // Apr 29 — backtest on 4/22-4/28 data showed inverting every live YES to NO
+          // would have swung +$2,467 over the week. Live YES is systematically -EV
+          // because pull risk is unmodeled and the upside is asymmetric (YES at 60c+
+          // pays 30c; NO at the same strike pays 60c+). Disable all live YES until
+          // pull-prob model is built. NO + hedge remain active.
+          if (process.env.LIVE_YES_DISABLED === 'true' && qualifying.length) {
+            const before = qualifying.length
+            for (let qi = qualifying.length - 1; qi >= 0; qi--) {
+              if (qualifying[qi].betSide === 'YES') {
+                rejectReasonByN.set(qualifying[qi].n, `live_yes_disabled`)
+                qualifying.splice(qi, 1)
+              }
+            }
+            if (qualifying.length < before) {
+              console.log(`[live] LIVE_YES_DISABLED dropped ${before - qualifying.length} of ${before} qualifying YES signals`)
+            }
+          }
+
+          if (!qualifying.length) continue
 
           // ── Pass 2: correlated Kelly across all qualifying thresholds for this pitcher ──
           const sized = correlatedKellyDivide(
@@ -2092,7 +3326,7 @@ async function main() {
 
           // All structural taker modes: execute highest threshold first.
           // Near-certain wins — if cash runs out, highest-n (most certain) positions fill first.
-          const TAKER_MODES = new Set(['pulled', 'crossed-yes', 'blowout', 'dead-path'])
+          const TAKER_MODES = new Set(['pulled', 'crossed-yes', 'blowout', 'dead-path', 'pull-hedge', 'early-blowout', 'late-inning-no'])
           const execOrder = qualifying.map((_, i) => i)
           if (qualifying.some(q => TAKER_MODES.has(q.mode))) {
             execOrder.sort((a, b) => qualifying[b].n - qualifying[a].n)
@@ -2102,35 +3336,45 @@ async function main() {
           const runExecItem = async (i) => {
             const q = qualifying[i]
             const s = sized[i]
-            if (!s || s.betSize <= 0) return false
+            // Pull-hedge: skip Kelly entirely — per-bettor portfolio sizing inside bettor loop
+            if (q.mode !== 'pull-hedge' && (!s || s.betSize <= 0)) return false
 
-            // ── Bayesian posterior model probability update ──────────────────
-            // For normal high-conviction bets, blend pre-game model with in-game
-            // evidence using computeLiveProb. Pulled/dead-path modes use hardcoded
-            // structural probabilities (0.02 / 0.05) — don't overwrite those.
+            // ── Live model probability update ────────────────────────────────
+            // For normal high-conviction bets, use the same live.probAtLeast that drove
+            // qualification (computeLiveModel result). This eliminates the inconsistency
+            // where qualification used one function and sizing used another (computeLiveProb).
+            // Pulled/dead-path modes use hardcoded structural probabilities — don't overwrite.
             let liveModelProbSide = q.modelProbSide
-            if ((q.mode === 'high-conviction') && ctx.lambda && currentBF > 0) {
-              // Estimate total BF from pre-game λ: lambda = E[BF] × pK, so E[BF] = lambda / pK
-              // Use LEAGUE_K_PCT as the per-BF K rate proxy (conservative denominator).
-              const estTotalBF = Math.round(ctx.lambda / Math.max(LEAGUE_K_PCT, 0.20))
-              const posterior  = computeLiveProb(ctx.lambda, currentKs, currentBF, estTotalBF, q.n)
-              // Only replace if we have meaningful in-game sample (≥6 BF ≈ 2 innings)
-              if (currentBF >= 6 && posterior > 0) {
+            if ((q.mode === 'high-conviction') && live && currentBF >= 6) {
+              const posterior = live.probAtLeast(q.n)
+              if (posterior > 0) {
                 liveModelProbSide = q.betSide === 'YES' ? posterior : 1 - posterior
               }
             }
 
             // Per-pitcher cap check is now per-bettor — moved inside the bettor loop below.
 
-            // 2× sizing for high-edge bets (≥15¢); kellyScale < 1 for lower-conviction entries
-            const edgeMult     = q.edge >= 0.15 ? 2 : 1
-            const finalBetSize = s.betSize * edgeMult * (q.kellyScale ?? 1.0)
-            const capitalRisk  = capitalAtRisk(finalBetSize, q.marketPrice, q.betSide)
+            // Pull-hedge: betSize is determined per-bettor by _computeHedgePlan — skip Kelly math.
+            // All other modes: 2× sizing for high-edge bets (≥15¢); kellyScale < 1 for lower-conviction.
+            const edgeMult     = (q.mode === 'pull-hedge' || q.edge < 0.15) ? 1 : 2
+            // Hard absolute cap applies to model-driven modes (where stale Bayesian state can produce
+            // false edge). Structurally-certain modes (pulled/blowout/etc.) have their own per-mode
+            // caps via FREE_MONEY_PITCHER_CAP / PULLED_CAP_CONFIRMED_USD, so don't double-cap them.
+            const MODEL_DRIVEN = q.mode === 'high-conviction' || q.mode === 'stack-yes' || q.mode === 'dead-path'
+            const rawSize      = s.betSize * edgeMult * (q.kellyScale ?? 1.0)
+            const finalBetSize = q.mode === 'pull-hedge'
+              ? 0   // unused — each bettor uses hedgePlan.hedgeCost computed in the loop
+              : MODEL_DRIVEN
+                ? Math.min(kellyConfig.MAX_BET, LIVE_HIGH_CONVICTION_CAP_USD, rawSize)
+                : Math.min(kellyConfig.MAX_BET, rawSize)
+            // capital at risk = cash committed (betSize is USD cash, not notional contracts)
+            const capitalRisk  = finalBetSize
 
             const scaleTag = (q.kellyScale ?? 1.0) < 1.0 ? ` [${Math.round((q.kellyScale ?? 1.0)*100)}% kelly]` : ''
             const sizeTag  = edgeMult > 1 ? ` [2× edge=${(q.edge*100).toFixed(0)}¢]${scaleTag}` : scaleTag
-            const _tag = q.mode === 'pulled' ? '🎯 PULLED' : q.mode === 'crossed-yes' ? '🟢 CROSSED-YES' : q.mode === 'blowout' ? '🏳️ BLOWOUT' : '🔥 EDGE'
-            console.log(`\n[live] ${_tag} ${ctx.game} ${ctx.pitcherName} ${q.n}+ Ks ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p ${currentBF}BF  [${q.mode}]${sizeTag}`)
+            const _tag = q.mode === 'pulled' ? '🎯 PULLED' : q.mode === 'crossed-yes' ? '🟢 CROSSED-YES' : q.mode === 'blowout' ? '🏳️ BLOWOUT' : q.mode === 'early-blowout' ? '🏳️ EARLY-BLOWOUT' : q.mode === 'late-inning-no' ? '🕙 LATE-NO' : q.mode === 'stack-yes' ? '📚 STACK' : q.mode === 'pull-hedge' ? '🛡️ PULL-HEDGE' : '🔥 EDGE'
+            const _confTag = q.mode === 'pull-hedge' && q.confidence ? `  conf=${q.confidence.score}/${q.confidence.sizeMultiplier*100|0}%[${q.confidence.signals?.structural}]` : ''
+            console.log(`\n[live] ${_tag} ${ctx.game} ${ctx.pitcherName} ${q.n}+ Ks ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP ${currentPitches}p ${currentBF}BF  [${q.mode}]${sizeTag}${_confTag}`)
             db.saveLog({ tag: q.mode === 'pulled' ? 'PULLED' : 'EDGE', msg: `${ctx.pitcherName} ${q.n}+ ${q.betSide}  model=${(q.modelProb*100).toFixed(1)}%  mid=${q.midCents.toFixed(0)}¢  edge=${(q.edge*100).toFixed(1)}¢  ${currentKs}K ${currentIPraw}IP${sizeTag}`, pitcher: ctx.pitcherName, strike: q.n, side: q.betSide, edge_cents: Math.round(q.edge * 100) })
 
             let anySuccess = false
@@ -2143,23 +3387,77 @@ async function main() {
               const myPgKeys = pgKeys(bettor)
               if (q.mode === 'pulled') {
                 if (myPgKeys.has(`${q.n}-NO`))  { placed.add(bettorKey); continue }  // already have NO
-                if (myPgKeys.has(`${q.n}-YES`)) { placed.add(bettorKey); continue }  // would create mixed position
+                // NOTE: bettors with pre-game YES are NOT blocked here — buying NO when pitcher
+                // is structurally pulled is a free-money hedge that recovers part of the YES loss.
               } else if (q.mode === 'crossed-yes') {
                 if (myPgKeys.has(`${q.n}-NO`) || myPgKeys.has(`${q.n}-YES`)) { placed.add(bettorKey); continue }
-              } else if (q.mode === 'blowout' || q.mode === 'dead-path') {
+              } else if (q.mode === 'pull-hedge') {
+                if (myPgKeys.has(`${q.n}-NO`)) { placed.add(bettorKey); continue }
+                // Require the bettor to hold a filled YES at this strike — no orphan hedges.
+                // Re-run _computeHedgePlan per-bettor: each bettor's fill price and contract count
+                // determines their individual hedge size and whether the EV gate passes for them.
+                const myPos = preGameYesByUserStrike.get(bettor.id)?.get(q.n)
+                if (!myPos) { placed.add(bettorKey); continue }
+                const hedgePlan = _computeHedgePlan({
+                  yesFilledContracts: myPos.filledContracts,
+                  yesFillCents:       myPos.fillPriceCents,
+                  noAskCents:         q.noAskCents,
+                  modelProb:          q.modelProb,
+                  maxUSD:             PULL_HEDGE_MAX_USD,
+                })
+                if (!hedgePlan.qualified) { placed.add(bettorKey); continue }
+                // Scale hedge size by confidence sizeMultiplier (0.50–1.00 based on signal score).
+                // This lets high-conviction signals buy full insurance while borderline signals buy half.
+                const sizeMult      = q.confidence?.sizeMultiplier ?? 0.5
+                const adjContracts  = Math.max(1, Math.round(hedgePlan.hedgeContracts * sizeMult))
+                const adjCost       = adjContracts * (q.noAskCents / 100)
+                bettor._hedgePlan   = { ...hedgePlan, hedgeContracts: adjContracts, hedgeCost: adjCost, _myPos: myPos }
+              } else if (q.mode === 'blowout' || q.mode === 'early-blowout' || q.mode === 'late-inning-no' || q.mode === 'dead-path') {
+                if (myPgKeys.has(`${q.n}-NO`)) { placed.add(bettorKey); continue }
+              } else if (q.mode === 'stack-yes') {
+                // stack-yes is intentional same-side stacking — every active bettor holds YES
+                // pre-game by definition (allHave(YES) gate above). Block only if they already hold NO,
+                // which would create a mixed position.
                 if (myPgKeys.has(`${q.n}-NO`)) { placed.add(bettorKey); continue }
               } else {
                 if (myPgKeys.has(`${q.n}-${q.betSide}`)) { placed.add(bettorKey); continue }
               }
 
+              // Per-user daily loss limit — skip this bettor if they've hit their personal cap.
+              // Uses users.daily_loss_limit if set; falls back to global LOSS_LIMIT env var.
+              if (bettor.paper === 0 && bettor.kalshi_key_id) {
+                const userLimit = bettor.daily_loss_limit != null ? Number(bettor.daily_loss_limit) : LOSS_LIMIT
+                const userLoss  = await getUserDailyLoss(bettor.id)
+                if (userLoss >= userLimit) {
+                  console.log(`[live] 🛑 ${bettor.name} daily loss limit hit ($${userLoss.toFixed(0)}/$${userLimit}) — skipping`)
+                  placed.add(bettorKey)
+                  continue
+                }
+              }
+
               // Per-bettor, per-threshold free-money cap — 5% of bankroll per strike threshold
-              if (q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout') {
+              if (q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout' || q.mode === 'early-blowout' || q.mode === 'late-inning-no') {
                 const capKey = `${pitcherId}-${q.n}`
                 const alreadySent = freeMoneySentByUserPitcher.get(bettor.id)?.get(capKey) ?? 0
-                const bettorBankroll = bettor.kalshi_balance || bettor.starting_bankroll || 1000
-                const freeMoneyCap = bettorBankroll * (bettor.free_money_risk_pct ?? 0.20) * 0.25
+                // Confirmed two-tier pulls (reliever on mound or substitution event) get a higher
+                // per-threshold cap — structural certainty is higher than a Kalshi-signal-only pull.
+                const freeMoneyCap = (q.mode === 'pulled' && pitcherPullConfirmed)
+                  ? PULLED_CAP_CONFIRMED_USD : FREE_MONEY_PITCHER_CAP
                 if (alreadySent >= freeMoneyCap) {
-                  console.log(`[live] 🚫 FREE MONEY CAP  ${bettor.name}  ${ctx.pitcherName}  ${q.n}+  $${alreadySent.toFixed(0)}/$${freeMoneyCap.toFixed(0)} — skipping  [${q.mode}]`)
+                  console.log(`[live] 🚫 FREE MONEY CAP  ${bettor.name}  ${ctx.pitcherName}  ${q.n}+  $${alreadySent.toFixed(0)}/$${freeMoneyCap.toFixed(0)} — skipping  [${q.mode}${q.mode==='pulled'&&pitcherPullConfirmed?' confirmed':''}]`)
+                  placed.add(bettorKey)
+                  continue
+                }
+              }
+
+              // Apr 28 — Per-bettor, per-pitcher HIGH-CONVICTION cap. Limits cumulative spend
+              // across all strike thresholds for the same pitcher. Without this, 5 strikes
+              // each at $200 = $1000 per user on one pitcher (Paddack-class disaster vector).
+              if (q.mode === 'high-conviction' || q.mode === 'stack-yes' || q.mode === 'dead-path') {
+                const alreadySent = hcSentByUserPitcher.get(bettor.id)?.get(pitcherId) ?? 0
+                const wouldSpend  = alreadySent + finalBetSize
+                if (wouldSpend > LIVE_HC_PITCHER_CAP_USD) {
+                  console.log(`[live] 🚫 HC PITCHER CAP  ${bettor.name}  ${ctx.pitcherName}  ${q.n}+  $${alreadySent.toFixed(0)} + $${finalBetSize.toFixed(0)} > $${LIVE_HC_PITCHER_CAP_USD} — skipping  [${q.mode}]`)
                   placed.add(bettorKey)
                   continue
                 }
@@ -2175,8 +3473,8 @@ async function main() {
                 marketMid:        q.midCents,
                 edge:             q.edge,
                 ticker:           q.mkt.ticker,
-                betSize:          finalBetSize,
-                kellyFraction:    s.kellyFraction,
+                betSize:          q.mode === 'pull-hedge' ? (bettor._hedgePlan?.hedgeCost ?? 0) : finalBetSize,
+                kellyFraction:    s?.kellyFraction ?? null,
                 capitalRisk,
                 liveKs:           currentKs,
                 liveIP:           currentIP,
@@ -2187,8 +3485,11 @@ async function main() {
                 liveLambda:       live?.lambdaRemaining ?? null,
                 liveScore:        currentScore,
                 mode:             q.mode,
+                hedgeOverride:    q.mode === 'pull-hedge' ? bettor._hedgePlan : null,
                 user:             bettor,
               })
+              const capturedHedge = q.mode === 'pull-hedge' ? { ...bettor._hedgePlan } : null
+              if (q.mode === 'pull-hedge') delete bettor._hedgePlan
 
               if (betResult?.dedup || betResult?.kalshiDedup || betResult?.budget) {
                 placed.add(bettorKey)
@@ -2197,15 +3498,23 @@ async function main() {
               } else if (betResult?.finalContracts != null || betResult?.freeMoneySummary != null) {
                 placed.add(bettorKey)
                 anySuccess = true
+                if (betResult.betId) linkBetToSnapshot(betResult.betId, q.mkt.ticker, capturedAt).catch(() => {})
 
                 // Track free-money spend toward per-bettor per-threshold cap
-                if ((q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout') && betResult.finalContracts > 0) {
+                if ((q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout' || q.mode === 'early-blowout' || q.mode === 'late-inning-no') && betResult.finalContracts > 0) {
                   const askC = betResult.freeMoneySummary?.askCents ?? q.midCents
                   const spent = betResult.finalContracts * (askC / 100)
                   if (!freeMoneySentByUserPitcher.has(bettor.id)) freeMoneySentByUserPitcher.set(bettor.id, new Map())
                   const bMap = freeMoneySentByUserPitcher.get(bettor.id)
                   const capKey = `${pitcherId}-${q.n}`
                   bMap.set(capKey, (bMap.get(capKey) ?? 0) + spent)
+                }
+
+                // Apr 28 — track high-conviction spend toward per-pitcher cap
+                if ((q.mode === 'high-conviction' || q.mode === 'stack-yes' || q.mode === 'dead-path') && finalBetSize > 0) {
+                  if (!hcSentByUserPitcher.has(bettor.id)) hcSentByUserPitcher.set(bettor.id, new Map())
+                  const bMap = hcSentByUserPitcher.get(bettor.id)
+                  bMap.set(pitcherId, (bMap.get(pitcherId) ?? 0) + finalBetSize)
                 }
 
                 const webhooks = bettor.discord_webhook ? [bettor.discord_webhook] : []
@@ -2215,6 +3524,7 @@ async function main() {
                     strike: q.n, currentKs,
                     yesPrice:       betResult.freeMoneySummary.yesPrice,
                     contracts:      betResult.finalContracts,
+                    initFilled:     betResult.initFilled,
                     askCents:       betResult.freeMoneySummary.askCents,
                     expectedProfit: betResult.freeMoneySummary.expectedProfit,
                     game: ctx.game, paper: bettor.paper !== 0,
@@ -2225,29 +3535,101 @@ async function main() {
                     strike: q.n, currentKs,
                     yesAskCents:    betResult.freeMoneySummary.askCents,
                     contracts:      betResult.finalContracts,
+                    initFilled:     betResult.initFilled,
                     expectedProfit: betResult.freeMoneySummary.expectedProfit,
                     game: ctx.game, paper: bettor.paper !== 0,
                   }, webhooks)
+                  // Track for live certainty parlay — 2+ crossed-YES from different pitchers
+                  if (!bettor.paper) {
+                    const legKey = `${ctx.pitcherName}-${q.n}`
+                    _certLegs.set(legKey, { pitcherName: ctx.pitcherName, strike: q.n, currentKs, game: ctx.game })
+                    const uniquePitchers = [...new Set([..._certLegs.values()].map(l => l.pitcherName))]
+                    if (uniquePitchers.length >= 2) {
+                      const legs = uniquePitchers.slice(0, 2).map(p => [..._certLegs.values()].find(l => l.pitcherName === p))
+                      const pKey = parlayKey(legs)
+                      if (!_certParlaySent.has(pKey)) {
+                        _certParlaySent.add(pKey)
+                        const allWh = await getAllWebhooks(db).catch(() => [])
+                        await notifyCertaintyParlay(buildCertaintyParlay(legs), allWh)
+                      }
+                    }
+                  }
                 } else if (q.mode === 'blowout' && betResult?.freeMoneySummary) {
                   await notifyBlowout({
                     pitcherName: ctx.pitcherName,
                     strike: q.n, currentKs,
                     scoreDiff, currentInn,
                     contracts:      betResult.finalContracts,
+                    initFilled:     betResult.initFilled,
                     askCents:       betResult.freeMoneySummary.askCents,
                     expectedProfit: betResult.freeMoneySummary.expectedProfit,
                     game: ctx.game, paper: bettor.paper !== 0,
                   }, webhooks)
-                } else if (q.mode === 'dead-path') {
+                } else if (q.mode === 'early-blowout' && betResult?.freeMoneySummary) {
+                  await notifyBlowout({
+                    pitcherName: ctx.pitcherName,
+                    strike: q.n, currentKs,
+                    scoreDiff, currentInn,
+                    contracts:      betResult.finalContracts,
+                    initFilled:     betResult.initFilled,
+                    askCents:       betResult.freeMoneySummary.askCents,
+                    expectedProfit: betResult.freeMoneySummary.expectedProfit,
+                    game: ctx.game, paper: bettor.paper !== 0,
+                  }, webhooks)
+                } else if (q.mode === 'late-inning-no') {
                   await notifyLiveBet({
                     pitcherName: ctx.pitcherName,
                     strike: q.n, side: q.betSide,
                     marketMid: q.midCents, edge: q.edge, betSize: finalBetSize,
                     currentKs, currentIPraw, currentPitches, paper: bettor.paper !== 0,
+                    betMode: 'late-inning-no',
                   }, webhooks)
+                } else if (q.mode === 'pull-hedge' && betResult?.freeMoneySummary && (betResult.initFilled ?? 0) > 0 && capturedHedge) {
+                  const hedgePos = capturedHedge._myPos ?? {}
+                  await notifyHedge({
+                    pitcherName:    ctx.pitcherName,
+                    strike:         q.n,
+                    currentKs,
+                    currentIPraw,
+                    currentInning:  currentInn,
+                    yesContracts:   hedgePos.filledContracts ?? 0,
+                    yesFillCents:   hedgePos.fillPriceCents ?? 0,
+                    hedgeContracts: betResult.finalContracts,
+                    hedgeAskCents:  betResult.freeMoneySummary.askCents,
+                    hedgeCost:      betResult.finalContracts * (betResult.freeMoneySummary.askCents / 100),
+                    game:           ctx.game,
+                    paper:          bettor.paper !== 0,
+                  }, webhooks)
+                } else if (q.mode === 'dead-path') {
+                  // Taker modes — order executes immediately, notify now
+                  await notifyLiveBet({
+                    pitcherName: ctx.pitcherName,
+                    strike: q.n, side: q.betSide,
+                    marketMid: q.midCents, edge: q.edge, betSize: finalBetSize,
+                    currentKs, currentIPraw, currentPitches, paper: bettor.paper !== 0,
+                    betMode: q.mode,
+                  }, webhooks)
+                } else if (q.mode === 'high-conviction') {
+                  // Maker order — only notify if it filled immediately (rare cross).
+                  // If resting, convertStaleMakers fires the notification on confirmed fill.
+                  if (betResult.orderStatus === 'filled') {
+                    await notifyLiveBet({
+                      pitcherName: ctx.pitcherName,
+                      strike: q.n, side: q.betSide,
+                      marketMid: q.midCents, edge: q.edge, betSize: finalBetSize,
+                      currentKs, currentIPraw, currentPitches, paper: bettor.paper !== 0,
+                      betMode: 'high-conviction',
+                    }, webhooks)
+                  } else {
+                    console.log(`  [MAKER RESTING] ${ctx.pitcherName} ${q.n}+ ${q.betSide} — order resting, Discord held until fill`)
+                  }
                 }
-                // high-conviction: maker order — no notification until fill confirmed at T-120
               }
+            }
+            if (!anySuccess) {
+              const allPlaced = activeBettors.every(b => placed.has(`${b.id}:${q.betKey}`))
+              const reason = allPlaced ? 'already placed this session (dedup)' : 'execution failed — see console'
+              db.saveLog({ tag: 'SKIP', level: 'warn', msg: `${ctx.pitcherName} ${q.n}+ ${q.betSide} edge not placed — ${reason}`, pitcher: ctx.pitcherName, strike: q.n, side: q.betSide })
             }
             return anySuccess
           }
@@ -2266,8 +3648,35 @@ async function main() {
             const success = await runExecItem(i)
             if (LIVE && success) await loadDailyLoss()
           }
+
+          // ── Adaptive poll: set per-pitcher next-check timestamp ──────────
+          // Convert K-count thresholds to estimated BF thresholds so the main
+          // loop wakes up sooner as the pitcher approaches each threshold.
+          // live.pK_effective is the posterior K-rate; 1/pK_effective ≈ BF per K.
+          if (live && live.pK_effective > 0) {
+            const bfPerK = 1 / live.pK_effective
+            const bfThresholds = qualifying.map(q =>
+              currentBF + Math.max(1, Math.round((q.n - currentKs) * bfPerK)),
+            )
+            _pitcherNextCheckAt.set(
+              String(pitcherId),
+              Date.now() + _adaptivePollMs(currentBF, bfThresholds),
+            )
+          } else if (pitcherPulledEarly) {
+            // Pulled pitcher — market repricing rapidly, check every 20s
+            _pitcherNextCheckAt.set(String(pitcherId), Date.now() + 20_000)
+          }
         }
-      } catch { /* skip game on error */ }
+      } catch (err) {
+        const gLabel = ctx?.game ?? game?.game_label ?? 'unknown'
+        console.error(`[live] ERROR in game loop [${gLabel}]:`, err.message)
+        db.saveLog({ tag: 'ERROR', level: 'error', msg: `game loop error [${gLabel}]: ${err.message?.slice(0, 200)}` }).catch(() => {})
+        alertError('liveMonitor:gameLoop', err, {
+          game:    gLabel,
+          pitcher: ctx?.pitcherName ?? 'unknown',
+          phase:   ctx?.phase ?? 'unknown',
+        }).catch(() => {})
+      }
     }
 
     if (allDone && iteration > 1) {
@@ -2276,7 +3685,7 @@ async function main() {
       // Cancel any stale resting orders now that all games are final
       try {
         const liveUsers = await db.all(
-          `SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor=1 AND kalshi_key_id IS NOT NULL AND id != 1`,
+          `SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor=1 AND kalshi_key_id IS NOT NULL AND is_system_admin = 0`,
         )
         for (const u of liveUsers) {
           const creds = { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key }
@@ -2318,15 +3727,29 @@ async function main() {
       break
     }
 
-    const sleepSec = urgentThisCycle ? FAST_SEC : POLL_SEC
-    if (urgentThisCycle) process.stdout.write(`⚡${sleepSec}s `)
-    await new Promise(r => setTimeout(r, sleepSec * 1000))
+    // Adaptive sleep: use minimum next-check delay across all active pitchers.
+    // If any pitcher is within 5 BF of a threshold, we wake up sooner.
+    // Falls back to FAST_SEC if urgency flag is set.
+    let nextWakeMs = urgentThisCycle ? FAST_SEC * 1000 : POLL_SEC * 1000
+    if (_pitcherNextCheckAt.size > 0) {
+      const minNext = Math.min(..._pitcherNextCheckAt.values())
+      const timeToMin = minNext - Date.now()
+      if (timeToMin > 0 && timeToMin < nextWakeMs) {
+        nextWakeMs = Math.max(3000, timeToMin)  // floor 3s
+      }
+    }
+    if (urgentThisCycle) process.stdout.write(`⚡${(nextWakeMs/1000).toFixed(0)}s `)
+    await new Promise(r => setTimeout(r, nextWakeMs))
   }
 
   await db.close()
 }
 
-main().catch(err => {
-  console.error('[live] fatal:', err.message)
+main().catch(async err => {
+  console.error('[live] fatal:', err.message, err.stack)
+  try {
+    await db.saveLog({ tag: 'ERROR', level: 'error', msg: `FATAL CRASH: ${err.message?.slice(0, 300)}` })
+    await db.close()
+  } catch { /* cleanup failed — exiting anyway */ }
   process.exit(1)
 })
