@@ -29,7 +29,7 @@ async function main() {
 
   const bets = await db.all(
     `SELECT id, pitcher_id, pitcher_name, strike, side, model_prob, lambda,
-            fill_price, bet_size, pnl, result, actual_ks, live_bet, mode,
+            fill_price, bet_size, pnl, result, actual_ks, live_bet,
             edge, market_mid, bet_date
      FROM ks_bets
      WHERE bet_date = ?
