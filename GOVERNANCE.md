@@ -845,6 +845,16 @@ status, and decision history. Updated 2026-05-07.
 > K=7-9 −$2,279 (−91% ROI, the bulk of fires), K≥10 +$2,313 (+361% ROI).** Net +$676
 > is K=6 + tail convexity *minus* a bleeding mid-strike bucket — watch K=7-9 under v1h.
 >
+> **Current prod state (2026-05-12 PM):** `FADE_VARIANT=v3` IS set on the worker
+> (Railway env var) per operator decision — weighting the recent regime where K=7-9
+> bled (−$2,279 / −91% ROI in the May 7-11 paper sample, which v3's strike filter
+> skips) over the OOS test's verdict (which was built on the older Mar 31–May 6 data).
+> It's paper-only, so this is a no-cost way to keep gathering v3-vs-v1h data; the
+> per-strike/per-ask buckets in the 11:55pm fade report show both side by side, and
+> `fireFadeModel.mjs` now logs every fire-time ladder to `fade_fire_snapshots` so any
+> variant can be replayed cleanly once ~2-3 weeks of rows accumulate. Flip back with
+> `FADE_VARIANT=v1h` (or delete the var — v1h is the code default).
+>
 > Everything below describes the v3 config as it stood when promoted; kept for history.
 
 - **Status (pre-2026-05-12)**: Active paper test Day 5+. **THE PRIMARY VALIDATION TARGET.**
