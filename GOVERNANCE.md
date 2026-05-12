@@ -519,6 +519,51 @@ import from there; no duplication allowed.
 
 ---
 
+## Known Bugs Fixed — 2026-05-12
+
+### 1. Bankroll did not compound — `morning_bankroll` reset to a static value every day
+`lib/bankrollState.js` → `initBankrollState()` seeded the daily `bankroll_state` row from
+(live Kalshi balance) → `users.starting_bankroll` → `STARTING_BANKROLL` env. In paper mode
+there is no live balance, so every day's `morning_bankroll` snapped back to the static
+fallback (it had been frozen at $513.54 since May 3) — green/red nights never carried forward,
+because `realized_pnl` is only written by `addRealized()` on `paper=0` settlements and paper
+P&L lives only in `ks_bets.pnl`.
+
+**Fix:** when no live balance is available, `initBankrollState()` now rolls forward from the
+prior `bankroll_state` row: `new morning_bankroll = prev.morning_bankroll + SUM(ks_bets.pnl)`
+for the prior `bet_date` (settled, non-void). Falls back to `users.starting_bankroll` then
+`STARTING_BANKROLL` env only if there is no prior day. Logs a `[bankrollState] rollover …` line.
+`INSERT OR IGNORE` semantics are unchanged, so a redeploy mid-day never overwrites the day's
+anchor — the rollover only sets the value when a brand-new day's row is first created (server
+start / the 1:03am ET cron). Live mode is unchanged: it still prefers the real Kalshi balance.
+
+> Manual override: to force a specific morning bankroll, `UPDATE bankroll_state SET
+> morning_bankroll=?, available_pool=? + realized_pnl - committed_capital WHERE bet_date=?`
+> (and optionally `users.starting_bankroll` for the fallback). The next day will then compound
+> off that value. (Done 2026-05-12: base reset to $5,000 + prior-day P&L = $5,198.67.)
+
+### 2. `postGameAttribution.js` crashed every cycle on nonexistent `ks_bets.mode` column
+The attribution/calibration job `SELECT`ed `mode` from `ks_bets` — that column doesn't exist
+(the columns are `bet_mode` and `live_bet`; `mode` was never referenced anywhere else in the
+file). Result: `[attribution] fatal: no such column: mode` on every run, so per-pitcher λ
+accuracy / prob-calibration logging and the `runCalibration()` trigger never executed.
+
+**Fix:** removed `mode` from the SELECT list. (The `(paper = 0 OR paper IS NULL)` filter is
+left as-is — in pure paper mode this still produces "No settled bets"; broadening it would
+change which bets feed `runCalibration()`, out of scope for the crash fix.)
+
+### 3. Postponement-cancel query referenced wrong `games` column names
+`server/scheduler.js` 4pm/5pm ET postponement passes queried `games.home_pitcher_id` /
+`games.away_pitcher_id` — the actual columns are `pitcher_home_id` / `pitcher_away_id` (the
+`home_pitcher_id`/`away_pitcher_id` names live on the `game_pulse` table, not `games`). Result:
+`[scheduler] postponement cancel error: no such column: g.home_pitcher_id` — non-fatal (the
+inner UPDATE has its own `.catch`), but pending bets for postponed games were never cancelled.
+
+**Fix:** `g.home_pitcher_id` → `g.pitcher_home_id`, `g.away_pitcher_id` → `g.pitcher_away_id`
+(matches the correct usage already in `ksBets.js:1618`).
+
+---
+
 ## Known Bugs Fixed — 2026-04-25
 
 ### 1. Kelly NO-bet formula — all NO bets returned betSize=0

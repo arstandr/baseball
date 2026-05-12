@@ -1396,7 +1396,7 @@ export async function startScheduler({ gateway = null } = {}) {
                AND EXISTS (
                  SELECT 1 FROM games g
                  WHERE g.date = bs.bet_date AND g.status = 'postponed'
-                   AND (g.home_pitcher_id = bs.pitcher_id OR g.away_pitcher_id = bs.pitcher_id)
+                   AND (g.pitcher_home_id = bs.pitcher_id OR g.pitcher_away_id = bs.pitcher_id)
                )`,
             [d],
           )
