@@ -103,8 +103,12 @@ export function renderRuleFilters(j) {
     if (items?.length) lines.push(`<div class="sc-pipe-rule-row">${badge(label, type)} ${items.map(i => `${i.strike}+ ${i.side}`).join(', ')}</div>`)
   }
   add('Yes-cap drop', j.yes_per_pitcher_cap?.dropped)
-  add('Rule A drop', j.rule_a_no_ban?.dropped)
-  add('Rule D drop', j.rule_d_yes_low_prob?.dropped)
+  add('Rule A drop',  j.rule_a_no_ban?.dropped)
+  add('Rule D drop',  j.rule_d_yes_low_prob?.dropped)
+  add('Rule G drop',  j.rule_g_yes_high_strike?.dropped)
+  add('Rule H drop',  j.rule_h_yes7_edge?.dropped)
+  add('Rule I drop',  j.rule_i_no7_conditions?.dropped)
+  add('Rule K drop',  j.rule_k_pregame?.dropped ?? j.rule_j_yes6_live_only?.dropped)
   lines.push(`<div class="sc-pipe-rule-row">${badge('Inputs', 'neutral')} ${j.inputs_count ?? '?'} markets evaluated → ${badge('Passed', 'good')} ${j.passed_count ?? '?'}</div>`)
   return `<div class="sc-pipe-rules">${lines.join('')}</div>`
 }

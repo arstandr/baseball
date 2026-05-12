@@ -14,7 +14,7 @@ import 'dotenv/config'
 import { execSync } from 'node:child_process'
 import axios from 'axios'
 import * as db from '../../lib/db.js'
-import { kellySizing, capitalAtRisk } from '../../lib/kelly.js'
+import { kellySizing } from '../../lib/kelly.js'
 import { placeOrder } from '../../lib/kalshi.js'
 import { notifyEdges, notifyDailyReport } from '../../lib/discord.js'
 import { parseArgs } from '../../lib/cli-args.js'
@@ -110,7 +110,10 @@ async function logEdges() {
       const betSize = Math.min(sizing.bet_size, (dailyBudget - dailyUsed), bankroll * 0.05)
       if (betSize < 10) continue
 
-      const car = capitalAtRisk(betSize, mid, e.side === 'YES' ? 'yes' : 'no')
+      // betSize is USD cash to spend; capital at risk equals the cash committed. Previously
+      // used capitalAtRisk(betSize, mid, side) which interpreted betSize as notional contracts
+      // and undercounted cheap-side bets by 1/price.
+      const car = betSize
       dailyUsed += car
 
       const row = {

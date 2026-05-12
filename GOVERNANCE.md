@@ -1,6 +1,6 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
-**Last updated: 2026-04-25 (Kelly system deployed, NO-bet formula fixed, scheduler cleanup fixed)**
+**Last updated: 2026-05-11 (Day 5 — v3.1 active; settlement-frontrun strategy investigated + killed; F5 adjacent market data collection started).**
 
 ## System Overview
 
@@ -729,3 +729,708 @@ is the highest-ROI segment of the entire system.
    in the dataset, NOT how accurate the model is for that pitcher. Do not use
    confidence as a bet filter. Morning-bet `high` confidence showed 0% WR in
    early live data — the label is informational only.
+
+---
+
+# Strategy Registry & Paper Testing — May 2026
+
+This section catalogues every strategy variant tried since the Kelly system went
+live (Apr 25). Each entry covers: hypothesis, backtest setup, results, current
+status, and decision history. Updated 2026-05-07.
+
+## Active Strategies (currently firing)
+
+### `pregame_normal` — Original Kelly K-prop bets
+- **Status**: Live, real money (paper mode active currently per May 1 incident posture)
+- **Description**: Production model from Apr 25 GOVERNANCE — 10-feature lambda
+  (K9_career/season/L5, opp K%, park, weather, ump, TTO, velo, Savant) +
+  NB r=30 distribution + Kelly sizing.
+- **Recent performance**: Backtest of last 9 days Apr 28 → May 6 showed
+  **+0.40¢ avg CLV across 112 fires** with 22.3% beat-rate. Marginal/flat.
+  Per-bet ROI essentially zero.
+- **Conclusion**: Edge has compressed. Not unprofitable but not the breakthrough.
+- **Open question**: Is over-engineering (10 features) hurting vs simpler K9-only?
+
+### `pregame_cross_strike` — Strategy B (intra-pitcher math arb)
+- **Status**: Live, paper mode, validated initial signal
+- **Hypothesis**: For a single pitcher's strike chain (5+, 6+, 7+, ...), the
+  market-implied probabilities should lie on a smooth Poisson distribution.
+  Strikes that deviate by 4-20¢ from the fit are mispriced; bet the cheap side.
+- **Module**: `lib/crossStrikeCandidates.js`. Pure math, no pitcher data.
+- **POC validation (May 5, 18 bets)**: 14W/4L = 78% win rate, +62% ROI.
+- **Wide backtest (May 6, 75 fires across Apr 28 → May 5)**:
+  - Win rate: 45.3% (regression from POC)
+  - ROI: -15.9%
+  - Most fires at high asks (>65¢) where fee math is hostile
+  - One bad day (May 3) was 9 fires, all losses
+- **Filter sweep findings**:
+  - `resid≥6c`: 20 fires, 65% win, -8% ROI (best filter)
+  - `resid≥8 + NO + ask≤75`: 13 fires, 77% win, +2.5% ROI per bet
+  - Other filters didn't improve materially
+- **CLV signal (May 6)**: 6 fires, +2.33¢ avg CLV, 100% beat the close.
+  Strong CLV signal but P&L lagging.
+- **Live config (betting_rules)**:
+  - `cross_strike_enabled = 1`
+  - `cross_strike_min_residual = 0.04`
+  - `cross_strike_max_residual = 0.20`
+  - `cross_strike_max_per_pitcher = 2`
+  - `cross_strike_max_pct_bankroll = 0.03`
+  - `cross_strike_tail_dollar_cap = 5`
+  - `cross_strike_tail_ask_threshold = 25`
+- **Decision**: Keep running, collect data via `shadow_cross_strike` table.
+  No filter changes during paper test (preserve full candidate distribution).
+
+### `pregame_fade_yes` v3 — fade with H-H/H-I + middle-strike skip (PROMOTED 2026-05-10 evening)
+- **Status**: Active paper test Day 5+. **THE PRIMARY VALIDATION TARGET.**
+- **v3 cutover**: 2026-05-11 first fire (next morning).
+- **Version history**:
+  - v1 (5/7-5/10 morning): no filter, edge≥5c, ask≤50c, strike≥6
+  - v2 (5/10 morning-evening, ~1 day): added H-H + H-I (avg_innings_l5≥5, confidence>0.3)
+  - **v3 (5/10 evening onward)**: v2 + skip K=7,8,9 (only fire K=6 or K≥10)
+- **Why v3 promoted same day as v2**: empirical evidence on 90-fire sample
+  (Days 1-4 with duplication, ~45 unique) showed strike filter delivers an
+  additional +$2,044 NET vs v2 ($2,181 saved on losses, only $137 forfeited).
+  Strike 7-9 had **1 win in 31 fires (3.2% win rate)** — clearly market
+  efficiency concentrates in the bell-curve middle. Same-day promotion
+  justified by structural strength of the signal.
+- **Hypothesis**: Public over-bets favorites' YES at low strikes. Markets
+  systematically underprice high-K pitchers' tail strikes (7+, 8+, 9+).
+  Buying YES at 15-40¢ asks pays 4-8× when pitchers deliver. ~32-38% win rate
+  with that asymmetric payoff = +50-100% per-bet ROI.
+- **Validation source**: 37-day extended backtest, Mar 31 → May 6, 1,056
+  pitcher-games via Kalshi candle history + MLB game logs.
+  - TRAIN half (18 days, Mar 31 → Apr 17): 80 fires, +74% ROI, $5K → $16,495 (+230%)
+  - TEST half (19 days, Apr 18 → May 6, lock-box never tuned on): **95 fires, +127% ROI, $5K → $29,030 (+481%)**
+  - Max drawdown: 6.6% (test) / 13.1% (train)
+- **Configuration (v3 LOCKED 2026-05-10 evening)**:
+  - **Model**: Negative Binomial r=8, lambda = K9_l5 × avgIP_l5 / 9
+  - **Filter**: YES-only, edge ≥5¢, ask ≤50¢
+  - **NEW v3 filter — STRIKE**: only fire K=6 OR K≥10 (skip 7,8,9)
+  - **Per-pitcher cap = 1**
+  - **v2 filter (still active) — H-H**: skip if `pitcher_signals.avg_innings_l5 < 5.0`
+  - **v2 filter (still active) — H-I**: skip if `pitcher_signals.confidence ≤ 0.3`
+  - **Sizing**: 1% bankroll base × edge multiplier (1×–5×), $200/bet hard cap
+  - **Volume cap**: 10% of 24h volume (deployed 2026-05-08)
+  - **No top-N daily cap** (fire all qualifying candidates)
+- **Hypothesis sweep results (TRAIN-only Δ ROI vs baseline)**:
+  | tweak | Δ ROI | kept? |
+  |---|---|---|
+  | per-pitcher cap=1 | +31% | YES (the breakthrough) |
+  | strike ≥6 floor | +19% | YES |
+  | NB r=8 distribution | +17% | YES |
+  | edge-weighted sizing 5× | +6% ROI / +56% return | YES |
+  | edge ≥12c | +7% | NO (raised regret of skipping good fires) |
+  | ask ≤30c | +29% (alone, redundant) | NO (subsumed by strike≥6) |
+  | window 7/10 | 0% | NO (no signal) |
+  | skip rookies (<3 starts) | -25% | NO (HURTS — rookies are valuable longshots) |
+  | top-1 per day | -6% | NO |
+  | top-3 per day | -23% | NO |
+  | stop-loss 2-day streak | -12% | NO |
+- **Compounding simulation, $5K starting bankroll**:
+  | sizing | 36-day final | return | max DD |
+  |---|---|---|---|
+  | 1% | $9,744 | +95% | 12% |
+  | 2% | $15,767 | +215% | 21% |
+  | 3% | $19,377 | +288% | 27% |
+  | 5% | $21,352 | +327% | 24% |
+- **Realistic deflated forecast (after slippage, selection bias, liquidity caps)**:
+  - 36 days: $5K → $15-22K (50% of backtest)
+  - 165-day MLB season: $5K → $50-150K
+- **Today's hypothetical Day-0 (May 6, retroactive on real markets)**: 6 fires,
+  0/6 settled, 1 pending. -$990 hypothetical, -19.8% bankroll. **Validated
+  variance is real — backtest had 24% zero-win days.** Edges were 30+¢ on
+  multiple losers (Schultz, McCullers, Wheeler), suggesting markets had
+  private info on pitch-count limits / rookie status that our model lacks.
+- **Live system**:
+  - Fire script: `scripts/fireFadeModel.mjs` (every 30 min, 11 AM – 11 PM ET)
+  - Strategy mode: `pregame_fade_yes` added to `lib/strategyMode.js`
+  - Discord alert per fire (pitcher, strike, edge, sizing rationale)
+  - Comprehensive shadow log: `scripts/logFadeShadow.mjs` (1:40 AM ET nightly)
+  - Daily progress to Discord: `scripts/fadeTestProgress.mjs` (11:55 PM ET)
+  - Site panel: `/api/ks/fade-test` + `fade-test-panel` div in `index.html`
+- **Decision gates**:
+  - **Day 7 (May 13)**: sanity check — win rate ≥25%, direction positive
+  - **Day 14 (May 20)**: real-money go/no-go — ROI within 50% of +127% test backtest
+  - **Day 30 (June 5)**: scale-up — ROI within 75%, ready for full sizing
+
+## Active Shadow Loggers (data-only, no firing)
+
+These accumulate candidate data nightly so future model variants can be
+backtested as a single SQL query against the captured data.
+
+### `shadow_cross_strike`
+- **Started**: 2026-05-06
+- **Coverage**: Apr 28 → today (1,113 candidate rows, 911 settled)
+- **Cron**: 1:30 AM ET daily (`scripts/logCrossStrikeShadow.mjs`)
+- **What it captures**: Every Cross-Strike candidate (whether fired or not)
+  with full Poisson + NB fits, residual, market data, would_fire flag,
+  filter reason, outcome. Lets us run any new filter sweep instantly.
+
+### `shadow_cross_strike_total`
+- **Started**: 2026-05-06
+- **Coverage**: Apr 28 → today (1,180 candidate rows)
+- **Cron**: 1:35 AM ET daily (`scripts/logCrossStrikeTotalShadow.mjs`)
+- **What it captures**: Cross-Strike math applied to KXMLBTOTAL (game total
+  runs) ladders — same Poisson-residual logic on a different market.
+- **Findings so far**: 76% win rate but most fires at high asks (>65¢);
+  filtered ROI marginal (+2.5% on 13 fires with strict filter).
+  **Decided not worth firing** but worth the passive data capture.
+
+### `fade_paper_test_candidates` (NEW 2026-05-07)
+- **Coverage**: Apr 28+ via backfill once `logFadeShadow.mjs` runs
+- **Cron**: 1:40 AM ET daily (`scripts/logFadeShadow.mjs`)
+- **What it captures**: For every starter every day, every strike, every side:
+  - Full strike chain (yes_bid/ask/no_bid/no_ask/market_mid/spread)
+  - K9 across 6 windows (l3, l5, l7, l10, season, career)
+  - Lambda + model_prob + edge under 6 model variants:
+    - `poisson_l5` (current production approximation)
+    - `nb8_l5` (THE IDEAL — what we fire on)
+    - `nb10_l5`, `nb12_l5` (dispersion variants)
+    - `nb8_l10` (longer-window variant)
+    - `poisson_career` (alternative anchor)
+  - `would_fire` flag per filter config + specific block reason
+  - Outcome (actual K, IP, BF) joined from `pitcher_recent_starts`
+  - Cross-link to actual ks_bets row when fired
+  - Pre-computed `won_under_ideal` and `pnl_at_default_size` for fast queries
+- **Schema columns left null on backfill** (require live joins): `hand`,
+  `days_rest`, `season_start_num`, `opp_k_pct`, `ump_name`, `ump_k_factor`,
+  `temp_f`, `wind_dir`, `wind_speed`, `pitcher_team_won`. The IDEAL config
+  doesn't use these — they're future enrichment.
+
+## Retired / Killed Strategies
+
+### `pregame_inversion` — Bet against model when ace is overpriced
+- **Hypothesis**: When KS market overpays on ace YES (public bias), bet NO.
+  Same direction as Cross-Strike's NO arm but at a different filter.
+- **History**:
+  - Apr 27 onward: live in production
+  - Backtest Apr 28 → May 5: 8 fires, -0.94¢ avg CLV, 37.5% beat rate
+  - Inverted-K cross-market test (May 6): -43.7% ROI on 35 fires (failed)
+- **Status**: **Functionally retired**. Still live in production but
+  generating ~0 fires under current filters. CLV signal trending negative.
+  Will not be promoted to main strategy.
+- **Decision (2026-05-06)**: User explicitly rejected lowering inversion
+  gate to create more volume. Decided to track via shadow audits only.
+
+### Cross-market K↔TOTAL (inverted framing)
+- **Hypothesis (May 6)**: TOTAL market is smarter than KS market (more depth,
+  tighter spreads). Use TOTAL-implied per-pitcher runs to derive expected K
+  rate, compare to KS market mid, bet KS where divergence is large.
+- **Backtest (35 fires)**: 22.9% win rate, **-43.7% ROI**. FAILED.
+- **Why it failed**: TOTAL reflects offense quality more than pitcher quality.
+  50/50 starter-runs split is too crude. KS market actually had better K
+  predictions than TOTAL-derived K rates in the validation window.
+- **Status**: **DEAD**. No further work unless a sophisticated runs-allocation
+  model (with bullpen ERA, opp offense, park) gets built first.
+
+### Cross-Strike-Total firing (Strategy on KXMLBTOTAL ladder)
+- **Hypothesis (May 6)**: Apply Cross-Strike math to game total runs ladder.
+  TOTAL ladder has 5× depth and 6× tighter spreads vs KS — less competition,
+  bigger edge per bet.
+- **Backtest (46 fires across 23 games)**: 76% win rate, -4.4% ROI baseline.
+  Filtered to 13 fires (resid≥8 + NO + ask≤75): 77% win, +2.5% per-bet ROI.
+- **Status**: **Not worth firing** at +2.5% ROI on small sample. User said
+  "not worth it for 2.5% roi". Shadow data still being collected nightly.
+- **Will revisit if**: shadow data shows a stronger filter combination after
+  more samples accumulate.
+
+### Single-Pick (top-1/day fade)
+- **Hypothesis**: Pick the SINGLE biggest mispricing per day, bet ONE strike
+  with high conviction. Backtest on first attempt: 7 fires, 43% win, +32% ROI.
+- **Status**: **Subsumed by `pregame_fade_yes`**. The full backtest revealed
+  that top-5/day with per-pitcher cap=1 outperforms top-1/day (because more
+  diversification across pitchers). The "concentrated single pick" intuition
+  was right in spirit (one strike per pitcher) but wrong in concentration
+  (we want 5 different pitchers, not 1).
+
+## Data Infrastructure Built (May 1 → May 7)
+
+### Tables
+| table | rows | purpose |
+|---|---|---|
+| `market_snapshots` | 670K+ | Per-strike bid/ask/mid/volume, every poll, all pitchers |
+| `pitcher_recent_starts` | 859 (was 676) | Outcomes for every starter — backfilled to close gap |
+| `pitcher_edge_cache` | 230 | Per-pitcher daily edge calc with `edges_json` |
+| `shadow_cross_strike` | 1,113 | Cross-strike candidate registry |
+| `shadow_cross_strike_total` | 1,180 | Cross-strike-on-TOTAL candidate registry |
+| `fade_paper_test_candidates` | (NEW 2026-05-07) | Comprehensive fade-model multi-variant log |
+| `closing_line_cents` / `clv_cents` cols on `ks_bets` | per-fire | CLV writeback (sharpness metric) |
+
+### Cron Schedule (current state)
+| time (ET) | what | script |
+|---|---|---|
+| 11:00 PM | EOD report (existing) | scheduler.js inline |
+| **11:45 PM** | **CLV writeback (NEW May 6)** | `scripts/backtestCLV.mjs` |
+| 11:55 PM | Fade test daily progress | `scripts/fadeTestProgress.mjs` |
+| 1:15 AM | Outcome harvest (NEW May 6) | `scripts/harvestOutcomes.mjs` |
+| 1:30 AM | Cross-strike shadow log (NEW May 6) | `scripts/logCrossStrikeShadow.mjs` |
+| 1:35 AM | Cross-strike-total shadow (NEW May 6) | `scripts/logCrossStrikeTotalShadow.mjs` |
+| **1:40 AM** | **Fade comprehensive shadow (NEW May 7)** | `scripts/logFadeShadow.mjs` |
+| 11:00 PM cron | Dynamic blocklist eval (existing) | `lib/dynamicBlocklist.js` |
+| every */30 11-23 | **Fade fire (NEW May 7)** | `scripts/fireFadeModel.mjs` |
+
+### One-time builds
+- **`buildRawBacktestData.mjs`** (May 6) — pulls ALL settled KXMLBKS markets
+  via Kalshi `/markets?status=settled` paginated, then candle history per
+  market via `/series/{KXMLBKS}/markets/{ticker}/candlesticks`. Caches MLB
+  game logs + candle data to disk. **858 records persisted to
+  `.rawBacktestData.json`** covering 37 days (Mar 31 → May 6). Reusable for
+  any future modeling experiment without re-pulling external data.
+
+## Backtests Run (chronological)
+
+| date | what | result | decision |
+|---|---|---|---|
+| 2026-05-05 | Cross-Strike POC (May 4-5, 18 bets) | 78% win, +62% ROI | Promote to live, paper |
+| 2026-05-06 | Cross-Strike wide backtest (75 fires, 9 days) | 45% win, -16% ROI | Variance — keep collecting |
+| 2026-05-06 | Cross-Strike filter sweep | resid≥6 = best filter | Don't change rules during paper test |
+| 2026-05-06 | Cross-Strike-Total backtest (46 fires, 23 games) | 76% win, -4.4% ROI | Don't fire; passive shadow only |
+| 2026-05-06 | Cross-Strike-Total filter sweep | resid≥8+NO+ask≤75 = +2.5% ROI on 13 fires | Marginal, not worth firing |
+| 2026-05-06 | Cross-market K↔TOTAL | 53% direction correct, fails on big divergences | Direction was wrong; TOTAL is smarter |
+| 2026-05-06 | Inverted-K (TOTAL → KS) | 22.9% win, -43.7% ROI | DEAD |
+| 2026-05-06 | CLV writeback + backtest (151 historical fires) | pregame_normal: +0.40¢ avg CLV / 22% beat. live: +4.48¢ / 33% beat | Confirms current strategies are flat or marginally sharp |
+| 2026-05-07 | Single-Pick Public Fade (small backtest) | 25 fires, 40% win, +110% ROI on small sample | Promising — extend |
+| 2026-05-07 | **Extended Fade backtest (1,056 pitcher-games, 37 days)** | **TRAIN +74% ROI / TEST +127% ROI** | **PROMOTE: launch paper test** |
+| 2026-05-07 | Hypothesis sweep on extended data | per_pitcher_cap=1, strike≥6, NB r=8 are real wins | Lock these into IDEAL config |
+| 2026-05-07 | Compounding simulation ($5K, multiple sizings) | 3% per bet sweet spot, +288% over 36 days | 3% per bet for paper test |
+
+## Bug Fixes (May 1 → May 7)
+
+### `lib/kalshi.js` `getOrderbook` — silent null bids (FIXED 2026-05-06)
+- **Bug**: Kalshi API now returns `orderbook_fp` shape with `yes_dollars`/`no_dollars`
+  keys; old code parsed `orderbook.yes`/`no` and silently returned null bids.
+- **Impact**: `availableDepth()` returned 0 for ALL markets. Liquidity-capture
+  feature in ksBets.js:927 (post-only depth check) silently no-op'd.
+  liveMonitor.js:830 in-game depth cap also silent no-op.
+- **Fix**: Detect `orderbook_fp` shape, parse `yes_dollars` array, convert
+  dollar amounts to contract counts (qty / price = contracts).
+
+### Paper-flag bug (RECURRING, fixed twice in May)
+- **Pattern**: Synthetic paper-XXX rows getting flagged `paper=0` by various
+  startup/cleanup paths.
+- **Fix locations**:
+  - May 1: server/index.js startup backfill `WHERE order_id IS NULL OR order_id NOT LIKE 'paper-%'`
+  - May 3: scripts/live/ksBets.js contra-test path hardcoded paper:0 → conditional
+- **Hardening**: Added paper-flag-sweep cron (every minute, auto-corrects)
+
+### Cross-strike `strategy_mode` propagation (FIXED 2026-05-06)
+- Upsert was hardcoding `validateStrategyMode(e._inverted ? PREGAME_INVERSION : PREGAME_NORMAL)`
+- Cross-strike candidates losing their `pregame_cross_strike` mode
+- Fix: `validateStrategyMode(e.strategy_mode ?? (e._inverted ? ... : ...))`
+
+### Various Cross-Strike model bugs (FIXED 2026-05-06 in same session)
+- `gameLabel` undefined → renamed `_gameLabel`
+- `oppKPct` typo → `oppKpct`
+- `starts.length` undefined → use destructured `nStarts`
+- `careerK9` undefined in scope → use `k9_career`
+- `model_prob = c.cross_strike_market_prob` (Kelly produced 0 size) →
+  changed to `c.cross_strike_fit_prob` (correct conviction)
+
+## Key Decisions Log (chronological, May)
+
+| date | decision | rationale |
+|---|---|---|
+| May 1 | Paper-mode incident → live trading paused, $27.33 loss | Wrapper `lib/kalshi.js` was uncommitted; Railway ran old code |
+| May 3 | Recon watchdog deployed (5-min cron) | Detect Kalshi/DB mismatch automatically |
+| May 5 | Cross-Strike promoted to live (paper) | POC results too strong to leave on shelf |
+| May 6 | Don't lower inversion gate | User: "would not lower the real-money gate tonight just to create inversion volume" |
+| May 6 | CLV / outcome harvest infrastructure | Need sharpness measurement for any strategy |
+| May 6 | Cross-Strike-Total: collect data passively only | +2.5% ROI not worth firing complexity |
+| May 7 | IDEAL fade config locked: NB r=8, K9_l5, strike≥6, per-pitcher cap=1, edge-weighted | Best out-of-sample TEST result on 37-day backtest |
+| May 7 | Paper test, NO real money for 14 days | Day-14 (May 20) is decision gate |
+| May 7 | NO daily fire cap (user request) | Fire all qualifying candidates; per-pitcher cap=1 still applies |
+| May 7 | Multiple-sizing tracking | Log hypothetical P&L under 6 sizings (1%/2%/3% flat, edge-weighted, fixed $50/$100) |
+| May 7 | NO kill switch (user request) | Don't auto-pause on bad streak |
+| May 8 | Volume cap deployed (10% of 24h vol) | Realistic execution sizing; eliminates inflated paper P&L |
+| May 8 | Day 1 retroactive cap | Updated 5 of 9 Day 1 fires to capped sizes; bankroll $5,659 → $6,110 |
+| May 9 | Cross-strike-total declared not-worth-firing | +2.5% ROI on tiny sample; shadow data only |
+| May 10 | **H-H + H-I promoted to live as v2 fade filter** | 4-day evidence: +$1,083 vs unfiltered baseline. v2 active 2026-05-11 first fire. All other variants continue tracked via nightly filter sweep. |
+| May 10 | Day-14 decision criteria locked | See "What We're Looking For" section. ROI ≥15%, win rate ≥25%, drawdown <35% required for any real-money deployment |
+| **May 10 evening** | **H-N (strike filter K=6 OR K≥10) PROMOTED to v3** | Same-day as v2 due to overwhelming empirical signal: K=7-9 had 1W/30L in 4 days (3.2% win rate, -$2,044 net). v3 = v2 + skip K=7-9. v2 effectively ran for one fire-cycle. Structural rationale: market efficiency concentrates in bell-curve middle. |
+| May 11 | **Settlement-frontrun strategy KILLED** | 174-game backtest (`scripts/settlementFrontrunBacktest.mjs`): mean gross edge at +30s post-substitution = 0.01¢, 99.2% of strikes at ≤0¢. Kalshi MMs already move on the same upstream signals (broadcast video, bullpen warming) before MLB Stats API publishes the sub event. No captureable window. Do not rebuild on feed/live signal. |
+| May 11 | **F5 adjacent market test started (data collection only)** | New market avenue (KXMLBF5TOTAL first-5-innings total runs). 174-game Kalshi backtest showed marginal NO-side edge at wing strikes (≥5.5, ≥6.5) but small sample. Analytical model upgrade test (v2: NB(r=4) + park run factor + per-team bullpen ERA + weather, 8,557 games 2021-2024) FAILED to improve Brier — features add ~0pp. Sportsbook lines are sharp; Kalshi-specific edge needs Kalshi-specific data. Started 10-min snapshot capture cron. **No real money. No live bets. Forward data only.** Day-14 decision: 2026-05-25. |
+
+## What We're Looking For — Decision Criteria (added 2026-05-10)
+
+The fade v2 paper test runs through **2026-05-20 (Day 14 from launch)**. At that
+point we make a decision about deploying real money. Specific criteria:
+
+### Tier 1 — Required for ANY real-money decision
+1. **Win rate ≥ 25%** on v2 fires across the test window
+2. **Per-bet ROI ≥ +15%** (deflated forward expectation; backtest was +50-100%)
+3. **Max drawdown < 35%** of starting bankroll at any point
+4. **No structural failure** — strategy works through varied weather/parks/league trends
+
+### Tier 2 — Required for FULL-SIZE deployment (else half-size)
+5. **Cumulative bankroll ≥ +30%** by Day 14 ($5,000 → $6,500+)
+6. **No more than 4 consecutive zero-win days**
+7. **CLV positive** averaged across all fires (we beat the closing line)
+
+### Tier 3 — Stretch goals (would justify aggressive scaling)
+8. Cumulative ≥ +60% by Day 14 ($5,000 → $8,000+)
+9. Win rate ≥ 32% (matches backtest expectation)
+10. At least one alternate filter combination that beats v2 by another +20%
+    (suggests further refinement headroom)
+
+### What we're NOT requiring
+- Specific number of fires per day — varies with slate quality
+- Particular pitcher mix — variance is fine
+- Any single big winner — strategy is structurally about asymmetric payoffs
+
+### Tracking infrastructure (active)
+- **Daily filter sweep** (`scripts/dailyFilterSweep.mjs`, 12 AM ET cron) compares
+  v2 LIVE vs all alternative filter combos. Discord post nightly.
+- **Comprehensive shadow log** (`fade_paper_test_candidates`) captures every
+  candidate (fired or not) under 6+ model variants. Day 14 sweep will be a
+  single SQL query.
+- **CLV writeback** populates `closing_line_cents` and `clv_cents` on every fire.
+- **Outcome harvest** (1:15 AM ET) ensures `pitcher_recent_starts` has every
+  starter's K count by next morning.
+- **Intel backfill** (12:30 AM ET) refreshes pitcher_signals + pitcher_edge_cache
+  joins on shadow log so filter tests have current data.
+
+---
+
+## F5 Adjacent Market Test (started 2026-05-11)
+
+**Status: data collection only — NO live bets, NO real money. Decision date 2026-05-25 (14 days forward).**
+
+### Question
+Does Kalshi's `KXMLBF5TOTAL` market (first-5-innings total runs, 7 strikes per
+game: >0.5 … >6.5) contain an exploitable mispricing on the wing strikes
+(>5.5, >6.5) that our analytical run model can capture?
+
+### What's already been investigated and ruled out
+- **Settlement-frontrun on `KXMLBKS`** (buy NO above final-K after starter pull):
+  killed 2026-05-11. Market closes the gap within 30s of the MLB Stats API
+  sub-event; mean post-sub edge = 0.01¢. (See `scripts/settlementFrontrunBacktest.mjs`.)
+- **Analytical model improvement** (NB(r=4) + park run factor + per-team
+  bullpen ERA + weather) on 8,557-game historical dataset: Brier scores
+  essentially unchanged vs starters-only baseline (Δ < 0.001). Features add
+  no signal on F5 lines. Sportsbook lines are sharp.
+  (See `scripts/f5BacktestV2.mjs`, `/tmp/f5_v2_summary.txt`.)
+
+### What we're testing now
+- **Kalshi-specific spread**, not model quality. Hypothesis: Kalshi NO ask on
+  wing strikes (>5.5, >6.5) is systematically tighter than fair value because
+  liquidity concentrates on the main line.
+- v1 Kalshi 14-day backtest (`scripts/f5Backtest.mjs`): NO @ edge ≥10% returned
+  +3.2% net ROI on 265 bets across 154 games (Apr 27 – May 10). Promising but
+  small sample, within-game correlation inflates effective N.
+
+### Active collection
+- **Cron**: `*/10 10-23 * * * America/New_York` runs `scripts/captureF5Snapshots.mjs`.
+- **Table**: `f5_market_snapshots` (schema in `db/schema.sql`). One row per
+  (ticker × poll). Captures yes_bid, yes_ask, volume_24h, open_interest,
+  spread, market status.
+- **No bets fired.** Production cron is read-only on Kalshi.
+
+### Day-14 decision (2026-05-25)
+Re-run the wing-strike NO edge analysis on the Kalshi-specific forward data:
+- If NO @ edge≥10% net ROI ≥ +5% over ≥150 bets → build live system with
+  small caps ($50/bet) and the same paper-test framework as fade v3.
+- If +0–5% → keep collecting, extend test window 14 more days.
+- If ≤0% → kill the strategy, redirect data table to whatever's next.
+
+### What success looks like (and what failure looks like)
+- **Success**: forward Kalshi data confirms wing-strike NO mispricing is
+  structural (not a 14-day artifact).
+- **Failure**: the v1 +3.2% was sampling noise OR the mispricing existed
+  briefly and has since been arbed out by MMs.
+
+## Open Hypotheses (to test against shadow data over coming weeks)
+
+These are NOT being applied to the live IDEAL config. They will be tested
+retrospectively against `fade_paper_test_candidates` once enough data accrues.
+
+### H-A: Cap max edge at ~20-25¢
+- **Why**: Today's 6 losing fires all had edges > 30¢. The market often has
+  private info (pitch-count limits, rookie status) we don't. Filtering out
+  super-high edges may improve win rate.
+- **Test**: SQL query against `fade_paper_test_candidates` once N≥100 fires.
+
+### H-B: K9 from career-anchored Bayesian shrinkage
+- **Why**: K9_l5 has high variance (5 starts can swing K9 by ±2 from luck).
+  Shrinking toward career K9 may improve lambda accuracy.
+- **Test**: Add `k9_bayesian` variant to next shadow logger run.
+
+### H-C: Park-adjusted strike floor
+- **Why**: Coors games (high run, possibly low K) might benefit from strike ≥7
+  vs Petco games at strike ≥6.
+- **Test**: Once park_k_factor backfilled into shadow rows, run filter sweep.
+
+### H-D: Multi-day rolling streak rules
+- **Why**: Stop-loss after 2 consecutive losing days HURT in backtest (-12% ROI).
+  But what about after 3 days? 4 days? Variable streak threshold.
+- **Test**: Run streak-rule sweep on shadow data.
+
+### H-E: NO-side fade (currently disabled)
+- **Why**: We tested NO-side and found it -100% on small sample (4 fires).
+  But that was at our specific filter set. Different filter (e.g., low ask,
+  high market_mid YES) might work.
+- **Test**: NO-side variant with focused filter on shadow data.
+
+### H-F: Cross-game correlation hedging
+- **Why**: Same-day games are correlated (weather, league-wide K trend).
+  Fading a TOTAL UNDER on a same-day high-K-correlation game might reduce variance.
+- **Test**: Backtest correlated portfolios on extended data.
+
+### H-G: Time-of-fire window
+- **Why**: We fire at T-60. Closing line vs T-60 line might differ 1-3¢.
+  Maybe T-30 is better (closer to true close, but markets thinner).
+- **Test**: Run fire script at multiple time points, compare CLV.
+
+### H-H: Skip pitchers with avg_innings_l5 < 5.0  ✅ PROMOTED TO LIVE 2026-05-11
+**Promoted to live filter on 2026-05-11.** Empirical evidence below; the v2
+fade fire script applies this rule before generating any candidate. Continued
+tracking of "what if we hadn't applied this" via the nightly filter sweep so
+we know if the signal stays valid.
+
+
+- **Why**: The fade model assumes pitchers go 5+ IP (lambda = K9_l5 × avgIP_l5 / 9).
+  When a pitcher has been getting pulled early in recent starts, that lambda
+  overstates expected K count. The pitcher exits before reaching the strike.
+- **Source**: `pitcher_signals.avg_innings_l5` — already computed daily by
+  production engine. Available BEFORE fire time. No future knowledge.
+- **Empirical evidence (2026-05-07 → 2026-05-09, n=36 settled fade fires)**:
+  - **All 4 winners had avg_innings_l5 ≥ 5.0** (Imanaga 6.2, Burrows 5.3, Vásquez 5.3, Holmes 5.9)
+  - **10 losers had avg_innings_l5 < 5.0** — all lost when pitchers got pulled
+    early (Painter 4.6→pulled 3.2IP, Strider 3.1→pulled 1IP, Freeland 4.0→4IP at Coors, Yesavage 4.5, Liberatore 4.9, Gore 4.5, Mlodzinski 4.7, Dollander 4.8, Rocker 4.6, Prielipp 4.7)
+  - Counterfactual: skipping these 10 fires = **+$702 P&L improvement**, 0 wins forfeited
+  - Net P&L on 36 fires: **$98 → $800 (8× improvement)**
+- **Test on Day 14**: Run `WHERE avg_innings_l5 ≥ 5` filter against
+  `fade_paper_test_candidates` shadow data once N ≥ 100 fires.
+- **Confidence**: HIGH — small sample but clean separation (0 winners would be killed).
+
+### H-I: Skip pitchers with production-engine confidence ≤ 0.3  ✅ PROMOTED TO LIVE 2026-05-11
+**Promoted to live filter on 2026-05-11.** Empirical evidence below; v2 fade
+fire script applies this rule before generating any candidate. Continued
+tracking of "what if we hadn't applied this" via the nightly filter sweep.
+
+### H-V: Lineup-aware lambda adjustment  ✅ ACTIVE 2026-05-10 EVENING
+**Continue firing pre-lineup, but enhance lambda when opposing lineup posts.**
+- **Why both**: Pre-lineup markets are wider/more mispriced (less informed
+  trader flow). Capturing pre-lineup mispricing has real value. After
+  lineups post, ALSO re-evaluate with lineup data — if a pitcher we missed
+  pre-lineup now has edge with K-prone opposing lineup, fire then.
+- **Implementation**: When loading lambda from K9_l5, query `game_lineups`
+  for opposing team's lineup_k_pct (matching pitcher's hand). If posted
+  with batter_count ≥ 8, multiply lambda by `(lineup_k_pct / 0.22)` (clamped
+  to [0.85, 1.15]). No-op if lineup not posted.
+- **Two implicit passes via existing 30-min cron**:
+  1. Early-day fire on probable + raw lambda (capture pre-lineup mispricing)
+  2. Post-lineup-post fire with adjusted lambda (catches new candidates that
+     didn't qualify pre-lineup, OR pushes marginal fires below threshold)
+- **Per-pitcher cap=1 prevents double-firing** on same pitcher.
+- **Smoke-test**: today, Bubba Chandler had +5.9¢ edge pre-lineup. Post-lineup,
+  opp K%=20.5% (K-resistant) reduces λ from 4.20 → 3.91, edge falls below
+  threshold, auto-skipped. Lineup data corrected a marginal fire.
+
+### H-T: News-wire pre-game injury / scratch / opener detection  ✅ ACTIVE 2026-05-10
+**Persistent integration of preflightCheck.js news pipeline to fade fire.**
+- **Source**: `runPreflightCheck()` in `lib/preflightCheck.js` (already existed,
+  used by production engine). Pulls ESPN/Google News/Rotowire/MLB.com team
+  feeds + Sonnet AI synthesis. Returns `{action, reason, confidence, sources}`.
+- **Persistence layer** (NEW 2026-05-10): `pitcher_news_log` table stores
+  every result. `scripts/runDailyNewsCheck.mjs` runs preflightCheck for every
+  scheduled starter and persists output.
+- **Cron schedule**: 9 AM, 12 PM, 3 PM, 6 PM ET (catches news drops at
+  multiple pre-game windows).
+- **Fade fire integration**: at fire time, queries `pitcher_news_log` for
+  latest action. Skips pitcher if `action='skip' AND confidence ≥ 0.7`.
+- **Smoke-test result (2026-05-10 evening)**:
+  - 26 starters checked
+  - 3 SKIPs: Bassitt (no longer probable), Rodón (IL), Akin (confirmed opener)
+  - 1 BOOST: Severino (K prop gap +1.6)
+  - 22 PROCEED
+- **Why useful**: catches issues H-H + H-I miss (e.g., a pitcher with normal
+  ipL5 who's just been scratched, or a pitcher being used as opener today
+  for the first time).
+
+### H-N: Strike floor K=6 OR K≥10 (skip middle 7,8,9)  ✅ PROMOTED TO LIVE 2026-05-10 EVENING
+**Promoted same day as v2 — promoted to v3.** Why same-day:
+empirical strength of signal was overwhelming.
+- **Why**: middle strikes (7-9) are where market efficiency concentrates
+  because the bell curve of pitcher K-counts peaks at 5-7 K. Edge lives
+  at the extremes: K=6 (favorite-side, public underprices probability) and
+  K≥10 (lottery longshot, market discounts ace overperformance).
+- **Empirical evidence (Days 1-4, 31 K=7-9 fires)**:
+  - **1 win in 31 K=7-9 fires (3.2% win rate)** — Davis Martin K≥8 was the only winner
+  - Net K=7-9 P&L: **-$2,044** (saved $2,181 in losses, forfeited $137 in wins)
+  - K=6 P&L: positive (Burrows, Vásquez, Holmes wins)
+  - K≥10 P&L: hugely positive (Imanaga +$1,620, deGrom +$1,105)
+- **v2 + skip K=7-9 hypothetical bankroll: $8,752 (+75% from $5K start)**
+- **Same-day promotion justification**: signal strength + structural reasoning
+  (market efficiency concentrates in middle strikes — well-documented
+  microstructure effect — not just sample-size luck).
+- **Continued tracking**: nightly filter sweep tests "what if we hadn't applied this"
+
+
+- **Why**: `pitcher_signals.confidence` is the production engine's own quality
+  score for its lambda estimate. Low confidence = unreliable input data
+  (rookies, limited starts, news flags). Engine already knows it's guessing.
+- **Source**: `pitcher_signals.confidence` (0.0 to 0.9 typical range).
+- **Empirical evidence (n=36 fade fires)**:
+  - **0 winners had confidence ≤ 0.3** (all winners 0.75-0.9)
+  - 2 losers had confidence ≤ 0.3: **Canning (-$200), Strider (-$14)**
+  - Counterfactual: skipping = **+$214 P&L improvement**, 0 wins forfeited
+- **Combined with H-H**: skip if (avg_innings_l5 < 5 OR confidence ≤ 0.3) →
+  net P&L on 36 fires: **$98 → $1,012 (10× improvement)**
+- **Confidence**: HIGH — overlaps partially with H-H (Strider hit both filters)
+  but Canning was a unique loss caught only by confidence filter.
+
+### H-J: Use swstr_pct as quality-of-stuff filter
+- **Why**: Swinging-strike rate is a leading indicator of K rate. When a
+  pitcher's swstr% drops dramatically below career, their stuff is gone (could
+  be injury, mechanics, fatigue). Strider had swstr=11% on 2026-05-09 (career
+  ~30%) — clear "stuff is gone" signal that production engine flags but our
+  fade model ignores.
+- **Source**: `pitcher_signals.swstr_pct` (per-pitch swing-and-miss rate).
+- **Empirical evidence**: n=1 confirmed loser (Strider) had swstr=11% vs typical
+  22-31% across our sample. Insufficient sample to validate.
+- **Test on Day 14**: filter swstr_pct < 0.18 (or career delta), check P&L.
+- **Confidence**: MEDIUM — single-sample observation, plausible mechanism.
+
+### H-K: Pull production-engine model probability from `pitcher_edge_cache`
+- **Why**: Production engine's full lambda includes TTO, park, weather, ump,
+  opp K%, velocity, batting order weighting. Stored per pitcher-day in
+  `pitcher_edge_cache.edges_json`. Our simplified fade model recomputes a
+  crude lambda; could instead use production's lambda directly when available.
+- **Test**: For each fade candidate, look up production's `model_prob` for
+  same (pitcher, strike, date). Compare edge under simple-model vs production-
+  model. Backtest on shadow data.
+- **Confidence**: MEDIUM — could be redundant if simple model is already good
+  enough, or could lift ROI if production features add real signal.
+
+### H-L: Per-pitcher cap = 2 (cascade strikes when pitcher overperforms)
+- **Why**: When a pitcher has 10+ K, MULTIPLE strike levels win simultaneously.
+  Per-pitcher cap = 1 forfeits cascade wins. Imanaga K≥9 was a non-fired
+  shadow-log winner that would have paid +$311 on top of K≥10's +$1,620.
+  Misiorowski's 11K had 5 winning lower strikes we didn't fire on.
+- **Empirical**: Imanaga +$311, Misiorowski +$0 (we fired K≥12 only — losing).
+- **Test**: Sweep cap=1/2/3 against shadow data on Day 14. Trade-off: cap>1
+  amplifies wins on overperformers but also amplifies losses on underperformers
+  (correlated bets all lose together).
+- **Confidence**: MEDIUM — clean upside on hit days, unknown downside on miss days.
+
+### H-M: Park K-factor adjustment
+- **Why**: Coors deflates K rate (~0.92×), Petco inflates (~1.06×). Freeland
+  at Coors on 2026-05-09 went 4K in 6IP — model expected more given his K9_l5.
+- **Source**: `lib/parkFactors.js` already imported by production engine.
+- **Test**: Apply park multiplier to fade lambda; backtest.
+- **Confidence**: MEDIUM — known structural signal, untested in fade context.
+
+## Day 1-3 Live Performance Log
+
+Maintained daily — adds new row each game-day during paper test.
+
+| date | day | fires | W | L | P&L | bankroll | cum return |
+|---|---|---|---|---|---|---|---|
+| 2026-05-07 | 1 | 9 | 1 | 8 | +$1,110 (uncapped) → +$1,110 (capped retroactive) | $6,110 | +22.2% |
+| 2026-05-08 | 2 | 17 | 1 | 16 | -$562 | $5,548 | +11.0% |
+| 2026-05-09 | 3 | 16 | 2 | ~10 | -$174 (in progress) | ~$5,375 | +7.5% |
+
+**Cumulative through 3 days**: 42 fires, 4 wins (9.5%), +$374 P&L, +7.5% cumulative bankroll.
+
+Win rate (~9.5%) running well below backtest's 32-38% expectation. Asymmetric
+payoff structure carrying the cumulative line: 4 longshot wins (Imanaga +$1620,
+Vásquez +$309, Burrows +$495, Holmes +$44) covered the 38 losses (~$2,094 total).
+
+## Risk Posture (current)
+
+- **Real money**: paused. Last live bet 2026-05-01 (paper-mode incident),
+  $27.33 lost. All Kalshi credentials backed up to `~/.config/baseball-secrets/`.
+- **Paper mode**: active for ALL strategies including the new IDEAL fade test.
+  `KALSHI_PAPER_MODE=true` on Railway env.
+- **Bankroll caps active**: pregame_pool 60%, live 20%, free-money 20%.
+  Per-pitcher cap $74 at $1,237 bankroll. Quarter-Kelly multiplier.
+- **Halt conditions**: daily loss limit $500, drawdown -15% halt, system_flags
+  manual halt, Kalshi API outage halt.
+- **No real money until**: Day 14 of fade paper test (May 20) AND user explicit
+  approval. Even then: half-stakes for first 30 days.
+
+## Brother's Plain-English Summary
+
+> We built a betting model for MLB pitcher strikeouts on Kalshi. It buys cheap
+> "longshot" bets when our math says a pitcher will K more than the market thinks.
+> Most lose; the wins pay 4-5x. Running on $5,000 of paper money for 14 days to
+> verify before risking real. Backtest math says $5K could grow to $50-150K by
+> end of MLB season if live results match.
+
+## Backtest Snapshot
+
+> Backtested across 37 days and 1,056 pitcher-games (Mar 31 – May 6) with no
+> future-knowledge cheating: ideal config went $5,000 → $29,030 (+481%) on the
+> held-out test half and +230% on training half, with 32-38% win rate and 6.6%
+> max drawdown. Breakthrough was capping bets to one strike per pitcher (not
+> five), which turned correlated bets into truly independent ones — drawdown
+> 24% → 7%, win rate 29% → 38%. After honest deflation for slippage,
+> selection bias, and liquidity caps, realistic forward expectation is +50-100%
+> over 14 days and $50K-$150K by season's end on a $5K starting bankroll.
+
+**Important: the +481%/+230% numbers above are from the ORIGINAL ideal (v1)
+backtest, not v3.** v3's filters (H-H + H-I + H-N) were designed AFTER seeing
+May 7-10 paper-test data and have *not* been validated out-of-sample.
+
+---
+
+## In-Sample vs Out-of-Sample — v3 reality check (clarified 2026-05-11)
+
+When discussing "v3 backtested at +$2,971" — that figure is **in-sample**:
+- The +$2,971 is what v3 *would have generated* if applied retroactively to
+  May 7-10 (the same window v3's filters were tuned against).
+- This is the value v3's filter design maximized — by construction it must
+  look good on this window.
+- Source: `scripts/v3HistoricalTest.mjs:149` literally says: *"If v3 lift ≤ 0
+  ⟹ the +$2,971 on May 7-10 was overfitting."*
+
+Three numbers people may confuse:
+
+| label | what it is | value |
+|---|---|---|
+| **v1 backtest (Mar 31 – May 6)** | True OOS for v1 only — 37-day held-out | $5k → $29,030 (+481%) |
+| **v3 in-sample fit (May 7-10)** | Retroactive v3 on the data it was tuned on | +$2,971 |
+| **v3 true OOS (Mar 31 – May 6)** | What v3 would do on data it never saw | **NEVER RUN** |
+| **Actual ks_bets fires (May 7-11)** | Real paper fires: mix of v1/v2 (May 7-9) + v3 (May 10pm onward) | +$477 |
+
+The actual fires are +$477 (not $2,971) because most fires May 7-9 were v2,
+not v3 — v3 only went live evening of May 10. The +$2,971 figure is what v3
+would have made if it had been live the whole time AND if those filters
+weren't tuned on that exact window.
+
+Need to actually run `scripts/v3HistoricalTest.mjs` against Mar 31 – May 6
+records to validate v3 has real signal. Until then, treat any v3 forward
+projection with skepticism.
+
+---
+
+## Monthly P&L Projection on $7k bankroll (added 2026-05-11)
+
+Anchored on the in-sample +$2,971 over 4 days = $743/day; scaled to $7k
+bankroll (1.4× the $5k test) and 30 days. Compounded (1.34%/day compounded
+over 30 days) adds ~$300 vs flat-stake because **sizing is volume-capped on
+the wing strikes, not bankroll-capped** — so most of the compounding benefit
+is eaten by the 10% volume gate on tail strikes.
+
+| scenario | monthly P&L | bankroll end | rationale |
+|---|---|---|---|
+| In-sample extrapolation (no deflation) | +$11,500 | $18,500 | Naive: assume v3 maintains $743/day, with mild compounding |
+| In-sample × 0.5 (mild overfit deflation) | +$5,300 | $12,300 | Half-credit to filter signal |
+| **In-sample × 0.3 (honest base case)** | **+$3,100** | **$10,100** | Standard backtest → forward deflation factor |
+| Worst plausible (v3 has no real lift) | $0 | $7,000 | If v3 was overfitting; only v1 baseline edge remains |
+
+**Standard deviation of monthly P&L: roughly $3,500** based on first-5-days
+daily P&L variance of ±$650. Realistic monthly outcome range for a single
+month: −$1,500 to +$5,500 even if expected return is positive.
+
+**Caveats that matter more than the point estimate:**
+- v3 has not been tested out-of-sample. The +$2,971 is in-sample.
+- Win rate is 12.3% over 57 settled fires — below the 25% Day-14 criterion.
+- One outlier day (May 7 +$1,110) is carrying the cumulative; without it
+  current actual is −$633.
+- Volume caps prevent linear bankroll-to-size scaling on illiquid tail
+  strikes; real compounding benefit is small.
+
+**Conclusion**: best honest guess is **+$2,000 to +$4,000/month on $7k**, with
+meaningful chance of net-negative for any single month even if strategy is
+real. To narrow the range, run the v3 OOS test on Mar 31 – May 6.

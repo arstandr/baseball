@@ -1,0 +1,108 @@
+// Snapshot assessment of recorded weather data.
+import 'dotenv/config'
+import { run } from '/Users/adamstandridge/Documents/projects/baseball/lib/db.js'
+
+const fmt = (n, w=10) => String(n ?? '').padStart(w)
+
+async function header(label) { console.log('\n=== ' + label + ' ===') }
+
+async function main() {
+  await header('Row counts')
+  const r1 = await run(`SELECT
+      (SELECT COUNT(*) FROM weather_markets) as markets,
+      (SELECT COUNT(*) FROM weather_orderbook_snapshots) as ob,
+      (SELECT COUNT(*) FROM weather_metar) as metar,
+      (SELECT COUNT(*) FROM weather_forecasts) as fc,
+      (SELECT COUNT(*) FROM weather_settlements) as settle`)
+  console.log(r1.rows[0])
+
+  await header('Active series breakdown')
+  const r2 = await run(`SELECT series_ticker, COUNT(*) n
+      FROM weather_markets WHERE status IN ('active','open') OR last_seen_at >= datetime('now','-15 minutes')
+      GROUP BY series_ticker ORDER BY n DESC`)
+  for (const row of r2.rows) console.log(`  ${row.series_ticker.padEnd(20)} ${fmt(row.n,4)}`)
+
+  await header('NYC ladder (most recent snapshot per ticker)')
+  const r3 = await run(`
+    WITH latest AS (
+      SELECT ticker, MAX(ts) ts FROM weather_orderbook_snapshots GROUP BY ticker
+    )
+    SELECT s.ticker, s.best_yes_bid, s.best_yes_ask, s.best_no_bid, s.best_no_ask,
+           s.open_interest, s.last_price_cents,
+           CASE WHEN s.best_yes_bid IS NOT NULL THEN s.best_yes_ask - s.best_yes_bid ELSE NULL END AS spread,
+           m.no_sub_title
+    FROM weather_orderbook_snapshots s
+    JOIN latest l ON l.ticker = s.ticker AND l.ts = s.ts
+    JOIN weather_markets m ON m.ticker = s.ticker
+    WHERE s.ticker LIKE 'KXHIGHNY-%'
+    ORDER BY m.event_ticker, m.floor_strike`)
+  console.log(`  ${'ticker'.padEnd(35)} ${'cond'.padEnd(15)} ybid ask nbid nask spread     OI  last`)
+  for (const row of r3.rows) {
+    console.log(
+      `  ${row.ticker.padEnd(35)} ${(row.no_sub_title||'').padEnd(15)} ` +
+      `${fmt(row.best_yes_bid,4)} ${fmt(row.best_yes_ask,3)} ${fmt(row.best_no_bid,4)} ${fmt(row.best_no_ask,4)} ` +
+      `${fmt(row.spread,6)} ${fmt(Math.round(row.open_interest||0),6)} ${fmt(row.last_price_cents,5)}`
+    )
+  }
+
+  await header('Cross-city volume snapshot (latest)')
+  const r4 = await run(`
+    WITH latest AS ( SELECT ticker, MAX(ts) ts FROM weather_orderbook_snapshots GROUP BY ticker)
+    SELECT m.series_ticker,
+           COUNT(*) n_markets,
+           SUM(s.open_interest) total_oi,
+           SUM(CASE WHEN s.best_yes_bid IS NOT NULL THEN s.best_yes_bid_qty ELSE 0 END) +
+           SUM(CASE WHEN s.best_no_bid IS NOT NULL THEN s.best_no_bid_qty ELSE 0 END) AS top_qty,
+           AVG(CASE WHEN s.best_yes_ask IS NOT NULL AND s.best_yes_bid IS NOT NULL
+                THEN s.best_yes_ask - s.best_yes_bid END) avg_spread
+    FROM weather_orderbook_snapshots s
+    JOIN latest l ON l.ticker = s.ticker AND l.ts = s.ts
+    JOIN weather_markets m ON m.ticker = s.ticker
+    GROUP BY m.series_ticker
+    ORDER BY total_oi DESC NULLS LAST`)
+  console.log(`  ${'series'.padEnd(15)} n   total_OI    top_qty avg_spread`)
+  for (const row of r4.rows) {
+    console.log(
+      `  ${row.series_ticker.padEnd(15)} ${fmt(row.n_markets,3)} ${fmt(Math.round(row.total_oi||0),9)} ${fmt(row.top_qty||0,6)} ${row.avg_spread?.toFixed(2) ?? 'n/a'}`
+    )
+  }
+
+  await header('METAR latest per station')
+  const r5 = await run(`
+    WITH latest AS ( SELECT station, MAX(obs_time) ot FROM weather_metar GROUP BY station)
+    SELECT m.station, m.obs_time, m.temp_f, m.daily_max_f, m.six_hr_max_f
+    FROM weather_metar m JOIN latest l ON l.station=m.station AND l.ot=m.obs_time`)
+  for (const row of r5.rows) {
+    console.log(`  ${row.station} obs=${row.obs_time} temp=${row.temp_f?.toFixed(1)}°F dailymax=${row.daily_max_f?.toFixed(1) ?? '-'} 6hrmax=${row.six_hr_max_f?.toFixed(1) ?? '-'}`)
+  }
+
+  await header('Forecast model agreement (NYC, target=tomorrow)')
+  const r6 = await run(`
+    SELECT source, predicted_high_f, ensemble_member
+    FROM weather_forecasts
+    WHERE station='KNYC' AND target_date >= date('now')
+    ORDER BY target_date, source, ensemble_member
+    LIMIT 50`)
+  for (const row of r6.rows) {
+    console.log(`  ${row.source.padEnd(35)} mem=${fmt(row.ensemble_member,3)} high=${row.predicted_high_f?.toFixed(1)}°F`)
+  }
+
+  await header('GEFS ensemble distribution per city (target=tomorrow)')
+  const r7 = await run(`
+    SELECT station,
+           target_date,
+           COUNT(*) n,
+           ROUND(MIN(predicted_high_f),1) lo,
+           ROUND(AVG(predicted_high_f),1) mean,
+           ROUND(MAX(predicted_high_f),1) hi
+    FROM weather_forecasts
+    WHERE source='open-meteo-gefs-ensemble' AND target_date >= date('now')
+    GROUP BY station, target_date
+    ORDER BY station, target_date`)
+  for (const row of r7.rows) {
+    console.log(`  ${row.station} ${row.target_date} n=${fmt(row.n,3)} lo=${row.lo} mean=${row.mean} hi=${row.hi} (range=${(row.hi-row.lo).toFixed(1)}°F)`)
+  }
+
+  process.exit(0)
+}
+main().catch(e => { console.error(e); process.exit(1) })

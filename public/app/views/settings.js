@@ -5,6 +5,7 @@ import { fetchJson } from '../api.js'
 export async function refreshSettings() {
   await loadUsers()
   wireAddUser()
+  await loadRules()
 }
 
 async function loadUsers() {
@@ -82,6 +83,12 @@ function buildUserCard(u, isMe) {
       <label class="bf-label-full">Discord Webhook URL (optional)
         <input type="text" class="bf-discord" value="${esc(u.discord_webhook || '')}" placeholder="https://discord.com/api/webhooks/…" autocomplete="off"/>
       </label>
+      <label class="bf-label-full">Daily Loss Limit ($, optional — overrides global default)
+        <input type="number" class="bf-losslimit" value="${u.daily_loss_limit ?? ''}" placeholder="e.g. 300 — leave blank to use system default" min="0" step="50"/>
+      </label>
+      <label class="bf-label-full" style="font-size:11px;color:var(--text-dim)">
+        Closer Agent — set <code style="background:rgba(255,255,255,0.08);padding:1px 4px;border-radius:3px">BETTOR_USER_ID=${u.id}</code> in the Windows .env to tag this user's heartbeat
+      </label>
       <label class="bf-label-full">Change PIN (leave blank to keep)
         <input type="password" class="bf-pin" placeholder="New PIN (4+ digits)" maxlength="10" inputmode="numeric" autocomplete="new-password"/>
       </label>
@@ -139,6 +146,7 @@ function buildUserCard(u, isMe) {
       free_money_risk_pct: freeMoneyPct / 100,
       kalshi_key_id:       wrap.querySelector('.bf-keyid').value.trim() || null,
       discord_webhook:     wrap.querySelector('.bf-discord').value.trim() || null,
+      daily_loss_limit:    wrap.querySelector('.bf-losslimit').value.trim() || '',
     }
     const pem = wrap.querySelector('.bf-pem').value.trim()
     if (pem) body.kalshi_private_key = pem
@@ -198,4 +206,101 @@ function wireAddUser() {
       await loadUsers()
     } catch { msg.className = 'form-msg err'; msg.textContent = 'Network error.' }
   })
+}
+
+// ── Betting Rules ─────────────────────────────────────────────────────────────
+
+async function loadRules() {
+  const el = document.getElementById('rules-container')
+  if (!el) return
+  try {
+    const { rules } = await fetchJson('/api/ks/rules')
+    renderRules(el, rules)
+  } catch {
+    el.innerHTML = '<div class="muted" style="padding:12px">Unable to load betting rules.</div>'
+  }
+}
+
+function renderRules(el, rules) {
+  if (!rules?.length) {
+    el.innerHTML = '<div class="muted" style="padding:12px">No rules configured.</div>'
+    return
+  }
+  el.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="color:var(--text-dim);text-align:left">
+        <th style="padding:8px 0">Rule</th>
+        <th style="padding:8px;text-align:right">Current</th>
+        <th style="padding:8px;text-align:right">Default</th>
+        <th style="padding:8px;text-align:right">Last updated</th>
+        <th style="padding:8px;text-align:right">Actions</th>
+      </tr></thead>
+      <tbody>
+        ${rules.map(r => {
+          const isModified = r.value !== r.default_val
+          const ago = r.updated_at ? _fmtRuleAgo(r.updated_at) : '—'
+          const updater = r.updated_by && r.updated_by !== 'default' ? ` by ${r.updated_by}` : ''
+          const valDisplay = Number.isInteger(r.value) ? r.value : r.value?.toFixed(2)
+          const defDisplay = Number.isInteger(r.default_val) ? r.default_val : r.default_val?.toFixed(2)
+          return `<tr style="border-top:1px solid rgba(255,255,255,0.06)" data-rule-key="${esc(r.key)}">
+            <td style="padding:8px 0">
+              <div style="font-weight:600">${esc(r.label || r.key)}</div>
+              <div style="color:var(--text-dim);font-size:11px;margin-top:2px">${esc(r.description || '')}</div>
+            </td>
+            <td style="padding:8px;text-align:right">
+              <input class="rule-val-input" value="${valDisplay}" style="width:72px;text-align:right;background:var(--card-bg);border:1px solid rgba(255,255,255,0.15);border-radius:4px;color:var(--text);padding:4px 6px;font-size:13px" />
+            </td>
+            <td style="padding:8px;text-align:right;color:var(--text-dim)">${defDisplay}</td>
+            <td style="padding:8px;text-align:right;color:var(--text-dim);font-size:11px">${ago}${updater}</td>
+            <td style="padding:8px;text-align:right;display:flex;gap:6px;justify-content:flex-end">
+              <button class="rule-save-btn filter-btn" style="font-size:11px;padding:3px 8px">Save</button>
+              ${isModified ? `<button class="rule-reset-btn filter-btn secondary" style="font-size:11px;padding:3px 8px">Reset</button>` : ''}
+            </td>
+          </tr>`
+        }).join('')}
+      </tbody>
+    </table>`
+
+  el.querySelectorAll('tr[data-rule-key]').forEach(row => {
+    const key      = row.dataset.ruleKey
+    const input    = row.querySelector('.rule-val-input')
+    const saveBtn  = row.querySelector('.rule-save-btn')
+    const resetBtn = row.querySelector('.rule-reset-btn')
+
+    if (saveBtn) saveBtn.addEventListener('click', async () => {
+      const val = parseFloat(input.value)
+      if (isNaN(val)) return
+      saveBtn.disabled = true
+      saveBtn.textContent = '…'
+      try {
+        await fetchJson(`/api/ks/rules/${encodeURIComponent(key)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: val }),
+        })
+        saveBtn.textContent = '✓'
+        setTimeout(() => { saveBtn.textContent = 'Save'; saveBtn.disabled = false; loadRules() }, 800)
+      } catch {
+        saveBtn.textContent = 'Error'
+        setTimeout(() => { saveBtn.textContent = 'Save'; saveBtn.disabled = false }, 1500)
+      }
+    })
+
+    if (resetBtn) resetBtn.addEventListener('click', async () => {
+      resetBtn.disabled = true
+      await fetchJson(`/api/ks/rules/${encodeURIComponent(key)}/reset`, { method: 'POST' }).catch(() => {})
+      loadRules()
+    })
+  })
+}
+
+function _fmtRuleAgo(ts) {
+  if (!ts) return '—'
+  const d   = new Date(ts.endsWith('Z') ? ts : ts + 'Z')
+  const now = new Date()
+  const m   = Math.round((now - d) / 60000)
+  if (m < 2) return 'just now'
+  if (m < 60) return `${m}m ago`
+  if (m < 1440) return `${Math.round(m / 60)}h ago`
+  return `${Math.round(m / 1440)}d ago`
 }

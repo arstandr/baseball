@@ -21,17 +21,30 @@ import * as db from '../lib/db.js'
 import apiRouter from './api.js'
 import { startScheduler } from './scheduler.js'
 import { startWsDaemon, getWsDaemonStatus } from './wsDaemon.js'
+import { initOracle } from '../oracle/init.js'
+import * as traceImpl from '../oracle/layers/0-trace/impl.js'
+import * as kalshiLib from '../lib/kalshi.js'
+import { buildGateway, resolveConfigFromEnv } from '../oracle/layers/6-gateway/buildGateway.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public')
 
-export function createApp() {
+export function createApp({ gateway = null } = {}) {
   const app = express()
 
   // Behind Railway / any HTTPS reverse proxy, trust X-Forwarded-Proto so
   // secure cookies actually land. Harmless in dev.
   app.set('trust proxy', 1)
+
+  // Layer 6 Gateway routes mount FIRST so their express.raw middleware sees
+  // the original request bytes — required for HMAC body-hash verification.
+  // The global express.json below applies to every other route.
+  if (gateway) {
+    gateway.mount(app, {
+      rawJsonMiddleware: express.raw({ type: 'application/json', limit: '1mb' }),
+    })
+  }
 
   app.use(express.json({ limit: '1mb' }))
   app.use(cookieParser())
@@ -93,22 +106,77 @@ export function createApp() {
   return app
 }
 
-export function startServer() {
+function printGatewayBanner(gateway) {
+  const accountsMatch = String(gateway.readiness.accounts ?? '').match(/(\d+)_enabled/)
+  const accountsLoaded = accountsMatch ? Number(accountsMatch[1]) : 0
+  const lines = [
+    '════════════════════════════════════════',
+    '  Gateway initialized',
+    `  mode=${gateway.mode}`,
+    `  accountsLoaded=${accountsLoaded}`,
+    `  routesMounted=true`,
+    `  productionWrites=${gateway.mode === 'production'}`,
+    `  commit=${gateway.readiness.commit}`,
+  ]
+  if (gateway.mode === 'production') {
+    const dl = String(gateway.readiness.deadLetter ?? '')
+    lines.push(`  persistentVolume=${dl.startsWith('ok') ? 'ok' : 'NOT_OK'}`)
+  } else {
+    lines.push(`  deadLetter=${gateway.readiness.deadLetter}`)
+  }
+  lines.push('════════════════════════════════════════')
+  console.log('\n' + lines.join('\n') + '\n')
+}
+
+export async function startServer() {
   const port = Number(process.env.PORT || 3001)
-  const app = createApp()
+
+  // ── Startup ordering (locked Q-S1) ─────────────────────────────────────
+  // 1. DB ready
+  await db.migrate()
+  await seedUsersFromEnv()
+
+  // 2. Layer 0 Trace (idempotent — scheduler.js also calls this; second is no-op)
+  initOracle()
+
+  // 3. Layer 6 Gateway readiness gate — throws on any unhealthy dep.
+  //    If this throws, we never start listening; Railway healthcheck fails;
+  //    container restarts. No partial-up.
+  const gateway = await buildGateway(resolveConfigFromEnv({
+    db,
+    kalshiLib,
+    traceModule: traceImpl,
+  }))
+
+  // 4. Loud startup banner — impossible to miss whether shadow vs production
+  printGatewayBanner(gateway)
+
+  // 5. Build Express app with Gateway mounted before global express.json
+  const app = createApp({ gateway })
+
+  // 6. Listen + start cron jobs
   return app.listen(port, async () => {
-    await db.migrate()
-    await seedUsersFromEnv()
-    // Backfill paper=0 for any pre-game bets that placed real Kalshi orders
-    // (paper defaults to 1 at INSERT; the post-order UPDATE sometimes missed them)
-    await db.run(
-      `UPDATE ks_bets SET paper = 0
-       WHERE live_bet = 0 AND paper = 1
-         AND (order_id IS NOT NULL OR filled_contracts > 0)`
-    ).catch(e => console.warn('[startup] paper backfill failed:', e.message))
-    startScheduler()
-    startWsDaemon().catch(e => console.error('[ws-daemon] startup failed:', e.message))
-    console.log(`[mlbie] dashboard listening on http://localhost:${port}`)
+    try {
+      // Backfill paper=0 for any pre-game bets that placed real Kalshi orders
+      // (paper defaults to 1 at INSERT; the post-order UPDATE sometimes missed them).
+      // Exclude synthetic paper-XXX order_ids — those come from the KALSHI_PAPER_MODE
+      // wrapper and must stay paper=1 forever, otherwise the recon watchdog will halt
+      // on every restart (DB sees real-money positions; Kalshi has none).
+      await db.run(
+        `UPDATE ks_bets SET paper = 0
+         WHERE live_bet = 0 AND paper = 1
+           AND (order_id IS NOT NULL OR filled_contracts > 0)
+           AND (order_id IS NULL OR order_id NOT LIKE 'paper-%')`
+      ).catch(e => console.warn('[startup] paper backfill failed:', e.message))
+
+      startScheduler({ gateway }).catch(e => console.error('[scheduler] startup failed:', e.message))
+      startWsDaemon().catch(e => console.error('[ws-daemon] startup failed:', e.message))
+      console.log(`[mlbie] dashboard listening on http://localhost:${port}`)
+      console.log(`[mlbie] Gateway routes mounted: true (mode=${gateway.mode})`)
+    } catch (err) {
+      // The listen callback can't propagate errors; log loudly.
+      console.error('[startup] uncaught error in post-listen init:', err)
+    }
   })
 }
 

@@ -27,6 +27,11 @@ let _currentHash           = null
 let _stopPromise           = null   // serialize concurrent stop calls (Fix 1)
 let _logStream             = null   // shared write stream for closer.log (module-level so startMonitor can also write)
 
+// Per-user heartbeat key. Set BETTOR_USER_ID in .env (e.g. BETTOR_USER_ID=2 for Isaiah).
+// Falls back to 'closer' for backward compatibility with single-user deployments.
+const _BETTOR_USER_ID = process.env.BETTOR_USER_ID ? String(process.env.BETTOR_USER_ID).trim() : null
+const _HB_KEY         = _BETTOR_USER_ID ? `closer_${_BETTOR_USER_ID}` : 'closer'
+
 // ── Cached helpers ────────────────────────────────────────────────────────────
 
 async function getDb() {
@@ -107,9 +112,9 @@ async function writeHeartbeat(status, extra = {}) {
     const payload = JSON.stringify({ status, ...extra, ts: new Date().toISOString() })
     await db.execute({
       sql: `INSERT INTO agent_heartbeat (key, value, updated_at)
-            VALUES ('closer', ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      args: [payload],
+      args: [_HB_KEY, payload],
     })
     _heartbeatFailures        = 0
     _heartbeatDiscordAlerted  = false  // reset latch on successful write (Fix 10)
@@ -293,6 +298,54 @@ async function stopMonitor() {
   // _child and _running are nulled by the 'close' handler — don't null here
 }
 
+// ── Item 5: Smoke gate — syntax-check key files before accepting a deploy ─────
+// Called after `git reset --hard origin/main`. If any key file fails `node --check`,
+// reverts to prevSha and alerts Discord. Returns true if all clear, false if rejected.
+const SMOKE_FILES = [
+  'scripts/live/liveMonitor.js',
+  'lib/kelly.js',
+  'lib/preflightCheck.js',
+  'lib/db.js',
+  'lib/kalshi.js',
+  'lib/strikeout-model.js',
+  'server/scheduler.js',
+]
+
+async function runSmokeGate(prevSha) {
+  const failed = []
+  for (const rel of SMOKE_FILES) {
+    const abs = path.join(ROOT, rel)
+    if (!fs.existsSync(abs)) continue
+    try {
+      execSync(`node --check "${abs}"`, { cwd: ROOT, timeout: 8000, stdio: 'pipe' })
+    } catch (err) {
+      const errText = (err.stderr?.toString?.() ?? '').split('\n')[0].slice(0, 200)
+      failed.push(`${rel}: ${errText}`)
+    }
+  }
+
+  if (!failed.length) return true
+
+  const msg = failed.join('\n')
+  console.error(`[closer] ⚠ SMOKE GATE FAILED — reverting to ${prevSha.slice(0, 7)}\n${msg}`)
+  try {
+    execSync(`git reset --hard ${prevSha}`, { cwd: ROOT, stdio: 'pipe' })
+    console.log(`[closer] reverted to ${prevSha.slice(0, 7)}`)
+  } catch (revertErr) {
+    console.error('[closer] revert failed:', revertErr.message)
+  }
+  try {
+    const { notifyAlert } = await getDiscord()
+    const webhooks = await getWebhooks()
+    await notifyAlert({
+      title:       '⚠️ THE CLOSER — deploy rejected by smoke gate',
+      description: `New code has syntax errors. Reverted to \`${prevSha.slice(0, 7)}\`.\n\`\`\`\n${msg.slice(0, 1500)}\n\`\`\``,
+      color:       0xff0000,
+    }, webhooks)
+  } catch { /* best-effort */ }
+  return false
+}
+
 // ── Auto-updater ──────────────────────────────────────────────────────────────
 
 async function checkForUpdates() {
@@ -329,6 +382,13 @@ async function checkForUpdates() {
 
     try {
       execSync('git reset --hard origin/main', { cwd: ROOT })
+
+      // Item 5: smoke gate — syntax-check key files before accepting the deploy
+      const gateOk = await runSmokeGate(local)
+      if (!gateOk) {
+        // Already reverted to `local` — exit so bat loop restarts with clean code
+        process.exit(0)
+      }
 
       // Only run npm install when deps actually changed
       let ranNpmCi = false
@@ -504,11 +564,14 @@ async function main() {
     }
   } catch {}
 
+  // Read COMMIT_SHA env var first — the bat file's `FOR /F git rev-parse HEAD` sets it
+  // before launching the Node process, so it's available even when git isn't on PATH.
+  // If git IS on PATH, override with a fresh call (more reliable than the env var).
+  _currentHash = process.env.COMMIT_SHA?.trim() || null
   try {
-    _currentHash = git('rev-parse HEAD')
-  } catch {
-    _currentHash = process.env.COMMIT_SHA || null
-  }
+    const _gitHash = git('rev-parse HEAD')
+    if (_gitHash) _currentHash = _gitHash
+  } catch { /* use env var set by bat file */ }
   let commitDate = '', commitMsg = ''
   try { commitDate = git('log -1 --format=%cd --date=format:"%b %d %Y %I:%M %p"') } catch {}
   try { commitMsg  = git('log --oneline -1 HEAD') } catch {}

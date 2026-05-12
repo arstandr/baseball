@@ -1,0 +1,19 @@
+{
+  "date": "2026-04-29",
+  "total": 41,
+  "accepted": 25,
+  "rejected": 0,
+  "by_reason": {},
+  "blocked_losing_pnl": 0,
+  "blocked_winning_pnl": 0,
+  "net_saved": 0,
+  "daily_loss_breaches": 0,
+  "blocked_samples": [],
+  "change": {
+    "material": true,
+    "reasons": [
+      "first_run"
+    ]
+  },
+  "ranAt": "2026-04-30T20:56:19.496Z"
+}

@@ -11,11 +11,12 @@
 
 import express from 'express'
 import sseRouter        from './sse.js'
-import gamesRouter      from './routes/games.js'
-import ksLiveRouter     from './routes/ks-live.js'
-import ksAnalyticsRouter from './routes/ks-analytics.js'
-import ksKalshiRouter   from './routes/ks-kalshi.js'
-import usersRouter      from './routes/users.js'
+import gamesRouter          from './routes/games.js'
+import ksLiveRouter         from './routes/ks-live.js'
+import ksAnalyticsRouter    from './routes/ks-analytics.js'
+import ksKalshiRouter       from './routes/ks-kalshi.js'
+import usersRouter          from './routes/users.js'
+import ksCalibrationRouter  from './routes/ks-calibration.js'
 
 const router = express.Router()
 
@@ -25,5 +26,6 @@ router.use(ksLiveRouter)
 router.use(ksAnalyticsRouter)
 router.use(ksKalshiRouter)
 router.use(usersRouter)
+router.use(ksCalibrationRouter)
 
 export default router

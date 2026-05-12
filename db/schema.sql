@@ -679,6 +679,8 @@ ALTER TABLE users ADD COLUMN kalshi_private_key TEXT;
 ALTER TABLE users ADD COLUMN discord_webhook       TEXT;
 ALTER TABLE users ADD COLUMN live_daily_risk_pct  REAL DEFAULT 0.10;
 ALTER TABLE users ADD COLUMN kalshi_pnl           REAL DEFAULT NULL;
+ALTER TABLE users ADD COLUMN is_system_admin      INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN daily_loss_limit     REAL DEFAULT NULL;
 
 -- ========================================================================
 -- ks_bets: Kalshi strikeout bet ledger (paper + live)
@@ -1034,3 +1036,539 @@ ALTER TABLE game_reserves ADD COLUMN provisional_usd REAL NOT NULL DEFAULT 0;
 
 -- Backfill new bet_schedule columns for existing databases (safe no-ops)
 ALTER TABLE bet_schedule ADD COLUMN preflight_outcome TEXT;
+
+-- ========================================================================
+-- market_snapshots: one row per (ticker, captured_at) every ~10-min tick.
+-- Outcome columns backfilled when game ends. bet_id set when a bet fires.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS market_snapshots (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  captured_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  game_date         TEXT    NOT NULL,
+  ticker            TEXT    NOT NULL,
+  pitcher_id        TEXT,
+  pitcher_name      TEXT    NOT NULL,
+  game_id           TEXT,
+  game_label        TEXT,
+  strike            INTEGER NOT NULL,
+  yes_bid           REAL,
+  yes_ask           REAL,
+  no_bid            REAL,
+  no_ask            REAL,
+  yes_price         REAL,
+  no_price          REAL,
+  spread            REAL,
+  open_interest     INTEGER,
+  volume            REAL,
+  model_prob        REAL    NOT NULL,
+  edge_yes          REAL,
+  edge_no           REAL,
+  best_side         TEXT,
+  best_edge         REAL,
+  kelly_fraction    REAL,
+  game_status       TEXT,
+  live_inning       TEXT,
+  live_ks           INTEGER,
+  live_ip           REAL,
+  live_bf           INTEGER,
+  live_pitches      INTEGER,
+  still_in          INTEGER,
+  home_score        INTEGER,
+  away_score        INTEGER,
+  eval_mode         TEXT,
+  qualified         INTEGER DEFAULT 0,
+  actual_ks         INTEGER,
+  resolved_at       TEXT,
+  bet_id            INTEGER REFERENCES ks_bets(id) ON DELETE SET NULL,
+  UNIQUE(ticker, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_msnap_date     ON market_snapshots(game_date);
+CREATE INDEX IF NOT EXISTS idx_msnap_ticker   ON market_snapshots(ticker);
+CREATE INDEX IF NOT EXISTS idx_msnap_pitcher  ON market_snapshots(pitcher_id, game_date);
+CREATE INDEX IF NOT EXISTS idx_msnap_resolved ON market_snapshots(resolved_at);
+CREATE INDEX IF NOT EXISTS idx_msnap_bet      ON market_snapshots(bet_id);
+
+-- ========================================================================
+-- f5_market_snapshots: Kalshi KXMLBF5TOTAL quotes, one row per (ticker × poll)
+-- Written every ~5 min by scripts/captureF5Snapshots.mjs during game windows.
+-- Goal: collect 14+ days of forward Kalshi-specific price history to validate
+-- the small wing-strike NO edge identified in v1 backtest (paper-only, no live
+-- bets yet).
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS f5_market_snapshots (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  captured_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  game_date       TEXT    NOT NULL,
+  ticker          TEXT    NOT NULL,
+  event_ticker    TEXT    NOT NULL,
+  away_abbr       TEXT,
+  home_abbr       TEXT,
+  game_time_et    TEXT,
+  game_start_utc  TEXT,
+  strike          REAL    NOT NULL,
+  yes_bid         REAL,
+  yes_ask         REAL,
+  no_bid          REAL,
+  no_ask          REAL,
+  yes_bid_size    REAL,
+  yes_ask_size    REAL,
+  spread          REAL,
+  volume_24h      REAL,
+  volume_total    REAL,
+  open_interest   REAL,
+  status          TEXT,
+  result          TEXT,
+  actual_f5_runs  INTEGER,
+  resolved_at     TEXT,
+  UNIQUE(ticker, captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_f5snap_date    ON f5_market_snapshots(game_date);
+CREATE INDEX IF NOT EXISTS idx_f5snap_event   ON f5_market_snapshots(event_ticker);
+CREATE INDEX IF NOT EXISTS idx_f5snap_ticker  ON f5_market_snapshots(ticker);
+
+-- ========================================================================
+-- calibration_params: learned correction tables from weekly calibration run.
+-- param_type: 'prob_bucket' | 'edge_bucket' | 'min_edge'
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS calibration_params (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  param_type      TEXT    NOT NULL,
+  bucket_key      TEXT    NOT NULL,
+  bucket_lo       REAL,
+  bucket_hi       REAL,
+  predicted       REAL,
+  actual          REAL,
+  multiplier      REAL,
+  sample_size     INTEGER NOT NULL,
+  expected_roi    REAL,
+  actual_roi      REAL,
+  ci_low          REAL,
+  ci_high         REAL,
+  active          INTEGER DEFAULT 1,
+  model_version   TEXT,
+  run_id          INTEGER,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(param_type, bucket_key, model_version)
+);
+CREATE INDEX IF NOT EXISTS idx_calib_active ON calibration_params(active, param_type);
+
+-- ========================================================================
+-- pitcher_calibration: per-pitcher reliability scores (>= 10 resolved bets).
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS pitcher_calibration (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  pitcher_id       TEXT NOT NULL,
+  pitcher_name     TEXT,
+  n_bets           INTEGER NOT NULL,
+  win_rate         REAL,
+  expected_roi     REAL,
+  actual_roi       REAL,
+  reliability      REAL,
+  avg_edge         REAL,
+  avg_model_prob   REAL,
+  last_bet_date    TEXT,
+  run_id           INTEGER,
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(pitcher_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pitcher_calib_id ON pitcher_calibration(pitcher_id);
+
+-- ========================================================================
+-- calibration_runs: audit log of every weekly run.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS calibration_runs (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at             TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at            TEXT,
+  status                 TEXT NOT NULL DEFAULT 'running',
+  trigger                TEXT,
+  n_resolved_bets        INTEGER,
+  date_range_start       TEXT,
+  date_range_end         TEXT,
+  buckets_updated        INTEGER,
+  pitchers_scored        INTEGER,
+  walkforward_old_sharpe REAL,
+  walkforward_new_sharpe REAL,
+  walkforward_delta_pct  REAL,
+  promoted               INTEGER DEFAULT 0,
+  projected_roi_delta    REAL,
+  notes                  TEXT,
+  report_json            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_calib_runs_started ON calibration_runs(started_at);
+
+-- ========================================================================
+-- backtest_runs: stored results from every backtesting invocation.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS backtest_runs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  user_id           INTEGER REFERENCES users(id),
+  label             TEXT,
+  date_start        TEXT,
+  date_end          TEXT,
+  config_json       TEXT NOT NULL,
+  summary_json      TEXT,
+  equity_curve_json TEXT,
+  per_pitcher_json  TEXT,
+  per_strike_json   TEXT,
+  calibration_json  TEXT,
+  walkforward_json  TEXT,
+  total_bets        INTEGER,
+  win_rate          REAL,
+  roi               REAL,
+  total_pnl         REAL,
+  sharpe            REAL,
+  max_drawdown      REAL,
+  status            TEXT DEFAULT 'success',
+  error             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_user ON backtest_runs(user_id, created_at);
+
+-- ========================================================================
+-- betting_rules: tunable constants read by liveMonitor at runtime.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS betting_rules (
+  key          TEXT PRIMARY KEY,
+  value        REAL NOT NULL,
+  default_val  REAL NOT NULL,
+  label        TEXT,
+  description  TEXT,
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by   TEXT DEFAULT 'system'
+);
+
+-- Per-user betting rule overrides (NULL user_id = global from betting_rules).
+-- user_betting_rules shadows betting_rules on a per-key basis when user_id matches.
+CREATE TABLE IF NOT EXISTS user_betting_rules (
+  user_id    INTEGER NOT NULL REFERENCES users(id),
+  key        TEXT NOT NULL,
+  value      REAL NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by TEXT DEFAULT 'system',
+  PRIMARY KEY (user_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_user_betting_rules_user ON user_betting_rules(user_id);
+
+-- Partial index for shadow-analysis queries
+ALTER TABLE market_snapshots ADD COLUMN reject_reason TEXT;
+CREATE INDEX IF NOT EXISTS idx_msnap_reject ON market_snapshots(game_date, reject_reason) WHERE reject_reason IS NOT NULL;
+
+-- cron_run_log: persists last-run timestamps across Railway redeploys.
+-- Allows catch-up logic to detect missed scheduling windows at startup.
+CREATE TABLE IF NOT EXISTS cron_run_log (
+  job_name    TEXT PRIMARY KEY,
+  last_run_at TEXT
+);
+
+-- ========================================================================
+-- system_flags: key-value store for runtime operational state.
+-- Trading halt, drawdown scale, future kill switches.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS system_flags (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by  TEXT
+);
+INSERT OR IGNORE INTO system_flags (key, value, updated_by) VALUES ('trading_halted', '0', 'system');
+INSERT OR IGNORE INTO system_flags (key, value, updated_by) VALUES ('drawdown_scale', '1.0', 'system');
+INSERT OR IGNORE INTO system_flags (key, value, updated_by) VALUES ('kalshi_outage', '0', 'system');
+
+-- ========================================================================
+-- game_pulse: one row per (game_pk, bet_date) — live state for all slate games.
+-- Written by lib/gamePulse.js (Layer 1 - permanent server loop, not a cron).
+-- Single source of truth for: phase, lineups, pitcher status, pull events,
+-- scratch alerts, pitch counts, line direction. Read by liveMonitor, ksBets,
+-- scheduler (event triggers), and strikeoutEdge (lineup confirmation).
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS game_pulse (
+  game_pk                TEXT NOT NULL,
+  bet_date               TEXT NOT NULL,
+  home_team              TEXT,
+  away_team              TEXT,
+  home_pitcher_id        TEXT,
+  away_pitcher_id        TEXT,
+  game_time_et           TEXT,
+  phase                  TEXT NOT NULL DEFAULT 'pre_lineup',
+  inning                 INTEGER,
+  half                   TEXT,
+  outs                   INTEGER DEFAULT 0,
+  home_bf                INTEGER DEFAULT 0,
+  away_bf                INTEGER DEFAULT 0,
+  home_score             INTEGER DEFAULT 0,
+  away_score             INTEGER DEFAULT 0,
+  home_pitcher_confirmed INTEGER DEFAULT 0,
+  away_pitcher_confirmed INTEGER DEFAULT 0,
+  home_lineup_posted     INTEGER DEFAULT 0,
+  away_lineup_posted     INTEGER DEFAULT 0,
+  home_pitcher_pulled    INTEGER DEFAULT 0,
+  away_pitcher_pulled    INTEGER DEFAULT 0,
+  pull_confirmed_home    INTEGER DEFAULT 0,
+  pull_confirmed_away    INTEGER DEFAULT 0,
+  home_pitch_count       INTEGER DEFAULT 0,
+  away_pitch_count       INTEGER DEFAULT 0,
+  rain_pct               REAL,
+  dk_home_ks_line        REAL,
+  dk_away_ks_line        REAL,
+  dk_home_direction      INTEGER DEFAULT 0,
+  dk_away_direction      INTEGER DEFAULT 0,
+  dk_home_line_t180      REAL,
+  dk_home_line_t90       REAL,
+  dk_away_line_t180      REAL,
+  dk_away_line_t90       REAL,
+  scratch_alert          INTEGER DEFAULT 0,
+  scratch_pitcher_id     TEXT,
+  early_game             INTEGER DEFAULT 0,
+  last_updated           INTEGER,
+  notes                  TEXT,
+  PRIMARY KEY (game_pk, bet_date)
+);
+CREATE INDEX IF NOT EXISTS idx_game_pulse_date  ON game_pulse(bet_date, phase);
+CREATE INDEX IF NOT EXISTS idx_game_pulse_phase ON game_pulse(bet_date, last_updated);
+
+-- ========================================================================
+-- bankroll_state: daily singleton — live available pool for Kelly sizing.
+-- Written by lib/bankrollState.js via atomic SQL UPDATE (no race conditions).
+-- Kelly reads available_pool instead of static morning bankroll env var.
+-- committed_capital = sum of all open position risk (pre-settlement).
+-- realized_pnl = net from all settled bets today.
+-- unrealized_pnl = estimated from open positions at current Kalshi mid.
+-- available_pool = morning_bankroll + realized_pnl - committed_capital.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS bankroll_state (
+  bet_date          TEXT PRIMARY KEY,
+  morning_bankroll  REAL NOT NULL DEFAULT 0,
+  committed_capital REAL NOT NULL DEFAULT 0,
+  realized_pnl      REAL NOT NULL DEFAULT 0,
+  unrealized_pnl    REAL NOT NULL DEFAULT 0,
+  available_pool    REAL,
+  last_updated      INTEGER
+);
+
+-- ========================================================================
+-- pitcher_edge_cache: per-pitcher freshness gate for edge computation.
+-- Written by strikeoutEdge.js on every edge run.
+-- ksBets reads edge_computed_at: if < 180s ago, skip re-computation.
+-- This eliminates double edge computation on the lineup-trigger path.
+-- trigger_source: 'morning'|'lineup'|'scratch'|'rescan'|'weather'
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS pitcher_edge_cache (
+  pitcher_id       TEXT NOT NULL,
+  bet_date         TEXT NOT NULL,
+  edge_computed_at TEXT NOT NULL,
+  trigger_source   TEXT,
+  edges_json       TEXT,
+  PRIMARY KEY (pitcher_id, bet_date)
+);
+CREATE INDEX IF NOT EXISTS idx_pec_date ON pitcher_edge_cache(bet_date, edge_computed_at);
+
+-- ========================================================================
+-- bet_placement_locks: DB-level mutex preventing duplicate bets.
+-- Prevents Railway + The Closer from firing the same bet simultaneously.
+-- INSERT OR IGNORE: first writer wins. 5-min TTL auto-cleanup.
+-- lock_key = 'game_pk-pitcher_id-threshold-side'
+-- holder: 'railway' | 'closer' | process name
+-- bet_id: set once bet is confirmed placed (NULL = still locking, not yet filled)
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS bet_placement_locks (
+  lock_key    TEXT PRIMARY KEY,
+  holder      TEXT,
+  locked_at   INTEGER NOT NULL,
+  bet_id      INTEGER REFERENCES ks_bets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_bpl_locked ON bet_placement_locks(locked_at);
+
+-- CLV (closing line value) tracking for pre-game bets.
+-- closing_line_cents: YES mid at ~T-5min before first pitch.
+-- clv_cents: positive = beat the close (filled better than close); negative = adverse.
+ALTER TABLE ks_bets ADD COLUMN closing_line_cents INTEGER;
+ALTER TABLE ks_bets ADD COLUMN clv_cents REAL;
+ALTER TABLE ks_bets ADD COLUMN closing_line_captured_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_ks_bets_clv ON ks_bets(bet_date, clv_cents);
+
+-- ========================================================================
+-- WEATHER (Kalshi weather-markets edge-validation recorder, May 2026)
+--
+-- Layer 1 of the weather edge-validation pipeline. Pure recording: raw
+-- snapshots only, no derived signals, no decisions. Designed so any
+-- candidate edge hypothesis can be replayed offline against real history.
+-- Tables stay in this DB to reuse the Turso client + migrate() pipeline;
+-- schemas isolated by name prefix so they don't tangle with baseball.
+-- ========================================================================
+
+CREATE TABLE IF NOT EXISTS weather_markets (
+  ticker              TEXT PRIMARY KEY,
+  series_ticker       TEXT NOT NULL,
+  event_ticker        TEXT NOT NULL,
+  status              TEXT,
+  floor_strike        REAL,
+  cap_strike          REAL,
+  no_sub_title        TEXT,
+  open_time           TEXT,
+  close_time          TEXT,
+  expiration_time     TEXT,
+  occurrence_datetime TEXT,
+  rules_primary       TEXT,
+  first_seen_at       TEXT DEFAULT (datetime('now')),
+  last_seen_at        TEXT DEFAULT (datetime('now')),
+  raw_json            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wm_event  ON weather_markets(event_ticker);
+CREATE INDEX IF NOT EXISTS idx_wm_series ON weather_markets(series_ticker);
+CREATE INDEX IF NOT EXISTS idx_wm_status ON weather_markets(status);
+
+CREATE TABLE IF NOT EXISTS weather_orderbook_snapshots (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                TEXT NOT NULL,
+  ticker            TEXT NOT NULL,
+  best_yes_bid      INTEGER,
+  best_yes_bid_qty  INTEGER,
+  best_yes_ask      INTEGER,
+  best_yes_ask_qty  INTEGER,
+  best_no_bid       INTEGER,
+  best_no_bid_qty   INTEGER,
+  best_no_ask       INTEGER,
+  best_no_ask_qty   INTEGER,
+  yes_book_json     TEXT,
+  no_book_json      TEXT,
+  open_interest     REAL,
+  liquidity_dollars REAL,
+  volume_lifetime   REAL,
+  last_price_cents  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_wob_ticker_ts ON weather_orderbook_snapshots(ticker, ts);
+CREATE INDEX IF NOT EXISTS idx_wob_ts        ON weather_orderbook_snapshots(ts);
+
+CREATE TABLE IF NOT EXISTS weather_metar (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_fetched   TEXT NOT NULL,
+  station      TEXT NOT NULL,
+  obs_time     TEXT NOT NULL,
+  raw          TEXT NOT NULL,
+  temp_c       REAL,
+  temp_f       REAL,
+  dewpoint_c   REAL,
+  wind_kt      REAL,
+  altimeter    REAL,
+  six_hr_max_f REAL,
+  six_hr_min_f REAL,
+  daily_max_f  REAL,
+  UNIQUE (station, obs_time)
+);
+CREATE INDEX IF NOT EXISTS idx_metar_station_obs ON weather_metar(station, obs_time);
+
+CREATE TABLE IF NOT EXISTS weather_forecasts (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_fetched        TEXT NOT NULL,
+  source            TEXT NOT NULL,
+  station           TEXT NOT NULL,
+  target_date       TEXT NOT NULL,
+  cycle             TEXT,
+  predicted_high_f  REAL,
+  predicted_low_f   REAL,
+  ensemble_member   INTEGER,
+  raw_json          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fc_station_target ON weather_forecasts(station, target_date);
+
+CREATE TABLE IF NOT EXISTS weather_settlements (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  station     TEXT NOT NULL,
+  date        TEXT NOT NULL,
+  high_f      REAL,
+  low_f       REAL,
+  source      TEXT,
+  fetched_ts  TEXT DEFAULT (datetime('now')),
+  raw_json    TEXT,
+  UNIQUE (station, date, source)
+);
+CREATE INDEX IF NOT EXISTS idx_settle_date ON weather_settlements(date);
+
+-- ========================================================================
+-- BTCD edge trader (Kalshi KXBTCD hourly Bitcoin markets)
+-- See lib/btcd*.js. Signal: at event open, buy NO when yes-mid is 0.55-0.70,
+-- buy YES when 0.70-0.80. Backtest 62.6% / 87.5% win rates over 34 days.
+-- ========================================================================
+CREATE TABLE IF NOT EXISTS btcd_bankroll_state (
+  id                INTEGER PRIMARY KEY CHECK (id = 1),
+  mode              TEXT    NOT NULL DEFAULT 'paper',
+  balance           REAL    NOT NULL,
+  starting_balance  REAL    NOT NULL,
+  starting_ts       TEXT    NOT NULL,
+  peak_balance      REAL    NOT NULL,
+  daily_pnl         REAL    NOT NULL DEFAULT 0,
+  daily_pnl_date    TEXT,
+  halted            INTEGER NOT NULL DEFAULT 0,
+  halt_reason       TEXT,
+  updated_at        TEXT    DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS btcd_signals (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                TEXT    NOT NULL,
+  event_ticker      TEXT    NOT NULL,
+  market_ticker     TEXT    NOT NULL,
+  side              TEXT    NOT NULL,
+  yes_bid           REAL,
+  yes_ask           REAL,
+  yes_mid           REAL    NOT NULL,
+  spread            REAL,
+  spot              REAL,
+  strike            REAL,
+  cost_per_contract REAL,
+  fee_per_contract  REAL,
+  expected_win_prob REAL,
+  expected_ev       REAL,
+  fired             INTEGER NOT NULL DEFAULT 0,
+  skip_reason       TEXT,
+  created_at        TEXT    DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_btcd_signals_event ON btcd_signals(event_ticker);
+CREATE INDEX IF NOT EXISTS idx_btcd_signals_ts ON btcd_signals(ts);
+
+CREATE TABLE IF NOT EXISTS btcd_trades (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  signal_id       INTEGER,
+  ts              TEXT    NOT NULL,
+  event_ticker    TEXT    NOT NULL,
+  market_ticker   TEXT    NOT NULL,
+  side            TEXT    NOT NULL,
+  contracts       INTEGER NOT NULL,
+  fill_price      REAL    NOT NULL,
+  cost            REAL    NOT NULL,
+  fee             REAL    NOT NULL,
+  expected_value  REAL,
+  close_time      TEXT    NOT NULL,
+  status          TEXT    NOT NULL DEFAULT 'open',
+  result          TEXT,
+  settle_price    REAL,
+  payout          REAL,
+  realized_pnl    REAL,
+  expiration_value REAL,
+  settled_at      TEXT,
+  mode            TEXT    NOT NULL DEFAULT 'paper'
+);
+CREATE INDEX IF NOT EXISTS idx_btcd_trades_status ON btcd_trades(status);
+CREATE INDEX IF NOT EXISTS idx_btcd_trades_close ON btcd_trades(close_time);
+CREATE INDEX IF NOT EXISTS idx_btcd_trades_event ON btcd_trades(event_ticker);
+
+CREATE TABLE IF NOT EXISTS btcd_seen_events (
+  event_ticker    TEXT PRIMARY KEY,
+  first_seen_at   TEXT NOT NULL,
+  close_time      TEXT NOT NULL,
+  processed_at    TEXT,
+  signal_count    INTEGER NOT NULL DEFAULT 0,
+  trade_count     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS btcd_daily_pnl (
+  date        TEXT PRIMARY KEY,
+  trades      INTEGER NOT NULL DEFAULT 0,
+  wins        INTEGER NOT NULL DEFAULT 0,
+  losses      INTEGER NOT NULL DEFAULT 0,
+  pnl         REAL    NOT NULL DEFAULT 0,
+  fees        REAL    NOT NULL DEFAULT 0,
+  end_balance REAL,
+  updated_at  TEXT    DEFAULT (datetime('now'))
+);

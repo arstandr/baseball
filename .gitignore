@@ -15,3 +15,10 @@ __pycache__/
 venv/
 npm-debug.log*
 .kalshi_key.pem
+
+# local databases & backtest caches (data, not source) — added 2026-05-11
+*.db
+*.sqlite3
+.candleCache.json
+.rawBacktestData.json
+.extendedBacktest.cache.json

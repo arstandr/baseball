@@ -60,17 +60,21 @@ import { fetchUmpiresForGames } from './fetchUmpire.js'
 import { getUmpireFactor } from '../../lib/umpireFactors.js'
 import { loadModel, predictPk } from '../../lib/pkModel.js'
 import { correlatedKellyDivide } from '../../lib/kelly.js'
+import { getAvailablePool } from '../../lib/bankrollState.js'
 import {
   NB_R, LEAGUE_K9, LEAGUE_AVG_IP, LEAGUE_K_PCT, LEAGUE_PA_PER_IP, LEAGUE_WHIFF_PCT,
-  nbCDF, pAtLeast, ipToDecimal,
+  nbCDF, pAtLeast, archetypeR, ipToDecimal,
 } from '../../lib/strikeout-model.js'
 import { parseArgs } from '../../lib/cli-args.js'
 import { recordPipelineStep } from '../../lib/pipelineLog.js'
+import { getRules } from '../../lib/bettingRules.js'
+import { buildSnapshotRow, writeSnapshotBatch } from '../../lib/marketSnapshotWriter.js'
 
 const opts     = parseArgs({
-  date:    { default: new Date().toISOString().slice(0, 10) },
-  minEdge: { flag: 'min-edge', type: 'number', default: 0.08 },
-  json:    { type: 'boolean' },
+  date:          { default: new Date().toISOString().slice(0, 10) },
+  minEdge:       { flag: 'min-edge', type: 'number', default: 0.08 },
+  json:          { type: 'boolean' },
+  triggerSource: { flag: 'trigger-source', default: 'morning' },
 })
 const TODAY    = opts.date
 const MIN_EDGE = opts.minEdge
@@ -92,6 +96,11 @@ const YES_MIN_PROB = 0.25    // YES bets require model_prob ≥ 25%
 const YES_MIN_EDGE = 0.12    // YES bets require edge ≥ 12¢
 // Apr 2026 data: 8-12¢ NO bucket was 30 bets, 26.7% win rate, -$101. Raised from 8¢.
 const NO_MIN_EDGE  = 0.12    // NO bets require edge ≥ 12¢
+
+// Batting order slot weights: leadoff (slot 1) sees ~15% more PAs than #9.
+// Research: slots 1-2 see ~4.4 PA/game, slot 9 ~3.6. Weights are PA-proportional,
+// normalized so equal-weight lineup (all weights=1.0) would give the same result.
+const LINEUP_SLOT_WEIGHTS = [1.15, 1.10, 1.10, 1.05, 1.00, 0.95, 0.90, 0.85, 0.80]
 
 const MLB_BASE = 'https://statsapi.mlb.com/api/v1'
 const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
@@ -271,7 +280,7 @@ async function loadLineups(date) {
   _lineupsCache = new Map()
 
   const rows = await db.all(
-    `SELECT gl.game_id, gl.team_abbr, gl.vs_hand, gl.lineup_k_pct, gl.batter_count
+    `SELECT gl.game_id, gl.team_abbr, gl.vs_hand, gl.lineup_k_pct, gl.batter_count, gl.lineup_json
        FROM game_lineups gl
        INNER JOIN games g ON g.id = gl.game_id
       WHERE g.date = ?
@@ -283,7 +292,7 @@ async function loadLineups(date) {
   for (const r of rows) {
     const key = `${r.game_id}-${r.team_abbr}-${r.vs_hand}`
     if (!_lineupsCache.has(key)) {
-      _lineupsCache.set(key, { k_pct: r.lineup_k_pct, batter_count: r.batter_count })
+      _lineupsCache.set(key, { k_pct: r.lineup_k_pct, batter_count: r.batter_count, lineup_json: r.lineup_json })
     }
   }
 
@@ -323,14 +332,48 @@ async function fetchPitcherMeta(pitcherId) {
 // ── Opponent K% lookup ────────────────────────────────────────────────────────
 
 /**
+ * Slot-weighted lineup K% using batting order position.
+ * lineup_json = [{id, vs_r, vs_l}] where index = batting order slot (0-based, percent space).
+ * Leadoff sees ~15% more PAs per game than #9 → higher slot weight inflates their K% contribution.
+ * Missing per-batter data falls back to LEAGUE_K_PCT.
+ */
+function computeSlotWeightedKpct(lineupJson, pitcherHand) {
+  try {
+    const batters = typeof lineupJson === 'string' ? JSON.parse(lineupJson) : lineupJson
+    if (!Array.isArray(batters) || !batters.length) return null
+
+    const field = pitcherHand === 'L' ? 'vs_l' : 'vs_r'
+    const leaguePct = LEAGUE_K_PCT * 100  // percent space (e.g. 22.5)
+
+    let weightedSum = 0, totalWeight = 0
+    for (let i = 0; i < Math.min(9, batters.length); i++) {
+      const w    = LINEUP_SLOT_WEIGHTS[i] ?? 1.0
+      const kPct = batters[i]?.[field] ?? leaguePct
+      weightedSum += w * kPct
+      totalWeight += w
+    }
+
+    return totalWeight > 0 ? (weightedSum / totalWeight) / 100 : null  // back to decimal
+  } catch {
+    return null
+  }
+}
+
+/**
  * Fetch opposing lineup K% vs pitcher's hand.
- * Priority: game_lineups (official 9-man lineup) → historical_team_offense → MLB API → league avg.
+ * Priority: game_lineups slot-weighted → game_lineups equal-weight → historical_team_offense → MLB API → league avg.
  */
 async function fetchOpponentKpct(teamAbbr, gameDate, pitcherHand, gameId, lineupsCache) {
-  // 1. Official lineup from game_lineups
+  // 1. Official lineup from game_lineups — prefer slot-weighted over equal-weight
   if (lineupsCache && gameId) {
     const key = `${gameId}-${teamAbbr}-${pitcherHand}`
     const lu = lineupsCache.get(key)
+    if (lu?.lineup_json) {
+      const slotWt = computeSlotWeightedKpct(lu.lineup_json, pitcherHand)
+      if (slotWt != null) {
+        return { kpct: slotWt, source: `lineup_slot(${lu.batter_count ?? '?'})` }
+      }
+    }
     if (lu?.k_pct != null) {
       return { kpct: lu.k_pct, source: `lineup(${lu.batter_count}batters)` }
     }
@@ -471,14 +514,25 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
     pK_l5 = w * pK_raw + (1 - w) * careerKpct
     k9_l5 = pK_l5 * LEAGUE_PA_PER_IP * 9
 
-    // L5 regression cap: hot 5-start streaks are noisy and revert to mean.
-    // When L5 K9 > 125% of career baseline, regress back to the cap.
-    // Sánchez Apr 23: L5 was 32% above career → model said 81% YES → got 4 Ks → -$430.
-    if (k9_l5 > careerK9 * 1.25) {
-      const cappedK9 = careerK9 * 1.25
-      console.log(`[strikeout-edge] L5 regression: k9_l5 ${k9_l5.toFixed(2)} → ${cappedK9.toFixed(2)} (career ${careerK9.toFixed(2)} ×1.25)`)
-      k9_l5 = cappedK9
-      pK_l5 = cappedK9 / (LEAGUE_PA_PER_IP * 9)
+    // ── Asymmetric L5 shrinkage toward career (May 2 audit) ──
+    // k9_l5 has only 0.273 Pearson correlation with next-start K count, so
+    // recent K rate is mostly noise — but the prior code weighted it ~30% of
+    // the lambda blend. Hot/avg pitchers showed +28-30% upside bias; cold
+    // pitchers showed +4% (calibrated). Diagnosis: the model treats hot
+    // streaks as stable skill signal when they're actually noise.
+    //
+    // Fix: shrink hot L5 → career heavily (keep only 50% of gap), shrink cold
+    // L5 → career lightly (keep 85%). Replaces the prior hard 1.25× cap with
+    // a continuous, asymmetric correction. Tunable via env.
+    const HOT_KEEP  = Number(process.env.L5_HOT_KEEP  ?? 0.50)
+    const COLD_KEEP = Number(process.env.L5_COLD_KEEP ?? 0.85)
+    const _gap = k9_l5 - careerK9
+    const _keep = _gap > 0 ? HOT_KEEP : COLD_KEEP
+    const _adjusted = careerK9 + _gap * _keep
+    if (Math.abs(_adjusted - k9_l5) > 0.01) {
+      console.log(`[strikeout-edge] L5 ${_gap > 0 ? 'hot' : 'cold'} shrinkage: k9_l5 ${k9_l5.toFixed(2)} → ${_adjusted.toFixed(2)} (career ${careerK9.toFixed(2)}, gap ${_gap.toFixed(2)} × keep=${_keep})`)
+      k9_l5 = _adjusted
+      pK_l5 = _adjusted / (LEAGUE_PA_PER_IP * 9)
     }
   } else {
     pK_l5 = careerKpct
@@ -498,7 +552,20 @@ function computeLambdaBase(log, gameDate, savant, career, recentStartsData, care
     if (savant.swstr_pct != null) {
       const k_implied = savant.swstr_pct * (LEAGUE_K_PCT / LEAGUE_WHIFF_PCT)
       const gap = k_implied - pK_season
-      if (Math.abs(gap) > 0.08) whiffFlag = gap < 0 ? 'K%-may-regress' : 'K%-may-improve'
+      // SwStr%-implied K% correction (formula path only — ML model handles this via savant_whiff).
+      // When SwStr% and actual K% diverge meaningfully, blend pK_season 20% toward k_implied.
+      // This corrects for pitchers whose K% hasn't yet caught up with their true swing-and-miss rate.
+      // Only runs when the ML model won't override (pitchers with <5 IP 2026 data = rookies, openers).
+      const mlWillRun = _pkModel != null && savant.ip >= 5
+      if (!mlWillRun && Math.abs(gap) > 0.04) {
+        const adj = 0.20 * gap
+        pK_season = pK_season + adj
+        k9_season = pK_season * paPerIp * 9  // keep k9_season aligned with adjusted pK_season
+        savantNote = `${savantNote} swstr-adj=${adj > 0 ? '+' : ''}${(adj * 100).toFixed(1)}%`
+      }
+      // whiffFlag reflects remaining discrepancy after correction (for logging only)
+      const remainingGap = k_implied - pK_season
+      if (Math.abs(remainingGap) > 0.08) whiffFlag = remainingGap < 0 ? 'K%-may-regress' : 'K%-may-improve'
     }
   }
 
@@ -746,6 +813,28 @@ function calcEdge(modelProb, yes_ask, yes_bid, no_ask, no_bid) {
   return { yesEdge, noEdge, bestEdge, side: yesEdge >= noEdge ? 'YES' : 'NO' }
 }
 
+// ── Pitcher calibration scale loader ─────────────────────────────────────────
+// Loads per-pitcher reliability from the most recent calibration run.
+// reliability = actual_roi / expected_roi — values > 1 mean the model
+// under-estimated this pitcher; < 1 means it over-estimated. Requires ≥10 bets.
+// Clamped to [0.5, 1.5] to prevent extreme sizing swings on noisy small samples.
+
+async function loadPitcherCalibration() {
+  try {
+    const rows = await db.all(
+      `SELECT pitcher_id, reliability FROM pitcher_calibration
+       WHERE n_bets >= 10
+         AND run_id = (SELECT run_id FROM pitcher_calibration ORDER BY updated_at DESC LIMIT 1)`,
+    )
+    if (rows.length) {
+      console.log(`[ks-edge] Loaded calibration scales for ${rows.length} pitchers`)
+    }
+    return new Map(rows.map(r => [String(r.pitcher_id), Math.max(0.5, Math.min(1.5, Number(r.reliability)))]))
+  } catch {
+    return new Map()
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -753,7 +842,7 @@ async function main() {
 
   const season = new Date(TODAY).getFullYear()
 
-  const [games, statcastMap, careerMap, recentStartsMap, lineupsCache, careerVeloMap] = await Promise.all([
+  const [games, statcastMap, careerMap, recentStartsMap, lineupsCache, careerVeloMap, pitcherCalMap] = await Promise.all([
     db.all(
       `SELECT id, date, game_time, team_home, team_away, pitcher_home_id, pitcher_away_id
          FROM games WHERE date = ? ORDER BY game_time`,
@@ -764,6 +853,7 @@ async function main() {
     loadRecentStarts(season),
     loadLineups(TODAY),
     loadCareerVelo(),
+    loadPitcherCalibration(),
   ])
 
   if (!games.length) {
@@ -772,7 +862,78 @@ async function main() {
     return
   }
 
-  console.log(`[ks-edge] ${games.length} games on ${TODAY} | NB r=${NB_R} | min edge ${(MIN_EDGE*100).toFixed(0)}¢ (floor=${(MIN_EDGE_FLOOR*100).toFixed(0)}¢+spread/2)\n`)
+  // ── Sync game_pulse lineup flags from confirmed lineup data ───────────────
+  // When we have lineup_json, the lineup is officially posted — mark game_pulse.
+  // This is how strikeoutEdge feeds into the intelligence layer (gamePulse).
+  for (const game of games) {
+    const gamePk = String(game.id)
+    const homeKey = `${game.id}-${game.team_home}-`
+    const awayKey = `${game.id}-${game.team_away}-`
+    const homePosted = [...lineupsCache.keys()].some(k => k.startsWith(homeKey))
+    const awayPosted = [...lineupsCache.keys()].some(k => k.startsWith(awayKey))
+    if (homePosted || awayPosted) {
+      await db.run(
+        `UPDATE game_pulse
+         SET home_lineup_posted = CASE WHEN ? THEN 1 ELSE home_lineup_posted END,
+             away_lineup_posted = CASE WHEN ? THEN 1 ELSE away_lineup_posted END,
+             last_updated       = ?
+         WHERE game_pk = ? AND bet_date = ?`,
+        [homePosted ? 1 : 0, awayPosted ? 1 : 0, Date.now(), gamePk, TODAY],
+      ).catch(() => {})
+    }
+  }
+
+  // ── Bankroll + drawdown state ──────────────────────────────────────────────
+  // availablePool feeds Kelly sizing — uses committed-adjusted pool so morning bets
+  // reduce afternoon bet sizes proportionally. Falls back to env var on error.
+  const availablePool = await getAvailablePool(TODAY).catch(() => null)
+  // drawdownScale reduces bet sizes when 7-day P&L is in a losing streak.
+  const ddFlagRow = await db.one(`SELECT value FROM system_flags WHERE key='drawdown_scale'`).catch(() => null)
+  const drawdownScale = Math.max(0.1, Math.min(1.0, Number(ddFlagRow?.value ?? 1.0)))
+  if (availablePool != null) {
+    console.log(`[ks-edge] Kelly base: available_pool=$${availablePool.toFixed(2)}  drawdown_scale=${drawdownScale}×`)
+  }
+
+  // ── DK line direction — confidence modifier from game_pulse ──────────────
+  // Rising line (+1): sharp money agrees with our model → +5% edge confidence
+  // Falling line (-1): market correcting against our edge → -10% edge confidence
+  const dkDirectionMap = new Map()  // String(pitcherId) → direction (+1/-1/0)
+  try {
+    const pulseRows = await db.all(
+      `SELECT home_pitcher_id, away_pitcher_id, dk_home_direction, dk_away_direction
+       FROM game_pulse WHERE bet_date=?`,
+      [TODAY],
+    )
+    for (const r of pulseRows) {
+      if (r.home_pitcher_id && r.dk_home_direction != null) {
+        dkDirectionMap.set(String(r.home_pitcher_id), r.dk_home_direction)
+      }
+      if (r.away_pitcher_id && r.dk_away_direction != null) {
+        dkDirectionMap.set(String(r.away_pitcher_id), r.dk_away_direction)
+      }
+    }
+    if (dkDirectionMap.size > 0) {
+      console.log(`[ks-edge] DK line directions loaded: ${dkDirectionMap.size} pitchers`)
+    }
+  } catch {}
+
+  // Apr 28 — apply betting_rules DB tunings to pre-game gates. Hardcoded constants
+  // remain as fallbacks. Adam tuned the DB but pre-game pipeline never read them.
+  const _R = await getRules().catch(() => ({}))
+  const EFF_YES_MIN_PROB    = Number(_R.yes_pregame_min_prob ?? YES_MIN_PROB)
+  const EFF_YES_MAX_MID     = _R.yes_pregame_max_mid != null ? Number(_R.yes_pregame_max_mid) : null
+  const EFF_NO_MIN_EDGE     = Number(_R.no_min_edge ?? NO_MIN_EDGE)
+  const EFF_NO_MAX_MARK_MID = _R.no_max_market_mid != null ? Number(_R.no_max_market_mid) : null
+  const EFF_YES_MAX_STRIKE  = _R.yes_max_strike != null ? Number(_R.yes_max_strike) : null
+  const EFF_NO_MAX_STRIKE   = _R.no_max_strike  != null ? Number(_R.no_max_strike)  : null
+  // Apr 28 — tail-strike protection. For high-K thresholds (>=8) the model has more
+  // uncertainty (Cease scenario: 80%-confident on 8+/9+/10+, actual 5K → −$50).
+  // Require a stricter min_prob on tail strikes than the base gate.
+  const TAIL_STRIKE_MIN     = 8
+  const TAIL_STRIKE_MIN_PROB = 0.55
+  console.log(`[ks-edge] ${games.length} games on ${TODAY} | NB r=${NB_R} | min edge ${(MIN_EDGE*100).toFixed(0)}¢ (floor=${(MIN_EDGE_FLOOR*100).toFixed(0)}¢+spread/2)`)
+  console.log(`[ks-edge] effective rules: YES min_prob=${EFF_YES_MIN_PROB} max_mid=${EFF_YES_MAX_MID ?? 'off'}¢ max_strike=${EFF_YES_MAX_STRIKE ?? 'off'} | NO min_edge=${EFF_NO_MIN_EDGE} max_mid=${EFF_NO_MAX_MARK_MID ?? 'off'}¢ max_strike=${EFF_NO_MAX_STRIKE ?? 'off'} | tail (strike≥${TAIL_STRIKE_MIN}) min_prob=${TAIL_STRIKE_MIN_PROB}`)
+  console.log()
 
   // Fetch HP umpires for all games concurrently
   const umpMap = await fetchUmpiresForGames(games.map(g => g.id))
@@ -995,13 +1156,57 @@ async function main() {
       }
 
       const _pipelineEdges = []
+      // Apr 29 — capture every evaluated market into market_snapshots so we have
+      // queryable backtest data going forward (was previously only the live engine).
+      // Filtered AND placed bets both get rows; eval_mode='pre-game'.
+      const _preGameSnapshots = []
 
       for (const mkt of group.markets) {
-        // Use pitcher-specific dispersion r if fitted by fitDispersion.js; fall back to NB_R (30).
-        const pitcherNbR   = savant?.nb_r ?? NB_R
+        // Archetype-driven NB dispersion: power/contact/mixed pitchers have different tail shapes.
+        // archetypeR() prefers a fitted nb_r from fitDispersion.js, then groups by k_pct.
+        const pitcherNbR   = archetypeR(savant)
         const rawModelProb = Math.max(0, 1 - nbCDF(lambda, pitcherNbR, mkt.strike - 1))
         const mid    = mkt.yes_ask != null && mkt.yes_bid != null ? (mkt.yes_ask + mkt.yes_bid) / 2 : null
         const spread = mkt.yes_ask != null && mkt.yes_bid != null ? mkt.yes_ask - mkt.yes_bid : null
+
+        // ── Full-distribution shadow audit ──────────────────────────────────
+        // Capture EVERY (pitcher, strike, side) pair the model can score, even
+        // ones production filters will later reject. Lets us audit "what NO
+        // bets at high strikes were blocked despite positive calibrated edge?"
+        // Fire-and-forget — never block production on shadow write.
+        try {
+          const { recordFullDistribution } = await import('../../lib/shadowInversion.js')
+          for (const _shadowSide of ['YES', 'NO']) {
+            let allowed = true, reason = null
+            if (_shadowSide === 'YES') {
+              if (EFF_YES_MAX_STRIKE != null && mkt.strike > EFF_YES_MAX_STRIKE) { allowed = false; reason = `yes_max_strike=${EFF_YES_MAX_STRIKE}` }
+              else if (EFF_YES_MAX_MID != null && mid != null && mid > EFF_YES_MAX_MID) { allowed = false; reason = `yes_max_mid=${EFF_YES_MAX_MID}` }
+              else if (rawModelProb < EFF_YES_MIN_PROB) { allowed = false; reason = `yes_min_prob=${EFF_YES_MIN_PROB}` }
+            } else {
+              if (EFF_NO_MAX_STRIKE != null && mkt.strike > EFF_NO_MAX_STRIKE) { allowed = false; reason = `no_max_strike=${EFF_NO_MAX_STRIKE}` }
+              else if (EFF_NO_MAX_MARK_MID != null && mid != null && mid > EFF_NO_MAX_MARK_MID) { allowed = false; reason = `no_max_market_mid=${EFF_NO_MAX_MARK_MID}` }
+            }
+            await recordFullDistribution({
+              betDate:      TODAY,
+              pitcherId:    meta?.id ?? null,
+              pitcherName:  meta?.name ?? '(unknown)',
+              strike:       mkt.strike,
+              side:         _shadowSide,
+              ticker:       mkt.ticker ?? null,
+              lambda,
+              pitcherNbR,
+              rawModelProb,
+              yesBid:       mkt.yes_bid ?? null,
+              yesAsk:       mkt.yes_ask ?? null,
+              noBid:        mkt.no_bid  ?? null,
+              noAsk:        mkt.no_ask  ?? null,
+              marketMid:    mid,
+              spread,
+              productionAllowed: allowed,
+              productionFilterReason: reason,
+            }).catch(() => {})
+          }
+        } catch { /* shadow optional */ }
 
         // Live data shows model UNDER-predicts the upper tail (K≥7+ wins at 44-45%
         // when model says 30-40%); shrinkage was making it worse. Use raw probability.
@@ -1033,12 +1238,28 @@ async function main() {
         const tooThin = mkt.volume != null && mkt.volume < 10
 
         // ── YES/NO asymmetric quality filter ─────────────────────────────────
-        const sideMinEdge   = edge.side === 'YES' ? YES_MIN_EDGE : NO_MIN_EDGE
-        const yesFiltered   = edge.side === 'YES' && modelProb < YES_MIN_PROB
-        const hasEdge       = !isLocked && !noCapKills && !tooThin && !yesFiltered
+        // Apr 28 — effective values come from betting_rules table when present (was
+        // hardcoded only). Strict-side rule wins via Math.max so we never RELAX.
+        const sideMinEdge   = edge.side === 'YES' ? YES_MIN_EDGE : Math.max(NO_MIN_EDGE, EFF_NO_MIN_EDGE)
+        // Tail-strike gate: stricter prob threshold on high-K bets (strike >= 8).
+        const effYesMinProb = edge.side === 'YES' && mkt.strike >= TAIL_STRIKE_MIN
+                              ? Math.max(YES_MIN_PROB, EFF_YES_MIN_PROB, TAIL_STRIKE_MIN_PROB)
+                              : Math.max(YES_MIN_PROB, EFF_YES_MIN_PROB)
+        const yesFiltered   = edge.side === 'YES' && modelProb < effYesMinProb
+        const yesMidFilt    = edge.side === 'YES' && EFF_YES_MAX_MID != null && mid != null && mid > EFF_YES_MAX_MID
+        const noMidFilt     = edge.side === 'NO'  && EFF_NO_MAX_MARK_MID != null && mid != null && mid > EFF_NO_MAX_MARK_MID
+        const yesStrikeFilt = edge.side === 'YES' && EFF_YES_MAX_STRIKE != null && mkt.strike > EFF_YES_MAX_STRIKE
+        const noStrikeFilt  = edge.side === 'NO'  && EFF_NO_MAX_STRIKE  != null && mkt.strike > EFF_NO_MAX_STRIKE
+        const ruleFiltered  = yesMidFilt || noMidFilt || yesStrikeFilt || noStrikeFilt
+        const hasEdge       = !isLocked && !noCapKills && !tooThin && !yesFiltered && !ruleFiltered
                               && edge.bestEdge >= Math.max(edgeThreshold, sideMinEdge)
-        const hasRawEdge    = !isLocked && !hasEdge && (noCapKills || tooThin || yesFiltered || edge.bestEdge >= MIN_EDGE)
+        const hasRawEdge    = !isLocked && !hasEdge && (noCapKills || tooThin || yesFiltered || ruleFiltered || edge.bestEdge >= MIN_EDGE)
 
+        const _ruleTag = yesMidFilt ? ` [YES-mid>${EFF_YES_MAX_MID}¢]`
+                       : noMidFilt  ? ` [NO-yes-mid>${EFF_NO_MAX_MARK_MID}¢]`
+                       : yesStrikeFilt ? ` [YES-strike>${EFF_YES_MAX_STRIKE}]`
+                       : noStrikeFilt  ? ` [NO-strike>${EFF_NO_MAX_STRIKE}]`
+                       : ''
         console.log(
           `    ${mkt.strike}+ Ks: model=${(modelProb*100).toFixed(1)}%` +
           ` | mid=${mid != null ? mid.toFixed(0)+'¢' : 'n/a'}` +
@@ -1046,8 +1267,16 @@ async function main() {
           ` | edge(${edge.side})=${(edge.bestEdge*100).toFixed(1)}¢` +
           ` | thr=${(edgeThreshold*100).toFixed(1)}¢` +
           ` | vol=${mkt.volume != null ? Math.round(mkt.volume) : 'n/a'}` +
-          (isLocked ? ' [locked]' : hasEdge ? ' ← EDGE' : noCapKills ? ' [NO-cap>80¢]' : tooThin ? ' [thin<10]' : yesFiltered ? ' [YES-prob<25%]' : hasRawEdge ? ' [spread-kills-edge]' : '')
+          (isLocked ? ' [locked]' : hasEdge ? ' ← EDGE' : noCapKills ? ' [NO-cap>80¢]' : tooThin ? ' [thin<10]' : yesFiltered ? ` [YES-prob<${(Math.max(YES_MIN_PROB, EFF_YES_MIN_PROB)*100).toFixed(0)}%]` : ruleFiltered ? _ruleTag : hasRawEdge ? ' [spread-kills-edge]' : '')
         )
+
+        const _rejectReason = isLocked ? 'locked'
+                            : noCapKills ? 'no_cap_gt_80'
+                            : tooThin ? 'thin_lt_10vol'
+                            : yesFiltered ? 'yes_low_prob'
+                            : ruleFiltered ? (yesMidFilt ? 'yes_mid_cap' : noMidFilt ? 'no_mid_cap' : yesStrikeFilt ? 'yes_strike_cap' : 'no_strike_cap')
+                            : !hasEdge ? 'below_threshold'
+                            : null
 
         _pipelineEdges.push({
           strike: mkt.strike,
@@ -1063,9 +1292,39 @@ async function main() {
           side: edge.side,
           threshold_cents: edgeThreshold * 100,
           passed: hasEdge,
-          reason: isLocked ? 'locked' : noCapKills ? 'NO-cap>80¢' : tooThin ? 'thin<10vol' : yesFiltered ? 'YES-prob<25%' : !hasEdge ? 'below threshold' : null,
+          reason: _rejectReason,
           ticker: mkt.ticker,
         })
+
+        // Persist every pre-game evaluation to market_snapshots so we can backtest
+        // counterfactually. Same table the live engine writes to — eval_mode='pre-game'
+        // distinguishes them. Captures: filtered AND placed, with reject reason.
+        try {
+          _preGameSnapshots.push(buildSnapshotRow({
+            ticker:       mkt.ticker,
+            pitcherId:    String(id),
+            pitcherName:  meta.name,
+            strike:       mkt.strike,
+            gameDate:     TODAY,
+            capturedAt:   new Date().toISOString(),
+            gameId:       game.id,
+            gameLabel:    label,
+            yesBidCents:  mkt.yes_bid,
+            yesAskCents:  mkt.yes_ask,
+            midCents:     mid,
+            volume:       mkt.volume,
+            yesAskSize:   mkt.yes_ask_size ?? mkt.yes_ask_size_fp ?? (mkt.raw_market?.yes_ask_size_fp ? parseFloat(mkt.raw_market.yes_ask_size_fp) : null),
+            yesBidSize:   mkt.yes_bid_size ?? mkt.yes_bid_size_fp ?? (mkt.raw_market?.yes_bid_size_fp ? parseFloat(mkt.raw_market.yes_bid_size_fp) : null),
+            modelProb,
+            edgeYes:      edge.yesEdge,
+            edgeNo:       edge.noEdge,
+            bestSide:     edge.side,
+            bestEdge:     edge.bestEdge,
+            evalMode:     'pre-game',
+            qualified:    hasEdge,
+            rejectReason: _rejectReason,
+          }))
+        } catch { /* fire-and-forget */ }
 
         if (hasEdge) {
           pitcherEdgesThisGame.push({
@@ -1106,20 +1365,130 @@ async function main() {
           side:        e.side,
           edge:        e.edge,
         }))
-        const kellyResults = correlatedKellyDivide(kellyInputs, true)  // morning bets post as maker orders
+        // Pass available_pool so Kelly sizes against the real committed-adjusted bankroll,
+        // not the static BANKROLL env var. Falls back to env var when pool unavailable.
+        const kellyResults = correlatedKellyDivide(kellyInputs, true, availablePool ?? undefined)
+
+        // Per-pitcher calibration scale: multiply bet size by historical reliability.
+        // A pitcher the model consistently over-estimates gets smaller bets; one it
+        // under-estimates gets larger bets (clamped to [0.5×, 1.5×]).
+        const pitcherCalScale = pitcherCalMap.get(String(id)) ?? 1.0
+
+        // DK line direction modifier: market consensus signal.
+        // Rising line (+1) = confidence +5%; falling (-1) = discount -10%.
+        const dkDir     = dkDirectionMap.get(String(id)) ?? 0
+        const dkDirMult = dkDir > 0 ? 1.05 : dkDir < 0 ? 0.90 : 1.0
+        if (dkDir !== 0) {
+          console.log(`    [dk-dir] ${meta.name}: line direction=${dkDir > 0 ? 'rising↑' : 'falling↓'} → ${(dkDirMult * 100).toFixed(0)}% size modifier`)
+        }
 
         for (let i = 0; i < pitcherEdgesThisGame.length; i++) {
           const e = pitcherEdgesThisGame[i]
           const k = kellyResults[i]
+          const rawBet  = k?.betSize ?? null
+          // Apply: calibration × drawdown protection × DK line direction
+          const calBet  = rawBet != null
+            ? Math.min(Number(process.env.MAX_BET ?? 500), rawBet * pitcherCalScale * drawdownScale * dkDirMult)
+            : null
+          if ((pitcherCalScale !== 1.0 || drawdownScale < 1.0 || dkDir !== 0) && rawBet != null) {
+            console.log(`    [size] ${meta.name}: raw=$${rawBet.toFixed(0)} cal=${pitcherCalScale.toFixed(2)}x dd=${drawdownScale}x dk=${dkDirMult}x → $${(calBet ?? 0).toFixed(0)}`)
+          }
           allEdges.push({
             ...e,
-            bet_size:        k?.betSize ?? null,
-            kelly_fraction:  k?.kellyFraction ?? null,
-            kelly_scale:     k?.scaleFactor ?? null,
-            kelly_rationale: k?.rationale ?? null,
-            raw_model_prob:  e.rawModelProb ?? null,
+            bet_size:              calBet,
+            kelly_fraction:        k?.kellyFraction ?? null,
+            kelly_scale:           k?.scaleFactor ?? null,
+            kelly_scale_pitcher:   pitcherCalScale,
+            kelly_rationale:       k?.rationale ?? null,
+            raw_model_prob:        e.rawModelProb ?? null,
           })
         }
+      }
+
+      // ── Persist pre-game snapshots for backtest queryability ──────────────
+      // Captures every evaluated market (filtered + placed). eval_mode='pre-game'.
+      // Same table/schema as live snapshots so backtest queries are uniform.
+      if (_preGameSnapshots.length) {
+        writeSnapshotBatch(_preGameSnapshots).catch(() => {})
+      }
+
+      // ── Cross-strike candidate generation (Strategy B) ────────────────────
+      // For this pitcher, fit a Poisson distribution to the market prices
+      // across all strikes. Strikes that deviate from the fit by > threshold
+      // are mispriced. Emit them as candidates with strategy_mode='pregame_cross_strike'.
+      // Math-based (not model-based), validated by 78% win rate POC on 2026-05-05.
+      try {
+        const { generateCrossStrikeCandidates } = await import('../../lib/crossStrikeCandidates.js')
+        const pitcherMarkets = group.markets.map(m => ({
+          strike: m.strike, ticker: m.ticker,
+          yes_bid: m.yes_bid, yes_ask: m.yes_ask,
+          no_bid: m.no_bid, no_ask: m.no_ask,
+          market_mid: m.yes_ask != null && m.yes_bid != null ? (m.yes_ask + m.yes_bid) / 2 : null,
+        }))
+        const csCandidates = generateCrossStrikeCandidates(pitcherMarkets, {
+          minResidual: Number(_R.cross_strike_min_residual ?? 0.04),
+          maxResidual: Number(_R.cross_strike_max_residual ?? 0.20),
+          maxPerPitcher: Number(_R.cross_strike_max_per_pitcher ?? 2),
+        })
+        if (csCandidates.length > 0) {
+          console.log(`  [cross-strike] ${meta?.name ?? 'pitcher'}: ${csCandidates.length} mispriced strikes (λ-fit=${csCandidates[0].cross_strike_fit_lambda.toFixed(2)})`)
+          for (const c of csCandidates) {
+            const market_mid = c.market_mid ?? 50
+            const _fill = (c.askCents) / 100
+            allEdges.push({
+              pitcher_id:     id,
+              pitcher:        meta?.name,
+              team:           team,
+              game:           _gameLabel,
+              strike:         c.strike,
+              side:           c.side,
+              ticker:         c.ticker,
+              market_mid,
+              spread:         (c.yesAsk ?? 50) - (c.yesBid ?? 50),
+              // Kelly needs our believed probability (the fit), not market's.
+              // For YES side: edge = fit - market_yes_ask. For NO: edge = (1-fit) - no_ask.
+              // strategy_mode='pregame_cross_strike' tells downstream this is fit-based.
+              model_prob:     c.cross_strike_fit_prob,
+              raw_model_prob: c.cross_strike_fit_prob,
+              edge:           Math.abs(c.cross_strike_residual),
+              best_edge:      Math.abs(c.cross_strike_residual),
+              _edgeVal:       Math.abs(c.cross_strike_residual),
+              lambda,         // pitcher's lambda from main model (for audit)
+              k9_career:      k9_career,
+              k9_season:      k9_season,
+              k9_l5:          k9_l5,
+              opp_k_pct:      oppKpct,
+              n_starts:       nStarts,
+              confidence:     c.cross_strike_fit_quality === 'good' ? 'high' : c.cross_strike_fit_quality === 'ok' ? 'med' : 'low',
+              strategy_mode:  c.strategy_mode,
+              strategy_submode: c.strategy_submode,
+              cross_strike_residual:    c.cross_strike_residual,
+              cross_strike_market_prob: c.cross_strike_market_prob,
+              cross_strike_fit_prob:    c.cross_strike_fit_prob,
+              cross_strike_fit_lambda:  c.cross_strike_fit_lambda,
+              cross_strike_fit_sse:     c.cross_strike_fit_sse,
+              cross_strike_fit_quality: c.cross_strike_fit_quality,
+              _fill,
+              _ask_cents: c.askCents,
+              // Defaults to satisfy downstream summary rendering (avoids toFixed-on-undefined)
+              adj_factor:     1,
+              raw_adj_factor: 1,
+              park_factor:    1,
+              weather_mult:   1,
+              ump_factor:     1,
+              ump_name:       null,
+              velo_adj:       1,
+              velo_trend_mph: null,
+              savant_k_pct:   null,
+              savant_whiff:   null,
+              savant_fbv:     null,
+              whiff_flag:     null,
+              bb_penalty:     1,
+            })
+          }
+        }
+      } catch (csErr) {
+        console.warn(`  [cross-strike] error for ${meta?.name}: ${csErr.message}`)
       }
 
       // ── Pipeline: emit edges step ──────────────────────────────────────────
@@ -1138,6 +1507,15 @@ async function main() {
           skip_reason: _passedEdges.length === 0 ? 'edge below threshold' : null,
         },
       }).catch(() => {})
+
+      // ── Write pitcher_edge_cache (freshness gate for ksBets.js) ──────────
+      // ksBets checks edge_computed_at; if < 180s old it skips recomputation,
+      // preventing double-edge-compute on the lineup_posted event trigger path.
+      await db.run(
+        `INSERT OR REPLACE INTO pitcher_edge_cache (pitcher_id, bet_date, edge_computed_at, trigger_source, edges_json)
+         VALUES (?, ?, ?, ?, ?)`,
+        [String(id), TODAY, new Date().toISOString(), opts.triggerSource ?? 'morning', JSON.stringify(_pipelineEdges)],
+      ).catch(() => {})
 
       console.log('')
     }
@@ -1191,7 +1569,76 @@ async function main() {
   await db.close()
 }
 
-main().catch(err => {
-  console.error('[ks-edge] fatal:', err.message)
-  process.exit(1)
-})
+// Run main() only when this file is invoked directly, not when imported.
+// (The Layer 1 parity harness imports harvestLayer1MathFixture below; we
+// don't want the production main loop firing during fixture harvesting.)
+const __isDirectInvoke = import.meta.url === `file://${process.argv[1]}`
+if (__isDirectInvoke) {
+  main().catch(err => {
+    console.error('[ks-edge] fatal:', err.message)
+    process.exit(1)
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Layer 1 Math extraction-only export.
+//
+// `computeLambdaBase` is the production calibrated lambda computation. It is
+// called by the production main loop AND by the Oracle Layer 1 module
+// (`oracle/layers/1-math/impl.js`), which composes a clean Layer 1 API around
+// it without rewriting the math.
+//
+// Do NOT change `computeLambdaBase` without updating Layer 1 parity fixtures
+// in `oracle/layers/1-math/parity-fixtures.json`.
+// ─────────────────────────────────────────────────────────────────────────
+export { computeLambdaBase }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Layer 1 Math parity-harness helper.
+//
+// This is NOT production betting logic. It exists only so the Oracle Layer 1
+// extraction harness can load the same production inputs and call the same
+// production lambda computation without duplicating loader logic.
+//
+// Do not modify this helper to change betting behavior.
+// Do not use this helper in live order placement.
+//
+// Limitations (recorded in fixture metadata for future reference):
+//   - fetchGameLog(pitcherId) hits the live MLB API and returns CURRENT
+//     season-to-date data, not historical as-of bet_date. Parity fixtures
+//     therefore capture a SNAPSHOT of inputs+outputs at fixture-build time,
+//     not a true historical replay. For real historical replay, raw inputs
+//     would need to be persisted at decision time (a v1.1 enhancement).
+//   - loadStatcastData / loadCareerData / loadRecentStarts / loadCareerVelo
+//     are module-level caches. Subsequent calls within the same process
+//     reuse cached state.
+// ─────────────────────────────────────────────────────────────────────────
+export async function harvestLayer1MathFixture({ pitcher_id, bet_date }) {
+  if (!pitcher_id) throw new Error('harvestLayer1MathFixture: pitcher_id required')
+  if (!bet_date)   throw new Error('harvestLayer1MathFixture: bet_date required (YYYY-MM-DD)')
+
+  const pid    = String(pitcher_id)
+  const season = Number(bet_date.slice(0, 4)) || new Date().getFullYear()
+
+  // Same loaders the production main loop uses.
+  const statcastMap     = await loadStatcastData(season)
+  const careerMap       = await loadCareerData()
+  const log             = await fetchGameLog(pid)
+  const recentStartsMap = await loadRecentStarts(season)
+  const careerVeloMap   = await loadCareerVelo()
+
+  const savant            = statcastMap.get(pid) ?? null
+  const career            = careerMap.get(pid) ?? null
+  const recentStartsData  = recentStartsMap.get(pid) ?? []
+  const careerAvgFbVelo   = careerVeloMap.get(pid) ?? null
+
+  const result = computeLambdaBase(
+    log, bet_date, savant, career, recentStartsData, careerAvgFbVelo,
+  )
+
+  return {
+    inputs: { log, gameDate: bet_date, savant, career, recentStartsData, careerAvgFbVelo },
+    result,
+    snapshot_taken_at: new Date().toISOString(),
+  }
+}

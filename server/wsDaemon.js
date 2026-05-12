@@ -12,7 +12,7 @@ export async function startWsDaemon() {
      FROM users
      WHERE active_bettor = 1
        AND kalshi_key_id IS NOT NULL
-       AND id != 1`
+       AND is_system_admin = 0`
   )
 
   if (!bettors.length) {

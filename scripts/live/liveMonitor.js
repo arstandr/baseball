@@ -29,6 +29,17 @@ import { parseArgs } from '../../lib/cli-args.js'
 import { getAvailablePool, getPerUserAvailablePool, addCommitted } from '../../lib/bankrollState.js'
 import { acquireBetLock, confirmBetPlaced, releaseBetLock } from '../../lib/betLock.js'
 import { alertError } from '../../lib/errorSentinel.js'
+import { STRATEGY_MODES, validateStrategyMode, liveBetModeToSubmode } from '../../lib/strategyMode.js'
+import { checkAllCaps } from '../../lib/strategyCaps.js'
+
+// ── Tier 1/2/3 live ladder — dynamic imports so the wiring is safe whether or not
+// each module has been built yet (Tier 1 is shipped, Tier 2/3 may still be in-flight
+// from sibling agents). If a module is missing, decideTierN stays undefined and the
+// tryTierLadder runner skips it gracefully.
+let decideTier1, decideTier2, decideTier3
+try { ({ decideTier1 } = await import('../../lib/liveTier1.js')) } catch { decideTier1 = undefined }
+try { ({ decideTier2 } = await import('../../lib/liveTier2.js')) } catch { decideTier2 = undefined }
+try { ({ decideTier3 } = await import('../../lib/liveTier3.js')) } catch { decideTier3 = undefined }
 
 const opts     = parseArgs({
   date: { default: new Date().toISOString().slice(0, 10) },
@@ -485,6 +496,62 @@ async function fetchLiveKsMarkets(ticker) {
   } catch { return [] }
 }
 
+// ── Stale-state guard ─────────────────────────────────────────────────────────
+// Block bet placements when any of three signals is stale:
+//   1. unknown_score_state — linescore (ls) missing currentInning OR home/away runs
+//   2. stale_mlb_state     — MLB feed last fetched > 120s ago (or monitor_state row
+//                            for this game.id is older than 120s when no in-memory
+//                            timestamp is available)
+//   3. stale_kalshi_quote  — orderbook fetched > 30s ago
+//
+// Priority (return reason in this order when multiple trip):
+//   unknown_score_state → stale_mlb_state → stale_kalshi_quote
+//
+// `orderbookFetchedAtMs` is optional — sites that don't have a recent orderbook
+// fetch (e.g. scratch handlers) can pass null and the kalshi-quote check is skipped.
+async function checkStaleState({
+  db,
+  gameId,
+  feedFetchedAtMs = null,
+  orderbookFetchedAtMs = null,
+  ls = null,
+}) {
+  // 1. unknown_score_state — most paranoid, check first.
+  const inning      = ls?.currentInning ?? null
+  const homeRuns    = ls?.teams?.home?.runs ?? null
+  const awayRuns    = ls?.teams?.away?.runs ?? null
+  if (inning == null || homeRuns == null || awayRuns == null) {
+    return { ok: false, reason: 'unknown_score_state' }
+  }
+
+  // 2. stale_mlb_state — prefer in-memory feed fetch timestamp (poll loop heartbeat).
+  // Falls back to monitor_state.updated_at when the in-memory ts isn't available.
+  const now = Date.now()
+  const STALE_MLB_MS = 120_000
+  if (feedFetchedAtMs != null) {
+    if (now - feedFetchedAtMs > STALE_MLB_MS) {
+      return { ok: false, reason: 'stale_mlb_state' }
+    }
+  } else if (gameId) {
+    const row = await db.one(
+      `SELECT updated_at FROM monitor_state WHERE game_id = ? ORDER BY updated_at DESC LIMIT 1`,
+      [String(gameId)],
+    ).catch(() => null)
+    const updatedMs = row?.updated_at ? Date.parse(row.updated_at) : null
+    if (!updatedMs || now - updatedMs > STALE_MLB_MS) {
+      return { ok: false, reason: 'stale_mlb_state' }
+    }
+  }
+
+  // 3. stale_kalshi_quote — only checked when caller provides an orderbook ts.
+  const STALE_QUOTE_MS = 30_000
+  if (orderbookFetchedAtMs != null && now - orderbookFetchedAtMs > STALE_QUOTE_MS) {
+    return { ok: false, reason: 'stale_kalshi_quote' }
+  }
+
+  return { ok: true }
+}
+
 // ── Kalshi ticker pull-signal state ──────────────────────────────────────────
 // When the Kalshi WS ticker shows a sharp YES mid drop (≥15¢ or below 8¢),
 // the pitcher was almost certainly pulled by a TV-watching trader before the
@@ -688,7 +755,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       ? null
       : await getOrderbook(ticker, 10, creds).catch(() => null)
 
-    if (mode === 'pulled' || mode === 'dead-path' || mode === 'crossed-yes' || mode === 'blowout' || mode === 'pull-hedge') {
+    if (mode === 'pulled' || mode === 'dead-path' || mode === 'crossed-yes' || mode === 'blowout' || mode === 'pull-hedge' || mode === 'tier1_confirmed_pull' || mode === 'tier2_dead_path' || mode === 'tier3_late_game_leash') {
       // ── STRUCTURAL EDGE: taker order — hit the ask immediately ──
       // pulled      → pitcher removed, outcome determined (certainty)
       // crossed-yes → threshold already crossed, YES market hasn't repriced (certainty)
@@ -699,7 +766,13 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
       // crossed-yes is a YES taker — skips game_reserves (which track NO-side spending)
       // pull-hedge skips game_reserves — it's insurance, not a new directional position
       const usesGameReserves = mode !== 'crossed-yes' && mode !== 'pull-hedge'
-      let capUSD = mode === 'dead-path' ? DEAD_PATH_CAP_USD : FREE_MONEY_PITCHER_CAP
+      // Tier 1/2/3 ladder modes: bet_size_usd is computed inside the tier module
+      // (decideTierN already enforces fraction-of-bankroll + per-tier cap), so
+      // honor that figure directly rather than re-overriding via the legacy caps.
+      const _isTierMode = mode === 'tier1_confirmed_pull' || mode === 'tier2_dead_path' || mode === 'tier3_late_game_leash'
+      let capUSD = _isTierMode
+        ? Math.max(1, Number(betSize) || FREE_MONEY_PITCHER_CAP)
+        : (mode === 'dead-path' ? DEAD_PATH_CAP_USD : FREE_MONEY_PITCHER_CAP)
       if (usesGameReserves && pitcherId && userId) {
         const gameRow = await db.one(
           `SELECT id FROM games WHERE date = ? AND (pitcher_home_id = ? OR pitcher_away_id = ?)`,
@@ -744,8 +817,11 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
         // the time our order hits the exchange — leaving us resting below the new ask.
         // Fix: bid aggressively (ask + 15¢, capped at 97¢) to sweep available depth
         // even as the market moves. At 97¢ for a ~99% outcome the EV is still strongly +.
-        const AGGRESSIVE_CAP    = mode === 'pulled' || mode === 'crossed-yes' ? 97 : 99
-        const AGGRESSIVE_BUFFER = mode === 'pulled' || mode === 'crossed-yes' ? 15 : 2
+        // Tier 1 = confirmed pull (structural certainty) → match the legacy 'pulled' aggression.
+        // Tier 2/3 modes are higher-variance (pitcher still in game), so use the modest buffer.
+        const _aggressiveCertain = mode === 'pulled' || mode === 'crossed-yes' || mode === 'tier1_confirmed_pull'
+        const AGGRESSIVE_CAP    = _aggressiveCertain ? 97 : 99
+        const AGGRESSIVE_BUFFER = _aggressiveCertain ? 15 : 2
         const baseAsk = side === 'NO'
           ? (ob?.best_no_ask  ?? Math.round(100 - marketMid + 2))
           : (ob?.best_yes_ask ?? Math.round(marketMid + 2))
@@ -961,6 +1037,7 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     }
   }
 
+  validateStrategyMode(STRATEGY_MODES.LIVE, 'liveMonitor.js:964')
   await db.upsert('ks_bets', {
     bet_date:        TODAY,
     logged_at:       now,
@@ -980,6 +1057,8 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
     live_bet:             1,
     ticker,
     bet_mode:             mode,
+    strategy_mode:        STRATEGY_MODES.LIVE,
+    strategy_submode:     liveBetModeToSubmode(mode),
     fill_price:           isLive ? orderCents : null,
     order_id:             orderId,
     filled_contracts:     initFilled || null,
@@ -1002,6 +1081,102 @@ async function executeBet({ pitcherName, pitcherId, game, strike, side, modelPro
 
   const orderStatus = orderId ? (initFilled >= finalContracts ? 'filled' : 'resting') : null
   return { freeMoneySummary, finalContracts, orderCents, betId, orderStatus, initFilled }
+}
+
+// ── Tier 1 / Tier 2 / Tier 3 live ladder ─────────────────────────────────────
+//
+// Evaluates the new tier modes in priority order (Tier 1 highest confidence first).
+// Each decideTierN call is gated by its own TIERn_ENABLED env var inside the module
+// itself, so this runner stays simple — it just collects skip reasons and returns
+// the first decision that fires.
+//
+// Returns one of:
+//   - { fire: true, ... } from a decideTierN call — caller should placeOrder
+//   - null when no tier fires (tier1/tier2/tier3 all skipped or absent)
+//
+// The strikes 5/6/7/8 are evaluated per pitcher; 9 is included opportunistically
+// for hot pitchers (kRateThisStart >= 0.30 means we may already be threatening 9 Ks).
+async function tryTierLadder({
+  db,
+  bettor,
+  pitcher,
+  ourPitcherId,
+  game,
+  ls,
+  monitorState,
+  currentPitcherId,
+  actualKs,
+  betDate,
+  orderbook,
+  bankroll,
+  kRateThisStart,
+  pitchCount,
+  expectedBF,
+  ip,
+  // optional: caller may pre-narrow strikes; otherwise default ladder is used
+  strikes,
+}) {
+  const strikeList = Array.isArray(strikes) && strikes.length
+    ? strikes
+    : (kRateThisStart >= 0.30 ? [5, 6, 7, 8, 9] : [5, 6, 7, 8])
+
+  // Track the last skip reason from each tier across strikes so the no-fire log
+  // is informative ("tier1=not_confirmed_pull tier2=path_alive tier3=p_yes_high")
+  let tier1Reason = decideTier1 ? 'no_strike_evaluated' : 'tier1_module_missing'
+  let tier2Reason = decideTier2 ? 'no_strike_evaluated' : 'tier2_module_missing'
+  let tier3Reason = decideTier3 ? 'no_strike_evaluated' : 'tier3_module_missing'
+
+  for (const strike of strikeList) {
+    // ── Tier 1: confirmed-pull NO ─────────────────────────────────────────
+    if (decideTier1) {
+      try {
+        const t1 = await decideTier1({
+          db, bettor, pitcher, strike, ourPitcherId, game, ls, monitorState,
+          currentPitcherId, actualKs, betDate, orderbook, bankroll,
+        })
+        if (t1?.fire) return { ...t1, strike, tier: 1 }
+        tier1Reason = t1?.reason ?? 'unknown'
+      } catch (err) {
+        tier1Reason = `error:${err.message?.slice(0, 60)}`
+      }
+    }
+  }
+  for (const strike of strikeList) {
+    // ── Tier 2: dead-path NO ──────────────────────────────────────────────
+    if (decideTier2) {
+      try {
+        const t2 = await decideTier2({
+          db, bettor, pitcher, strike, ourPitcherId, game, ls, monitorState,
+          currentPitcherId, actualKs, betDate, orderbook, bankroll,
+          kRateThisStart, pitchCount, expectedBF, ip,
+        })
+        if (t2?.fire) return { ...t2, strike, tier: 2 }
+        tier2Reason = t2?.reason ?? 'unknown'
+      } catch (err) {
+        tier2Reason = `error:${err.message?.slice(0, 60)}`
+      }
+    }
+  }
+  for (const strike of strikeList) {
+    // ── Tier 3: late-game leash NO ────────────────────────────────────────
+    if (decideTier3) {
+      try {
+        const t3 = await decideTier3({
+          db, bettor, pitcher, strike, ourPitcherId, game, ls, monitorState,
+          currentPitcherId, actualKs, betDate, orderbook, bankroll,
+          kRateThisStart, pitchCount, expectedBF, ip,
+        })
+        if (t3?.fire) return { ...t3, strike, tier: 3 }
+        tier3Reason = t3?.reason ?? 'unknown'
+      } catch (err) {
+        tier3Reason = `error:${err.message?.slice(0, 60)}`
+      }
+    }
+  }
+
+  // Nothing fired — emit a single debug-friendly line per pitcher.
+  console.log(`[live] no tier fired: tier1=${tier1Reason} tier2=${tier2Reason} tier3=${tier3Reason}`)
+  return null
 }
 
 // ── Settle a finished game and post Discord summary ───────────────────────────
@@ -1890,6 +2065,27 @@ async function main() {
   process.on('SIGINT',  () => { clearInterval(_hbTimer); writeHeartbeat('offline').finally(() => process.exit(0)) })
   process.on('SIGTERM', () => { clearInterval(_hbTimer); writeHeartbeat('offline').finally(() => process.exit(0)) })
 
+  // Apr 30: clean exit path for daily loss / drawdown halts. Without this the
+  // main loop's `break` left _hbTimer running, the system_flags
+  // liveMonitor_heartbeat row was never updated again, and healthSentinel saw
+  // stale → SIGKILL + respawn → the new process tripped the same halt → loop
+  // forever. drawdown_halted=TODAY tells scheduler to suppress respawn for today.
+  async function haltAndExit(reason) {
+    console.log(`[live] ⛔ Halt complete (${reason}) — setting drawdown_halted=${TODAY} and exiting cleanly`)
+    try {
+      await db.run(
+        `INSERT INTO system_flags (key, value, updated_at, updated_by)
+         VALUES ('drawdown_halted', ?, ?, 'liveMonitor')
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+        [TODAY, new Date().toISOString()],
+      )
+    } catch {}
+    clearInterval(_hbTimer)
+    try { await writeHeartbeat('halted') } catch {}
+    try { await db.close() } catch {}
+    process.exit(0)
+  }
+
   // Kalshi ticker monitor is started after activeBettors is loaded (below)
 
   // Track which in-game bets we've already placed this session (avoid dups)
@@ -2310,7 +2506,7 @@ async function main() {
           console.log(`[live] Cancelled all resting orders for ${u.name} after loss limit hit`)
         } catch { /* non-fatal */ }
       }
-      break
+      await haltAndExit('daily-loss-limit')
     }
 
     // Rule E: Auto-halt after -15% daily drawdown (net across all bets today)
@@ -2338,7 +2534,7 @@ async function main() {
           console.log(`[live] Cancelled all resting orders for ${u.name} after drawdown halt`)
         } catch { /* non-fatal */ }
       }
-      break
+      await haltAndExit('drawdown')
     }
 
     let allDone = true
@@ -2351,6 +2547,7 @@ async function main() {
         // Single feed/live call replaces separate linescore + boxscore fetches.
         // Also gives us the plays array for substitution fast-path pull detection.
         const feed = await mlbFeedLive(game.id)
+        const feedFetchedAtMs = Date.now()  // staleness clock for stale-state guard
         const abstractGameState = feed?.gameData?.status?.abstractGameState ?? null
         const ls  = feed?.liveData?.linescore ? { abstractGameState, ...feed.liveData.linescore } : null
         const box = feed?.liveData?.boxscore ?? null
@@ -2464,6 +2661,29 @@ async function main() {
                 )
                 for (const bet of openYes) {
                   for (const bettor of activeBettors) {
+                    // ── strategyCaps: per-pitcher + per-user daily + global caps ──
+                    const capCheck = await checkAllCaps({
+                      db,
+                      userId:        bettor.id,
+                      pitcherId:     String(pitcherId),
+                      betDate:       TODAY,
+                      strategy_mode: STRATEGY_MODES.LIVE,
+                    })
+                    if (!capCheck.allowed) {
+                      console.log(`  [cap] LIVE SKIP scratch ${bettor.name} ${ctx.pitcherName} ${bet.strike}+ NO — ${capCheck.reason}`)
+                      continue
+                    }
+                    // ── Stale-state guard (no orderbook fetched in scratch path) ──
+                    const staleCheck = await checkStaleState({
+                      db,
+                      gameId:        game?.id,
+                      feedFetchedAtMs,
+                      ls,
+                    })
+                    if (!staleCheck.ok) {
+                      console.log(`  [stale] LIVE SKIP scratch ${bettor.name} ${ctx.pitcherName} ${bet.strike}+ NO — ${staleCheck.reason}`)
+                      continue
+                    }
                     await executeBet({
                       pitcherName: ctx.pitcherName, pitcherId, game: ctx.game,
                       strike: bet.strike, side: 'NO',
@@ -2838,6 +3058,29 @@ async function main() {
                 // Buying NO for a user with no YES exposure creates an orphan position.
                 const betOwner = activeBettors.find(b => b.id === bet.user_id)
                 if (!betOwner) continue
+                // ── strategyCaps: per-pitcher + per-user daily + global caps ──
+                const capCheck = await checkAllCaps({
+                  db,
+                  userId:        betOwner.id,
+                  pitcherId:     String(pitcherId),
+                  betDate:       TODAY,
+                  strategy_mode: STRATEGY_MODES.LIVE,
+                })
+                if (!capCheck.allowed) {
+                  console.log(`  [cap] LIVE SKIP scratch ${betOwner.name} ${ctx.pitcherName} ${bet.strike}+ NO — ${capCheck.reason}`)
+                  continue
+                }
+                // ── Stale-state guard (no orderbook fetched in scratch path) ──
+                const staleCheck = await checkStaleState({
+                  db,
+                  gameId:        game?.id,
+                  feedFetchedAtMs,
+                  ls,
+                })
+                if (!staleCheck.ok) {
+                  console.log(`  [stale] LIVE SKIP scratch ${betOwner.name} ${ctx.pitcherName} ${bet.strike}+ NO — ${staleCheck.reason}`)
+                  continue
+                }
                 await executeBet({
                   pitcherName: ctx.pitcherName, pitcherId, game: ctx.game,
                   strike: bet.strike, side: 'NO',
@@ -2877,6 +3120,7 @@ async function main() {
           if (_haltLogged) { console.log('[liveMonitor] HALT lifted — resuming'); _haltLogged = false }
 
           const markets = await fetchLiveKsMarkets(ctx.baseTicker)
+          const marketsFetchedAtMs = Date.now()  // orderbook freshness clock for stale-state guard
           if (!markets.length) continue
 
           // Manage any resting live bets for this pitcher (queue position + reprice)
@@ -3435,6 +3679,40 @@ async function main() {
                 }
               }
 
+              // ── strategyCaps: per-pitcher + per-user daily + global daily caps ──
+              // Layered ON TOP of the daily-loss-limit check above (different bucket).
+              const capCheck = await checkAllCaps({
+                db,
+                userId:        bettor.id,
+                pitcherId:     String(pitcherId),
+                betDate:       TODAY,
+                strategy_mode: STRATEGY_MODES.LIVE,
+              })
+              if (!capCheck.allowed) {
+                console.log(`  [cap] LIVE SKIP ${bettor.name} ${ctx.pitcherName} ${q.n}+ ${q.betSide} — ${capCheck.reason}`)
+                placed.add(bettorKey)
+                continue
+              }
+
+              // ── Stale-state guard: block if Kalshi quote / MLB feed / score state is stale ──
+              const staleCheck = await checkStaleState({
+                db,
+                gameId:               game?.id,
+                feedFetchedAtMs,
+                orderbookFetchedAtMs: marketsFetchedAtMs,
+                ls,
+              })
+              if (!staleCheck.ok) {
+                console.log(`  [stale] LIVE SKIP ${bettor.name} ${ctx.pitcherName} ${q.n}+ ${q.betSide} — ${staleCheck.reason}`)
+                db.saveLog({
+                  tag: 'STALE', level: 'warn',
+                  msg: `live skip ${ctx.pitcherName} ${q.n}+ ${q.betSide} — ${staleCheck.reason}`,
+                  pitcher: ctx.pitcherName, strike: q.n, side: q.betSide,
+                }).catch(() => {})
+                placed.add(bettorKey)
+                continue
+              }
+
               // Per-bettor, per-threshold free-money cap — 5% of bankroll per strike threshold
               if (q.mode === 'pulled' || q.mode === 'crossed-yes' || q.mode === 'blowout' || q.mode === 'early-blowout' || q.mode === 'late-inning-no') {
                 const capKey = `${pitcherId}-${q.n}`
@@ -3647,6 +3925,159 @@ async function main() {
           for (const i of seqItems) {
             const success = await runExecItem(i)
             if (LIVE && success) await loadDailyLoss()
+          }
+
+          // ── Tier 1 / Tier 2 / Tier 3 live ladder ────────────────────────
+          // Independent of the legacy live-mode logic above. Each tier module is
+          // gated by its own TIERn_ENABLED env var, so this block is a no-op
+          // until tiers are explicitly turned on. Tier modes use NEW mode names
+          // (tier1_confirmed_pull / tier2_dead_path / tier3_late_game_leash) so
+          // they bypass DISABLED_LIVE_MODES (which only contains the OLD modes).
+          // Strikes 5/6/7/8 are evaluated per pitcher; +9 only for hot pitchers.
+          if (decideTier1 || decideTier2 || decideTier3) {
+            // Diagnostic: log every tier-block entry so we can prove the code
+            // path is being reached during live games. Without this, two nights
+            // of zero fires gave no signal whether the gate even ran.
+            console.log(`[tier-eval] entering for ${ctx?.pitcherName ?? 'unknown'} K=${currentKs ?? '?'} BF=${currentBF ?? '?'} bettors=${activeBettors.length} modules=t1:${!!decideTier1}/t2:${!!decideTier2}/t3:${!!decideTier3}`)
+            const _kRateThisStart = currentBF > 0 ? currentKs / currentBF : 0
+            // Per-pitcher monitorState row (game_settled / not_current_since).
+            // Local _notCurrentSince map already exists; lift the entry for this pitcher.
+            const _ncEntry = notCurrentSince.get(String(pitcherId)) ?? null
+            const _tierMonitorState = {
+              game_settled: settledGames.has(game.id) ? 1 : 0,
+              not_current_since: _ncEntry ? JSON.stringify(_ncEntry) : null,
+            }
+            // Identify which player is currently on the mound for this team —
+            // matches the same logic the pull-detection block uses above.
+            const _teamPlayersForTier = team?.players ?? {}
+            const _currentMoundEntry = Object.entries(_teamPlayersForTier).find(
+              ([, p]) => p?.gameStatus?.isCurrentPitcher === true,
+            )
+            const _currentMoundId = _currentMoundEntry ? _currentMoundEntry[0].replace(/^ID/, '') : null
+            const _tierExpectedBF = ctx?.avgBF ?? 22
+            // Iterate per active bettor — each tier decision is per (user, pitcher, strike).
+            for (const tierBettor of activeBettors) {
+              try {
+                // Per-bettor bankroll: prefer per-user available pool; fall back to starting bankroll.
+                let _tierBankroll = 0
+                try {
+                  _tierBankroll = await getPerUserAvailablePool(TODAY, tierBettor.id).catch(() => 0)
+                } catch { /* non-fatal */ }
+                if (!_tierBankroll || _tierBankroll <= 0) {
+                  _tierBankroll = tierBettor.starting_bankroll || tierBettor.kalshi_balance || 1000
+                }
+
+                // Per-strike orderbook + decision — fetch one orderbook per market that
+                // has a tier candidate. We piggy-back on the markets list already fetched.
+                // Use tryTierLadder strike loop semantics, but pass orderbook lazily to
+                // avoid pulling a depth book for every (bettor, strike) combo.
+                // Strategy: pass a stub orderbook per strike; tryTierLadder loops strikes
+                // internally, so we hand it a function-level orderbook fetched per strike.
+                // Simpler: loop strikes here too and fetch orderbook once per strike.
+                const _hotPitcher = _kRateThisStart >= 0.30
+                const _strikes = _hotPitcher ? [5, 6, 7, 8, 9] : [5, 6, 7, 8]
+                for (const _strike of _strikes) {
+                  // Find the market for this strike on this pitcher's base ticker.
+                  const _mkt = markets.find(m => {
+                    const mn = parseInt(m.ticker.split('-').pop())
+                    return mn === _strike
+                  })
+                  if (!_mkt) continue
+                  const _yesBid = _mkt.yes_bid != null ? _mkt.yes_bid
+                                 : _mkt.yes_bid_dollars != null ? Math.round(parseFloat(_mkt.yes_bid_dollars) * 100) : null
+                  const _yesAsk = _mkt.yes_ask != null ? _mkt.yes_ask
+                                 : _mkt.yes_ask_dollars != null ? Math.round(parseFloat(_mkt.yes_ask_dollars) * 100) : null
+                  if (_yesBid == null || _yesAsk == null) continue
+                  const _tierOrderbook = {
+                    best_yes_bid: _yesBid,
+                    best_yes_ask: _yesAsk,
+                    best_no_ask:  100 - _yesBid,    // NO ask = 100 - yes bid
+                    best_no_bid:  100 - _yesAsk,    // NO bid = 100 - yes ask
+                    fetched_at:   new Date(marketsFetchedAtMs).toISOString(),
+                  }
+
+                  const decision = await tryTierLadder({
+                    db,
+                    bettor: tierBettor,
+                    pitcher: { id: String(pitcherId), name: ctx.pitcherName },
+                    ourPitcherId: String(pitcherId),
+                    game: { ...(game ?? {}), abstractGameState: ls?.abstractGameState ?? abstractGameState },
+                    ls,
+                    monitorState: _tierMonitorState,
+                    currentPitcherId: _currentMoundId,
+                    actualKs: currentKs,
+                    betDate: TODAY,
+                    orderbook: _tierOrderbook,
+                    bankroll: _tierBankroll,
+                    kRateThisStart: _kRateThisStart,
+                    pitchCount: currentPitches,
+                    expectedBF: _tierExpectedBF,
+                    ip: currentIP,
+                    strikes: [_strike],   // narrow to just this strike since we have the orderbook for it
+                  })
+
+                  if (decision?.fire) {
+                    const _mode = decision.tier === 1 ? 'tier1_confirmed_pull'
+                                : decision.tier === 2 ? 'tier2_dead_path'
+                                : decision.tier === 3 ? 'tier3_late_game_leash'
+                                : 'tier_unknown'
+                    const _strikeFired = decision.strike ?? _strike
+                    console.log(
+                      `\n[live] 🎯 TIER ${decision.tier} FIRE ${ctx.pitcherName} ${_strikeFired}+ NO ` +
+                      `${tierBettor.name}  no_ask=${decision.no_price_cents}¢  bet=$${decision.bet_size_usd}  ` +
+                      `[${_mode}] reason=${decision.reason}`,
+                    )
+                    db.saveLog({
+                      tag: 'TIER', level: 'info',
+                      msg: `${ctx.pitcherName} ${_strikeFired}+ NO  T${decision.tier}=${decision.reason}  size=$${decision.bet_size_usd}`,
+                      pitcher: ctx.pitcherName, strike: _strikeFired, side: 'NO',
+                    }).catch(() => {})
+
+                    try {
+                      const tierBetResult = await executeBet({
+                        pitcherName:      ctx.pitcherName,
+                        pitcherId,
+                        game:             ctx.game,
+                        strike:           _strikeFired,
+                        side:             'NO',
+                        modelProb:        1 - (decision.no_price_cents / 100),  // approximate; structural-NO mode treats this as informational
+                        marketMid:        100 - decision.no_price_cents,         // mirror NO ask back into a YES mid for executeBet (keeps fee math sane)
+                        edge:             0,                                     // tier modules already passed their own edge gate
+                        ticker:           _mkt.ticker,
+                        betSize:          decision.bet_size_usd,
+                        kellyFraction:    null,
+                        capitalRisk:      decision.bet_size_usd,
+                        liveKs:           currentKs,
+                        liveIP:           currentIP,
+                        livePitches:      currentPitches,
+                        liveBF:           currentBF,
+                        liveInning:       currentInning,
+                        livePkEffective:  live?.pK_effective ?? null,
+                        liveLambda:       live?.lambdaRemaining ?? null,
+                        liveScore:        currentScore,
+                        mode:             _mode,
+                        user:             tierBettor,
+                      })
+
+                      if (LIVE && tierBetResult?.finalContracts != null) {
+                        await loadDailyLoss()
+                      }
+                      // The tier modules use their own family-lock; if Tier 1 fires, the
+                      // remaining tiers are auto-blocked next tick by checkFamilyLock.
+                    } catch (execErr) {
+                      console.error(`[live] tier execution failed for ${tierBettor.name} ${ctx.pitcherName} ${_strikeFired}+: ${execErr.message}`)
+                      alertError('liveMonitor:tierExec', execErr, {
+                        tier: decision.tier, user: tierBettor.name, pitcher: ctx.pitcherName, strike: _strikeFired,
+                      }).catch(() => {})
+                    }
+                    // Fire one tier per (bettor, pitcher) per tick — break inner strike loop.
+                    break
+                  }
+                }
+              } catch (tierErr) {
+                console.error(`[live] tryTierLadder error for ${tierBettor.name} ${ctx.pitcherName}: ${tierErr.message}`)
+              }
+            }
           }
 
           // ── Adaptive poll: set per-pitcher next-check timestamp ──────────

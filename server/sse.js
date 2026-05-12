@@ -86,7 +86,7 @@ setInterval(async () => {
       _sseState.pnlLastSettled = newPnlLast
     }
 
-    const bettors = await db.all(`SELECT id, kalshi_key_id, kalshi_private_key, kalshi_balance FROM users WHERE active_bettor=1 AND id != 1`)
+    const bettors = await db.all(`SELECT id, kalshi_key_id, kalshi_private_key, kalshi_balance FROM users WHERE active_bettor=1 AND is_system_admin = 0`)
     for (const u of bettors) {
       if (u.kalshi_key_id) {
         syncSettlementsForUser(u).then(r => {
@@ -94,11 +94,22 @@ setInterval(async () => {
         }).catch(() => {})
       }
     }
-    const newBal = Math.round((bettors[0]?.kalshi_balance || 0) * 100)
-    if (newBal !== _sseState.kalshiBalance && _sseState.kalshiBalance !== -1) {
-      broadcastSSE('balance_update', {})
+    // Re-read balances after sync (syncSettlementsForUser writes to DB asynchronously,
+    // so pull the freshest row rather than relying on the pre-sync snapshot above)
+    const freshBettors = await db.all(`SELECT id, kalshi_balance FROM users WHERE active_bettor=1 AND is_system_admin = 0`)
+    for (const fb of freshBettors) {
+      const newBal = Math.round((fb.kalshi_balance || 0) * 100)
+      const key    = `bal_${fb.id}`
+      const prev   = _sseState[key] ?? -1
+      if (prev !== -1 && newBal !== prev) {
+        console.log(`[sse] balance change detected for user ${fb.id}: ${prev / 100} → ${newBal / 100}`)
+        invalidateBalanceCache()
+        broadcastSSE('balance_update', {})
+      }
+      _sseState[key] = newBal
     }
-    _sseState.kalshiBalance = newBal
+    // Legacy single-bettor field kept for compatibility
+    _sseState.kalshiBalance = Math.round((freshBettors[0]?.kalshi_balance || 0) * 100)
   } catch { /* ignore DB errors */ }
 }, 10_000)
 
@@ -162,6 +173,27 @@ async function settleDeterminedBets(pitchers, date) {
   return settled
 }
 
+// Track live_log and decision_pipeline for feed updates.
+let _lastFeedLogId  = 0
+let _lastPipelineTs = null
+setInterval(async () => {
+  if (!_sseClients.size) return
+  try {
+    const today = todayISO()
+    const [logRow, pipeRow] = await Promise.all([
+      db.one(`SELECT MAX(id) as m FROM live_log WHERE bet_date=?`, [today]).catch(() => null),
+      db.one(`SELECT MAX(updated_at) as m FROM decision_pipeline WHERE bet_date=?`, [today]).catch(() => null),
+    ])
+    const newLogId  = logRow?.m  ?? 0
+    const newPipeTs = pipeRow?.m ?? null
+    if (newLogId > _lastFeedLogId || newPipeTs !== _lastPipelineTs) {
+      _lastFeedLogId  = newLogId  > _lastFeedLogId  ? newLogId  : _lastFeedLogId
+      _lastPipelineTs = newPipeTs ?? _lastPipelineTs
+      broadcastSSE('feed_update', {})
+    }
+  } catch {}
+}, 15_000)
+
 // Push live game data (K counts, innings, scores) to all connected clients.
 // Runs every 20s; only fetches MLB API when there are pending bets today.
 let _lastLiveHash = ''
@@ -223,6 +255,21 @@ router.get('/events', (req, res) => {
   _sseClients.add(res)
   _lastLiveHash = '' // force next interval tick to push current live state to this new client
   res.write(': connected\n\n')
+
+  // Immediately push current bet counts so a reconnecting client doesn't wait
+  // up to 10s for the polling interval. Without this, bets placed while the tab
+  // was backgrounded or the SSE connection was dropped are invisible until refresh.
+  const today = todayISO()
+  Promise.all([
+    db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=0 AND paper=0`, [today]),
+    db.one(`SELECT COUNT(*) as n FROM ks_bets WHERE bet_date=? AND live_bet=0 AND paper=0 AND filled_contracts > 0`, [today]),
+  ]).then(([morningRow, filledRow]) => {
+    const now = new Date().toISOString()
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'morning_bet', count: morningRow?.n ?? 0, lastDataUpdate: now })}\n\n`)
+      res.write(`data: ${JSON.stringify({ type: 'fill_update',  count: filledRow?.n  ?? 0, lastDataUpdate: now })}\n\n`)
+    } catch {}
+  }).catch(() => {})
 
   const keepalive = setInterval(() => {
     try { res.write(': ping\n\n') } catch { clearInterval(keepalive); _sseClients.delete(res) }

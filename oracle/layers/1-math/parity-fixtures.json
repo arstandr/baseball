@@ -1,0 +1,3273 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-04-30T21:51:30.895Z",
+  "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+  "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+  "cross_check_mode": "allow_mismatch",
+  "since_filter": "2026-04-15",
+  "target_per_archetype": 2,
+  "coverage": [
+    {
+      "id": "high_k_ace",
+      "desc": "savant.ip≥30 AND k_pct≥0.28 — full Statcast, ML overlay active, tight tail",
+      "count": 2,
+      "target": 2,
+      "partial": false
+    },
+    {
+      "id": "low_k_control",
+      "desc": "savant.ip≥30 AND k_pct≤0.19 — control pitcher, wider tail",
+      "count": 2,
+      "target": 2,
+      "partial": false
+    },
+    {
+      "id": "mixed_k",
+      "desc": "savant.ip≥30 AND k_pct ∈ (0.19, 0.28) — median archetype, default r=30",
+      "count": 2,
+      "target": 2,
+      "partial": false
+    },
+    {
+      "id": "rookie_thin",
+      "desc": "savant null OR savant.ip<5 — formula path forced (no ML overlay)",
+      "count": 2,
+      "target": 2,
+      "partial": false
+    },
+    {
+      "id": "post_il_short_leash",
+      "desc": "savant.manager_leash_factor<0.95 — pulled-early pattern",
+      "count": 0,
+      "target": 2,
+      "partial": true
+    },
+    {
+      "id": "no_savant_career_only",
+      "desc": "savant null AND career not null — career-anchor branch",
+      "count": 0,
+      "target": 2,
+      "partial": true
+    },
+    {
+      "id": "lineup_posted",
+      "desc": "model_input.opp_kpct_source begins with 'lineup' — slot-weighted opp K%",
+      "count": 2,
+      "target": 2,
+      "partial": false
+    },
+    {
+      "id": "lineup_absent",
+      "desc": "opp_kpct_source from db/mlb_api/league_avg — non-lineup fallback",
+      "count": 2,
+      "target": 2,
+      "partial": false
+    },
+    {
+      "id": "l5_spike_regressed",
+      "desc": "L5 regression cap fired (rawK9 from logs > careerK9 × 1.25)",
+      "count": 2,
+      "target": 2,
+      "partial": false
+    }
+  ],
+  "skip_count": 0,
+  "skip_reasons": [],
+  "archetypes_targeted": [
+    {
+      "id": "high_k_ace",
+      "desc": "savant.ip≥30 AND k_pct≥0.28 — full Statcast, ML overlay active, tight tail"
+    },
+    {
+      "id": "low_k_control",
+      "desc": "savant.ip≥30 AND k_pct≤0.19 — control pitcher, wider tail"
+    },
+    {
+      "id": "mixed_k",
+      "desc": "savant.ip≥30 AND k_pct ∈ (0.19, 0.28) — median archetype, default r=30"
+    },
+    {
+      "id": "rookie_thin",
+      "desc": "savant null OR savant.ip<5 — formula path forced (no ML overlay)"
+    },
+    {
+      "id": "post_il_short_leash",
+      "desc": "savant.manager_leash_factor<0.95 — pulled-early pattern"
+    },
+    {
+      "id": "no_savant_career_only",
+      "desc": "savant null AND career not null — career-anchor branch"
+    },
+    {
+      "id": "lineup_posted",
+      "desc": "model_input.opp_kpct_source begins with 'lineup' — slot-weighted opp K%"
+    },
+    {
+      "id": "lineup_absent",
+      "desc": "opp_kpct_source from db/mlb_api/league_avg — non-lineup fallback"
+    },
+    {
+      "id": "l5_spike_regressed",
+      "desc": "L5 regression cap fired (rawK9 from logs > careerK9 × 1.25)"
+    }
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "607192_2026-04-29",
+      "fixture_built_at": "2026-04-30T21:51:17.342Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 40018,
+      "production_match": false,
+      "mismatch_reason": "data_drift_likely",
+      "mismatch_fields": [
+        {
+          "field": "lambdaBase",
+          "production_logged_as": "lambda_base",
+          "expected": 8.85540406536886,
+          "actual": 8.96573036430045,
+          "abs_diff": 0.1103262989315894
+        },
+        {
+          "field": "pK_blended",
+          "production_logged_as": "p_k_blended",
+          "expected": 0.3728591185418468,
+          "actual": 0.3775044363915979,
+          "abs_diff": 0.0046453178497511405
+        }
+      ],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "607192",
+      "pitcher_name": "Tyler Glasnow",
+      "bet_date": "2026-04-29",
+      "game_id": "823958",
+      "game_label": "MIA@LAD",
+      "pitcher_side": "home",
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-28",
+            "ip": 6,
+            "k": 6,
+            "bf": 23,
+            "pitches": 90,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-04",
+            "ip": 6,
+            "k": 9,
+            "bf": 24,
+            "pitches": 101,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-10",
+            "ip": 6,
+            "k": 7,
+            "bf": 24,
+            "pitches": 100,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-17",
+            "ip": 7,
+            "k": 7,
+            "bf": 24,
+            "pitches": 92,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-23",
+            "ip": 8,
+            "k": 9,
+            "bf": 25,
+            "pitches": 105,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-29",
+            "ip": 5.666666666666667,
+            "k": 9,
+            "bf": 24,
+            "pitches": 92,
+            "bb": 6,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-29",
+        "savant": {
+          "player_id": "607192",
+          "k_pct": 0.326,
+          "swstr_pct": 0.303,
+          "fb_velo": 95.5,
+          "fb_spin": 2512,
+          "gb_pct": 0.452,
+          "bb_pct": 0.09,
+          "ip": 38.666666666666664,
+          "pa": 144,
+          "k_pct_vs_l": 0.326,
+          "k_pct_vs_r": 0.326,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.30388235294117655,
+          "k9": 10.919584280410412,
+          "avg_ip": null,
+          "seasons": [
+            2025,
+            2023,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "607192",
+            "game_date": "2026-04-17",
+            "ip": 7,
+            "bf": 24,
+            "ks": 7,
+            "pitches": 92,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "607192",
+            "game_date": "2026-04-10",
+            "ip": 6,
+            "bf": 24,
+            "ks": 7,
+            "pitches": 100,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "607192",
+            "game_date": "2026-04-04",
+            "ip": 6,
+            "bf": 24,
+            "ks": 9,
+            "pitches": 101,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "607192",
+            "game_date": "2026-03-28",
+            "ip": 6,
+            "bf": 23,
+            "ks": 6,
+            "pitches": 90,
+            "bb": 1
+          }
+        ],
+        "careerAvgFbVelo": 96.08888888888889
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:17.342Z",
+      "expected_inner": {
+        "lambdaBase": 8.96573036430045,
+        "k9": 15.085077278208255,
+        "pK_blended": 0.3775044363915979,
+        "pK_formula": 0.3220962091503268,
+        "ml_pK": 0.3917304364522316,
+        "k9_l5": 12.654000000000002,
+        "k9_season": 10.926620689655175,
+        "k9_career": 12.143138823529418,
+        "w_career": 0.013333333333333376,
+        "w_season": 0.6,
+        "w_l5": 0.3866666666666666,
+        "expectedBF": 23.75,
+        "avgIp": 5.3490990990990985,
+        "bfSource": "BF×4(96pc)",
+        "avgPitches": 95.75,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=32.6% IP=38.7",
+        "careerNote": "career K%=30.4% (2025/2023/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.01",
+        "veloTrendMph": -0.5888888888888886,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9636842105263158,
+        "ttoNote": "TTO3=5.8BF(24%)→×0.964"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 0.9910367722165472,
+        "raw_adj_factor": 0.9910367722165472,
+        "park_factor": 1.02,
+        "park_team": "LAD",
+        "weather_mult": 1,
+        "weather_note": "wind=10mph temp=74°F (neutral)",
+        "ump_factor": 1,
+        "ump_name": "Austin Jones",
+        "lambda_final": 8.951551682848773
+      },
+      "expected_nb_r": 20,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.9833013147825835,
+        "4": 0.9554167951065649,
+        "5": 0.9058423923197116,
+        "6": 0.8322682502129275,
+        "7": 0.737483069265801,
+        "8": 0.6286296113130763,
+        "9": 0.5150389872868583,
+        "10": 0.4057731279401785,
+        "11": 0.30779955147356153,
+        "12": 0.2251835807805127
+      },
+      "production_model_input": {
+        "opp_team": "MIA",
+        "opp_k_pct": 0.21802808988764039,
+        "opp_kpct_source": "lineup_slot(8)",
+        "hand": "R",
+        "n_starts": 5,
+        "bf_source": "BF×4(96pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": -0.59375
+      },
+      "archetype": "high_k_ace"
+    },
+    {
+      "fixture_id": "650911_2026-04-29",
+      "fixture_built_at": "2026-04-30T21:51:18.004Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 40048,
+      "production_match": false,
+      "mismatch_reason": "data_drift_likely",
+      "mismatch_fields": [
+        {
+          "field": "lambdaBase",
+          "production_logged_as": "lambda_base",
+          "expected": 7.0644113244765085,
+          "actual": 7.521975534963311,
+          "abs_diff": 0.45756421048680274
+        },
+        {
+          "field": "pK_blended",
+          "production_logged_as": "p_k_blended",
+          "expected": 0.28717119205189057,
+          "actual": 0.28492331571830726,
+          "abs_diff": 0.0022478763335833096
+        },
+        {
+          "field": "ttoPenalty",
+          "production_logged_as": "tto_penalty",
+          "expected": 0.9597560975609756,
+          "actual": 0.9522727272727273,
+          "abs_diff": 0.007483370288248303
+        },
+        {
+          "field": "expectedBF",
+          "production_logged_as": "expected_bf",
+          "expected": 24.6,
+          "actual": 26.4,
+          "abs_diff": 1.7999999999999972
+        },
+        {
+          "field": "avgPitches",
+          "production_logged_as": "avg_pitches",
+          "expected": 93,
+          "actual": 95.4,
+          "abs_diff": 2.4000000000000057
+        },
+        {
+          "field": "ttoNote",
+          "production_logged_as": "tto_note",
+          "expected": "TTO3=6.6BF(27%)→×0.960",
+          "actual": "TTO3=8.4BF(32%)→×0.952"
+        },
+        {
+          "field": "bfSource",
+          "production_logged_as": "bf_source",
+          "expected": "BF×5(93pc)",
+          "actual": "BF×5(95pc)"
+        }
+      ],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "650911",
+      "pitcher_name": "Cristopher Sánchez",
+      "bet_date": "2026-04-29",
+      "game_id": "823471",
+      "game_label": "SF@PHI",
+      "pitcher_side": "home",
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-26",
+            "ip": 6,
+            "k": 10,
+            "bf": 21,
+            "pitches": 87,
+            "bb": 0,
+            "started": true
+          },
+          {
+            "date": "2026-04-01",
+            "ip": 5.333333333333333,
+            "k": 7,
+            "bf": 24,
+            "pitches": 97,
+            "bb": 4,
+            "started": true
+          },
+          {
+            "date": "2026-04-07",
+            "ip": 5,
+            "k": 6,
+            "bf": 24,
+            "pitches": 92,
+            "bb": 0,
+            "started": true
+          },
+          {
+            "date": "2026-04-13",
+            "ip": 6,
+            "k": 8,
+            "bf": 26,
+            "pitches": 96,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-18",
+            "ip": 6,
+            "k": 8,
+            "bf": 28,
+            "pitches": 93,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-23",
+            "ip": 5.333333333333333,
+            "k": 4,
+            "bf": 30,
+            "pitches": 99,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 6.666666666666667,
+            "k": 7,
+            "bf": 27,
+            "pitches": 85,
+            "bb": 3,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-29",
+        "savant": {
+          "player_id": "650911",
+          "k_pct": 0.281,
+          "swstr_pct": 0.314,
+          "fb_velo": 94.7,
+          "fb_spin": 2130,
+          "gb_pct": 0.57,
+          "bb_pct": 0.065,
+          "ip": 33.666666666666664,
+          "pa": 153,
+          "k_pct_vs_l": 0.281,
+          "k_pct_vs_r": 0.281,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.2405882352941176,
+          "k9": 8.749583254306843,
+          "avg_ip": null,
+          "seasons": [
+            2023,
+            2025,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "650911",
+            "game_date": "2026-04-23",
+            "ip": 5.333333333333333,
+            "bf": 30,
+            "ks": 4,
+            "pitches": 99,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "650911",
+            "game_date": "2026-04-18",
+            "ip": 6,
+            "bf": 28,
+            "ks": 8,
+            "pitches": 93,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "650911",
+            "game_date": "2026-04-13",
+            "ip": 6,
+            "bf": 26,
+            "ks": 8,
+            "pitches": 96,
+            "bb": 3
+          },
+          {
+            "pitcher_id": "650911",
+            "game_date": "2026-04-07",
+            "ip": 5,
+            "bf": 24,
+            "ks": 6,
+            "pitches": 92,
+            "bb": 0
+          },
+          {
+            "pitcher_id": "650911",
+            "game_date": "2026-04-01",
+            "ip": 5.333333333333333,
+            "bf": 24,
+            "ks": 7,
+            "pitches": 97,
+            "bb": 4
+          }
+        ],
+        "careerAvgFbVelo": 94.5888888888889
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:18.004Z",
+      "expected_inner": {
+        "lambdaBase": 7.521975534963311,
+        "k9": 11.38553569610356,
+        "pK_blended": 0.28492331571830726,
+        "pK_formula": 0.26800392156862746,
+        "ml_pK": 0.29920348189989304,
+        "k9_l5": 9.99,
+        "k9_season": 11.493178217821786,
+        "k9_career": 9.61390588235294,
+        "w_career": 0.06333333333333338,
+        "w_season": 0.6,
+        "w_l5": 0.33666666666666667,
+        "expectedBF": 26.4,
+        "avgIp": 5.945945945945945,
+        "bfSource": "BF×5(95pc)",
+        "avgPitches": 95.4,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=28.1% IP=33.7",
+        "careerNote": "career K%=24.1% (2023/2025/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.06",
+        "veloTrendMph": 0.11111111111110006,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9522727272727273,
+        "ttoNote": "TTO3=8.4BF(32%)→×0.952"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1,
+        "raw_adj_factor": 0.9490509490509491,
+        "park_factor": 1.02,
+        "park_team": "PHI",
+        "weather_mult": 1,
+        "weather_note": "wind=10mph temp=62°F (neutral)",
+        "ump_factor": 1,
+        "ump_name": null,
+        "lambda_final": 7.205699550966039
+      },
+      "expected_nb_r": 20,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.9553092400953314,
+        "4": 0.8944997391287917,
+        "5": 0.8018902397964117,
+        "6": 0.6841532234325758,
+        "7": 0.5542206510997608,
+        "8": 0.4263974773176189,
+        "9": 0.31213605493906416,
+        "10": 0.21798365379427287,
+        "11": 0.1456657797839651,
+        "12": 0.0934273069421705
+      },
+      "production_model_input": {
+        "opp_team": "SF",
+        "opp_k_pct": 0.2087912087912088,
+        "opp_kpct_source": "db(2026-04-28)",
+        "hand": "L",
+        "n_starts": 5,
+        "bf_source": "BF×5(93pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": 0.14999999999999147
+      },
+      "archetype": "high_k_ace"
+    },
+    {
+      "fixture_id": "664285_2026-04-30",
+      "fixture_built_at": "2026-04-30T21:51:16.543Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 53210,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "664285",
+      "pitcher_name": "Framber Valdez",
+      "bet_date": "2026-04-30",
+      "game_id": "824929",
+      "game_label": "DET@ATL",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-27",
+            "ip": 6,
+            "k": 5,
+            "bf": 25,
+            "pitches": 83,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-03",
+            "ip": 6,
+            "k": 5,
+            "bf": 24,
+            "pitches": 91,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-08",
+            "ip": 5,
+            "k": 2,
+            "bf": 29,
+            "pitches": 87,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-14",
+            "ip": 7,
+            "k": 1,
+            "bf": 26,
+            "pitches": 87,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-19",
+            "ip": 6,
+            "k": 7,
+            "bf": 23,
+            "pitches": 98,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-24",
+            "ip": 4.333333333333333,
+            "k": 4,
+            "bf": 21,
+            "pitches": 89,
+            "bb": 5,
+            "started": true
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 6,
+            "k": 8,
+            "bf": 25,
+            "pitches": 99,
+            "bb": 0,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-30",
+        "savant": {
+          "player_id": "664285",
+          "k_pct": 0.162,
+          "swstr_pct": 0.187,
+          "fb_velo": 93.9,
+          "fb_spin": 2181,
+          "gb_pct": 0.541,
+          "bb_pct": 0.095,
+          "ip": 34.333333333333336,
+          "pa": 148,
+          "k_pct_vs_l": 0.162,
+          "k_pct_vs_r": 0.162,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.23635294117647068,
+          "k9": 8.727665161918866,
+          "avg_ip": null,
+          "seasons": [
+            2023,
+            2025,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "664285",
+            "game_date": "2026-04-24",
+            "ip": 4.333333333333333,
+            "bf": 21,
+            "ks": 4,
+            "pitches": 89,
+            "bb": 5
+          },
+          {
+            "pitcher_id": "664285",
+            "game_date": "2026-04-19",
+            "ip": 6,
+            "bf": 23,
+            "ks": 7,
+            "pitches": 98,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "664285",
+            "game_date": "2026-04-14",
+            "ip": 7,
+            "bf": 26,
+            "ks": 1,
+            "pitches": 87,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "664285",
+            "game_date": "2026-04-08",
+            "ip": 5,
+            "bf": 29,
+            "ks": 2,
+            "pitches": 87,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "664285",
+            "game_date": "2026-04-03",
+            "ip": 6,
+            "bf": 24,
+            "ks": 5,
+            "pitches": 91,
+            "bb": 2
+          }
+        ],
+        "careerAvgFbVelo": 94.23333333333333
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:16.543Z",
+      "expected_inner": {
+        "lambdaBase": 4.80048545906629,
+        "k9": 7.797861745702804,
+        "pK_blended": 0.19514168532789797,
+        "pK_formula": 0.16362856368563686,
+        "ml_pK": 0.2033242464661707,
+        "k9_l5": 6.1726829268292684,
+        "k9_season": 6.284970873786407,
+        "k9_career": 9.44466352941177,
+        "w_career": 0.05666666666666664,
+        "w_season": 0.6,
+        "w_l5": 0.3433333333333334,
+        "expectedBF": 24.6,
+        "avgIp": 5.54054054054054,
+        "bfSource": "BF×5(90pc)",
+        "avgPitches": 90.4,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=16.2% IP=34.3",
+        "careerNote": "career K%=23.6% (2023/2025/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.06",
+        "veloTrendMph": -0.3333333333333286,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9597560975609756,
+        "ttoNote": "TTO3=6.6BF(27%)→×0.960"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 0.85,
+        "raw_adj_factor": 0.8189479060265575,
+        "park_factor": 1.01,
+        "park_team": "ATL",
+        "weather_mult": 1,
+        "weather_note": "wind=10mph temp=73°F (neutral)",
+        "ump_factor": 1,
+        "ump_name": "Roberto Ortiz",
+        "lambda_final": 4.12121676660841
+      },
+      "expected_nb_r": 50,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.767458907178721,
+        "4": 0.5814693282813059,
+        "5": 0.3938133539320412,
+        "6": 0.23948559236827183,
+        "7": 0.131761361441462,
+        "8": 0.06613757347969906,
+        "9": 0.030533140806484615,
+        "10": 0.013060946120064698,
+        "11": 0.005211168059647386,
+        "12": 0.0019507458018658275
+      },
+      "production_model_input": {
+        "opp_team": "ATL",
+        "opp_k_pct": 0.18016853932584265,
+        "opp_kpct_source": "lineup_slot(7)",
+        "hand": "L",
+        "n_starts": 5,
+        "bf_source": "BF×5(90pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": -0.3333333333333286
+      },
+      "archetype": "low_k_control"
+    },
+    {
+      "fixture_id": "593958_2026-04-29",
+      "fixture_built_at": "2026-04-30T21:51:17.194Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 40069,
+      "production_match": false,
+      "mismatch_reason": "data_drift_likely",
+      "mismatch_fields": [
+        {
+          "field": "lambdaBase",
+          "production_logged_as": "lambda_base",
+          "expected": 4.5619800798432575,
+          "actual": 4.559584242203679,
+          "abs_diff": 0.002395837639578069
+        },
+        {
+          "field": "pK_blended",
+          "production_logged_as": "p_k_blended",
+          "expected": 0.19008250332680238,
+          "actual": 0.18998267675848665,
+          "abs_diff": 0.00009982656831572512
+        }
+      ],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "593958",
+      "pitcher_name": "Eduardo Rodriguez",
+      "bet_date": "2026-04-29",
+      "game_id": "823796",
+      "game_label": "AZ@MIL",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-28",
+            "ip": 5,
+            "k": 5,
+            "bf": 20,
+            "pitches": 79,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-03",
+            "ip": 7,
+            "k": 3,
+            "bf": 26,
+            "pitches": 90,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-09",
+            "ip": 6,
+            "k": 3,
+            "bf": 25,
+            "pitches": 102,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-15",
+            "ip": 5,
+            "k": 3,
+            "bf": 25,
+            "pitches": 98,
+            "bb": 4,
+            "started": true
+          },
+          {
+            "date": "2026-04-22",
+            "ip": 5,
+            "k": 4,
+            "bf": 24,
+            "pitches": 96,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-29",
+            "ip": 4.666666666666667,
+            "k": 4,
+            "bf": 23,
+            "pitches": 87,
+            "bb": 4,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-29",
+        "savant": {
+          "player_id": "593958",
+          "k_pct": 0.154,
+          "swstr_pct": 0.16699999999999998,
+          "fb_velo": 90.8,
+          "fb_spin": 2252,
+          "gb_pct": 0.43799999999999994,
+          "bb_pct": 0.112,
+          "ip": 32.666666666666664,
+          "pa": 143,
+          "k_pct_vs_l": 0.154,
+          "k_pct_vs_r": 0.154,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.20882352941176469,
+          "k9": 8.387837904440548,
+          "avg_ip": null,
+          "seasons": [
+            2024,
+            2025,
+            2023,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "593958",
+            "game_date": "2026-04-15",
+            "ip": 5,
+            "bf": 25,
+            "ks": 3,
+            "pitches": 98,
+            "bb": 4
+          },
+          {
+            "pitcher_id": "593958",
+            "game_date": "2026-04-09",
+            "ip": 6,
+            "bf": 25,
+            "ks": 3,
+            "pitches": 102,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "593958",
+            "game_date": "2026-04-03",
+            "ip": 7,
+            "bf": 26,
+            "ks": 3,
+            "pitches": 90,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "593958",
+            "game_date": "2026-03-28",
+            "ip": 5,
+            "bf": 20,
+            "ks": 5,
+            "pitches": 79,
+            "bb": 2
+          }
+        ],
+        "careerAvgFbVelo": 91.21111111111111
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:17.194Z",
+      "expected_inner": {
+        "lambdaBase": 4.559584242203679,
+        "k9": 7.591707763269127,
+        "pK_blended": 0.18998267675848665,
+        "pK_formula": 0.15671372549019608,
+        "ml_pK": 0.1973845992295965,
+        "k9_l5": 5.994000000000001,
+        "k9_season": 6.067285714285714,
+        "k9_career": 8.344588235294118,
+        "w_career": 0.07333333333333335,
+        "w_season": 0.6,
+        "w_l5": 0.32666666666666666,
+        "expectedBF": 24,
+        "avgIp": 5.405405405405405,
+        "bfSource": "BF×4(92pc)",
+        "avgPitches": 92.25,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=15.4% IP=32.7",
+        "careerNote": "career K%=20.9% (2024/2025/2023/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.07",
+        "veloTrendMph": -0.4111111111111114,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9625,
+        "ttoNote": "TTO3=6.0BF(25%)→×0.963"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1.0251021450459652,
+        "raw_adj_factor": 1.0251021450459652,
+        "park_factor": 1.01,
+        "park_team": "MIL",
+        "weather_mult": 1,
+        "weather_note": "dome",
+        "ump_factor": 1,
+        "ump_name": "Alfonso Márquez",
+        "lambda_final": 4.72326052115933
+      },
+      "expected_nb_r": 50,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.8376046247206649,
+        "4": 0.6818273811776262,
+        "5": 0.5036757397719566,
+        "6": 0.33760867155509877,
+        "7": 0.206217890975136,
+        "8": 0.11549334264268596,
+        "9": 0.059700354931911614,
+        "10": 0.028666549167488897,
+        "11": 0.012862914399832559,
+        "12": 0.005422699416825938
+      },
+      "production_model_input": {
+        "opp_team": "MIL",
+        "opp_k_pct": 0.22552247191011232,
+        "opp_kpct_source": "lineup_slot(6)",
+        "hand": "L",
+        "n_starts": 5,
+        "bf_source": "BF×4(92pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": -0.21249999999999147
+      },
+      "archetype": "low_k_control"
+    },
+    {
+      "fixture_id": "592332_2026-04-30",
+      "fixture_built_at": "2026-04-30T21:51:15.896Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 53252,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "592332",
+      "pitcher_name": "Kevin Gausman",
+      "bet_date": "2026-04-30",
+      "game_id": "823714",
+      "game_label": "TOR@MIN",
+      "pitcher_side": "away",
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-27",
+            "ip": 6,
+            "k": 11,
+            "bf": 19,
+            "pitches": 83,
+            "bb": 0,
+            "started": true
+          },
+          {
+            "date": "2026-04-01",
+            "ip": 6,
+            "k": 10,
+            "bf": 21,
+            "pitches": 89,
+            "bb": 0,
+            "started": true
+          },
+          {
+            "date": "2026-04-07",
+            "ip": 5.333333333333333,
+            "k": 5,
+            "bf": 24,
+            "pitches": 84,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-14",
+            "ip": 5,
+            "k": 5,
+            "bf": 24,
+            "pitches": 97,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-19",
+            "ip": 6,
+            "k": 4,
+            "bf": 25,
+            "pitches": 86,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-25",
+            "ip": 6.666666666666667,
+            "k": 3,
+            "bf": 25,
+            "pitches": 91,
+            "bb": 0,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-30",
+        "savant": {
+          "player_id": "592332",
+          "k_pct": 0.275,
+          "swstr_pct": 0.297,
+          "fb_velo": 93.8,
+          "fb_spin": 2240,
+          "gb_pct": 0.447,
+          "bb_pct": 0.043,
+          "ip": 35,
+          "pa": 138,
+          "k_pct_vs_l": 0.275,
+          "k_pct_vs_r": 0.275,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.2373529411764706,
+          "k9": 8.705434156341164,
+          "avg_ip": null,
+          "seasons": [
+            2023,
+            2024,
+            2025,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "592332",
+            "game_date": "2026-04-25",
+            "ip": 6.666666666666667,
+            "bf": 25,
+            "ks": 3,
+            "pitches": 91,
+            "bb": 0
+          },
+          {
+            "pitcher_id": "592332",
+            "game_date": "2026-04-19",
+            "ip": 6,
+            "bf": 25,
+            "ks": 4,
+            "pitches": 86,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "592332",
+            "game_date": "2026-04-14",
+            "ip": 5,
+            "bf": 24,
+            "ks": 5,
+            "pitches": 97,
+            "bb": 3
+          },
+          {
+            "pitcher_id": "592332",
+            "game_date": "2026-04-07",
+            "ip": 5.333333333333333,
+            "bf": 24,
+            "ks": 5,
+            "pitches": 84,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "592332",
+            "game_date": "2026-04-01",
+            "ip": 6,
+            "bf": 21,
+            "ks": 10,
+            "pitches": 89,
+            "bb": 0
+          }
+        ],
+        "careerAvgFbVelo": 94.24444444444445
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:15.896Z",
+      "expected_inner": {
+        "lambdaBase": 6.36666946575698,
+        "k9": 10.689584531581888,
+        "pK_blended": 0.2675071204099571,
+        "pK_formula": 0.2562794117647059,
+        "ml_pK": 0.27765675821007324,
+        "k9_l5": 9.06655462184874,
+        "k9_season": 9.75857142857143,
+        "k9_career": 9.484623529411767,
+        "w_career": 0.05,
+        "w_season": 0.6,
+        "w_l5": 0.35,
+        "expectedBF": 23.8,
+        "avgIp": 5.36036036036036,
+        "bfSource": "BF×5(89pc)",
+        "avgPitches": 89.4,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=27.5% IP=35.0",
+        "careerNote": "career K%=23.7% (2023/2024/2025/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.05",
+        "veloTrendMph": -0.4444444444444571,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9634453781512605,
+        "ttoNote": "TTO3=5.8BF(24%)→×0.963"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 0.9992339121552603,
+        "raw_adj_factor": 0.9992339121552603,
+        "park_factor": 1.02,
+        "park_team": "MIN",
+        "weather_mult": 1,
+        "weather_note": "wind=10mph temp=51°F (neutral)",
+        "ump_factor": 1.03,
+        "ump_name": "Manny Gonzalez",
+        "lambda_final": 6.683698714773778
+      },
+      "expected_nb_r": 30,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.9475276245477237,
+        "4": 0.8756560728448948,
+        "5": 0.7676235006059304,
+        "6": 0.6337768905647236,
+        "7": 0.49152176708207096,
+        "8": 0.35822607173866805,
+        "9": 0.24590231807559737,
+        "10": 0.15949382279975255,
+        "11": 0.09809432822006259,
+        "12": 0.05741480547065314
+      },
+      "production_model_input": {
+        "opp_team": "MIN",
+        "opp_k_pct": 0.21983146067415726,
+        "opp_kpct_source": "lineup_slot(9)",
+        "hand": "R",
+        "n_starts": 5,
+        "bf_source": "BF×5(89pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": -0.4444444444444571
+      },
+      "archetype": "mixed_k"
+    },
+    {
+      "fixture_id": "605488_2026-04-30",
+      "fixture_built_at": "2026-04-30T21:51:16.038Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 53243,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "605488",
+      "pitcher_name": "Jeffrey Springs",
+      "bet_date": "2026-04-30",
+      "game_id": "825016",
+      "game_label": "KC@ATH",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-28",
+            "ip": 5.333333333333333,
+            "k": 2,
+            "bf": 22,
+            "pitches": 83,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-03",
+            "ip": 6,
+            "k": 7,
+            "bf": 21,
+            "pitches": 103,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-09",
+            "ip": 7,
+            "k": 6,
+            "bf": 25,
+            "pitches": 93,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-14",
+            "ip": 6.333333333333333,
+            "k": 5,
+            "bf": 23,
+            "pitches": 90,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-19",
+            "ip": 5,
+            "k": 7,
+            "bf": 25,
+            "pitches": 85,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-25",
+            "ip": 6,
+            "k": 4,
+            "bf": 26,
+            "pitches": 91,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 3,
+            "k": 4,
+            "bf": 16,
+            "pitches": 67,
+            "bb": 1,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-30",
+        "savant": {
+          "player_id": "605488",
+          "k_pct": 0.218,
+          "swstr_pct": 0.26,
+          "fb_velo": 91.1,
+          "fb_spin": 2184,
+          "gb_pct": 0.384,
+          "bb_pct": 0.077,
+          "ip": 35.666666666666664,
+          "pa": 142,
+          "k_pct_vs_l": 0.218,
+          "k_pct_vs_r": 0.218,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.23188235294117654,
+          "k9": 8.643335983675769,
+          "avg_ip": null,
+          "seasons": [
+            2025,
+            2023,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "605488",
+            "game_date": "2026-04-25",
+            "ip": 6,
+            "bf": 26,
+            "ks": 4,
+            "pitches": 91,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "605488",
+            "game_date": "2026-04-19",
+            "ip": 5,
+            "bf": 25,
+            "ks": 7,
+            "pitches": 85,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "605488",
+            "game_date": "2026-04-14",
+            "ip": 6.333333333333333,
+            "bf": 23,
+            "ks": 5,
+            "pitches": 90,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "605488",
+            "game_date": "2026-04-09",
+            "ip": 7,
+            "bf": 25,
+            "ks": 6,
+            "pitches": 93,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "605488",
+            "game_date": "2026-04-03",
+            "ip": 6,
+            "bf": 21,
+            "ks": 7,
+            "pitches": 103,
+            "bb": 1
+          }
+        ],
+        "careerAvgFbVelo": 90.1
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:16.037Z",
+      "expected_inner": {
+        "lambdaBase": 6.740597868196389,
+        "k9": 11.223095450546987,
+        "pK_blended": 0.28085824450818286,
+        "pK_formula": 0.22704267973856213,
+        "ml_pK": 0.29180077351499517,
+        "k9_l5": 9.657000000000002,
+        "k9_season": 7.811327102803738,
+        "k9_career": 9.266018823529414,
+        "w_career": 0.04333333333333336,
+        "w_season": 0.6,
+        "w_l5": 0.3566666666666667,
+        "expectedBF": 24,
+        "avgIp": 5.405405405405405,
+        "bfSource": "BF×5(92pc)",
+        "avgPitches": 92.4,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=21.8% IP=35.7",
+        "careerNote": "career K%=23.2% (2025/2023/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.04",
+        "veloTrendMph": 1,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9625,
+        "ttoNote": "TTO3=6.0BF(25%)→×0.963"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 0.9303370786516849,
+        "raw_adj_factor": 0.9303370786516849,
+        "park_factor": 1.02,
+        "park_team": "ATH",
+        "weather_mult": 1,
+        "weather_note": "wind=7mph temp=69°F (neutral)",
+        "ump_factor": 1.02,
+        "ump_name": "D.J. Reyburn",
+        "lambda_final": 6.524377665477774
+      },
+      "expected_nb_r": 30,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.9421346203693232,
+        "4": 0.8649548685883636,
+        "5": 0.7512147717629013,
+        "6": 0.6130559013087892,
+        "7": 0.46909258730565406,
+        "8": 0.3368374460221144,
+        "9": 0.22757257223013372,
+        "10": 0.14516295002195867,
+        "11": 0.08775146272512413,
+        "12": 0.05045888774788987
+      },
+      "production_model_input": {
+        "opp_team": "KC",
+        "opp_k_pct": 0.20467415730337069,
+        "opp_kpct_source": "lineup_slot(7)",
+        "hand": "L",
+        "n_starts": 5,
+        "bf_source": "BF×5(92pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": 1
+      },
+      "archetype": "mixed_k"
+    },
+    {
+      "fixture_id": "690928_2026-04-30",
+      "fixture_built_at": "2026-04-30T21:51:16.684Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 53222,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "690928",
+      "pitcher_name": "Hunter Dobbins",
+      "bet_date": "2026-04-30",
+      "game_id": "823391",
+      "game_label": "STL@PIT",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-04-30",
+            "ip": 4.333333333333333,
+            "k": 4,
+            "bf": 19,
+            "pitches": 79,
+            "bb": 5,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-30",
+        "savant": null,
+        "career": {
+          "k_pct": 0.176,
+          "k9": 6.647606557377051,
+          "avg_ip": null,
+          "seasons": [
+            2025,
+            2025,
+            2025,
+            2025,
+            2025,
+            2025,
+            2025,
+            2025
+          ],
+          "weight": 4
+        },
+        "recentStartsData": [],
+        "careerAvgFbVelo": 95.5
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:16.684Z",
+      "expected_inner": {
+        "lambdaBase": 3.9291648000000006,
+        "k9": 6.800477538461539,
+        "pK_blended": 0.17018212058212057,
+        "pK_formula": 0.176,
+        "ml_pK": null,
+        "k9_l5": 6.647606557377051,
+        "k9_season": null,
+        "k9_career": 7.03296,
+        "w_career": 0.4,
+        "w_season": 0,
+        "w_l5": 0.6,
+        "expectedBF": 23.088000000000005,
+        "avgIp": 5.2,
+        "bfSource": "career_ip×PA/IP",
+        "avgPitches": null,
+        "leashFlag": false,
+        "nStarts": 0,
+        "confidence": "low(career+l5)",
+        "earlyExitRate": null,
+        "whiffFlag": null,
+        "savantNote": null,
+        "careerNote": "career K%=17.6% (2025/2025/2025/2025/2025/2025/2025/2025) w=0.40",
+        "veloTrendMph": null,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9669438669438669,
+        "ttoNote": "TTO3=5.1BF(22%)→×0.967"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1.0080949948927473,
+        "raw_adj_factor": 1.0080949948927473,
+        "park_factor": 0.99,
+        "park_team": "PIT",
+        "weather_mult": 1,
+        "weather_note": "wind=12mph temp=53°F (neutral)",
+        "ump_factor": 1.04,
+        "ump_name": "Brian O'Nora",
+        "lambda_final": 4.078216121510831
+      },
+      "expected_nb_r": 30,
+      "expected_nb_r_source": "global_default",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.7542629765041952,
+        "4": 0.5685706808730813,
+        "5": 0.38523743902705465,
+        "6": 0.23604613327009383,
+        "7": 0.1318974716758171,
+        "8": 0.06779842975250028,
+        "9": 0.032320631513002906,
+        "10": 0.014394312077199212,
+        "11": 0.006027709841304185,
+        "12": 0.002386800939368605
+      },
+      "production_model_input": {
+        "opp_team": "PIT",
+        "opp_k_pct": 0.22178089887640443,
+        "opp_kpct_source": "lineup_slot(9)",
+        "hand": "R",
+        "n_starts": 0,
+        "bf_source": "career_ip×PA/IP",
+        "confidence": "low(career+l5)",
+        "velo_trend_mph": null
+      },
+      "archetype": "rookie_thin"
+    },
+    {
+      "fixture_id": "695684_2026-04-29",
+      "fixture_built_at": "2026-04-30T21:51:19.330Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 40009,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "695684",
+      "pitcher_name": "Elmer Rodríguez",
+      "bet_date": "2026-04-29",
+      "game_id": "822907",
+      "game_label": "NYY@TEX",
+      "pitcher_side": "away",
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-04-29",
+            "ip": 4,
+            "k": 3,
+            "bf": 20,
+            "pitches": 80,
+            "bb": 4,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-29",
+        "savant": null,
+        "career": null,
+        "recentStartsData": [],
+        "careerAvgFbVelo": null
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:19.330Z",
+      "expected_inner": {
+        "lambdaBase": 4.916372372372373,
+        "k9": 8.50910602910603,
+        "pK_blended": 0.2129405913189697,
+        "pK_formula": 0.22022022022022023,
+        "ml_pK": null,
+        "k9_l5": 8.8,
+        "k9_season": null,
+        "k9_career": null,
+        "w_career": 0,
+        "w_season": 0,
+        "w_l5": 1,
+        "expectedBF": 23.088000000000005,
+        "avgIp": 5.2,
+        "bfSource": "career_ip×PA/IP",
+        "avgPitches": null,
+        "leashFlag": false,
+        "nStarts": 0,
+        "confidence": "low(l5)",
+        "earlyExitRate": null,
+        "whiffFlag": null,
+        "savantNote": null,
+        "careerNote": null,
+        "veloTrendMph": null,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9669438669438669,
+        "ttoNote": "TTO3=5.1BF(22%)→×0.967"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1.032328907048008,
+        "raw_adj_factor": 1.032328907048008,
+        "park_factor": 1.02,
+        "park_team": "TEX",
+        "weather_mult": 1,
+        "weather_note": "dome",
+        "ump_factor": 1,
+        "ump_name": "Tyler Jones",
+        "lambda_final": 5.176819584168438
+      },
+      "expected_nb_r": 30,
+      "expected_nb_r_source": "global_default",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.8694206423235473,
+        "4": 0.7361171421654968,
+        "5": 0.5742711460829644,
+        "6": 0.4123075797942315,
+        "7": 0.2732673159079154,
+        "8": 0.1680344246987906,
+        "9": 0.09640858968035149,
+        "10": 0.051902724947440304,
+        "11": 0.026358760028361128,
+        "12": 0.012688962762217981
+      },
+      "production_model_input": {
+        "opp_team": "TEX",
+        "opp_k_pct": 0.22711235955056175,
+        "opp_kpct_source": "lineup_slot(8)",
+        "hand": "R",
+        "n_starts": 0,
+        "bf_source": "career_ip×PA/IP",
+        "confidence": "low(l5)",
+        "velo_trend_mph": null
+      },
+      "archetype": "rookie_thin"
+    },
+    {
+      "fixture_id": "547179_2026-04-30",
+      "fixture_built_at": "2026-04-30T21:51:15.771Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 53228,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "547179",
+      "pitcher_name": "Michael Lorenzen",
+      "bet_date": "2026-04-30",
+      "game_id": "824524",
+      "game_label": "COL@CIN",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-28",
+            "ip": 4.333333333333333,
+            "k": 4,
+            "bf": 22,
+            "pitches": 93,
+            "bb": 0,
+            "started": true
+          },
+          {
+            "date": "2026-04-03",
+            "ip": 3,
+            "k": 2,
+            "bf": 23,
+            "pitches": 77,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-08",
+            "ip": 5.666666666666667,
+            "k": 4,
+            "bf": 26,
+            "pitches": 100,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-11",
+            "ip": 1,
+            "k": 0,
+            "bf": 4,
+            "pitches": 11,
+            "bb": 0,
+            "started": false
+          },
+          {
+            "date": "2026-04-14",
+            "ip": 2.6666666666666665,
+            "k": 3,
+            "bf": 18,
+            "pitches": 71,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-19",
+            "ip": 5,
+            "k": 3,
+            "bf": 22,
+            "pitches": 88,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-24",
+            "ip": 7,
+            "k": 3,
+            "bf": 26,
+            "pitches": 90,
+            "bb": 0,
+            "started": true
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 5.333333333333333,
+            "k": 5,
+            "bf": 23,
+            "pitches": 85,
+            "bb": 3,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-30",
+        "savant": {
+          "player_id": "547179",
+          "k_pct": 0.135,
+          "swstr_pct": 0.207,
+          "fb_velo": 92.5,
+          "fb_spin": 2351,
+          "gb_pct": 0.487,
+          "bb_pct": 0.043,
+          "ip": 28.666666666666668,
+          "pa": 141,
+          "k_pct_vs_l": 0.135,
+          "k_pct_vs_r": 0.135,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.1978823529411765,
+          "k9": 7.500121859485486,
+          "avg_ip": null,
+          "seasons": [
+            2025,
+            2024,
+            2023,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "547179",
+            "game_date": "2026-04-24",
+            "ip": 7,
+            "bf": 26,
+            "ks": 3,
+            "pitches": 90,
+            "bb": 0
+          },
+          {
+            "pitcher_id": "547179",
+            "game_date": "2026-04-19",
+            "ip": 5,
+            "bf": 22,
+            "ks": 3,
+            "pitches": 88,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "547179",
+            "game_date": "2026-04-14",
+            "ip": 2.6666666666666665,
+            "bf": 18,
+            "ks": 3,
+            "pitches": 71,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "547179",
+            "game_date": "2026-04-08",
+            "ip": 5.666666666666667,
+            "bf": 26,
+            "ks": 4,
+            "pitches": 100,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "547179",
+            "game_date": "2026-04-03",
+            "ip": 3,
+            "bf": 23,
+            "ks": 2,
+            "pitches": 77,
+            "bb": 2
+          }
+        ],
+        "careerAvgFbVelo": 93.06666666666666
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:15.771Z",
+      "expected_inner": {
+        "lambdaBase": 3.433849652620439,
+        "k9": 5.965940526900555,
+        "pK_blended": 0.14929781098349734,
+        "pK_formula": 0.14081797101449275,
+        "ml_pK": 0.15433032146608713,
+        "k9_l5": 5.212173913043479,
+        "k9_season": 5.976104651162791,
+        "k9_career": 7.907378823529414,
+        "w_career": 0.11333333333333334,
+        "w_season": 0.6,
+        "w_l5": 0.28666666666666674,
+        "expectedBF": 23,
+        "avgIp": 5.18018018018018,
+        "bfSource": "BF×5(85pc)",
+        "avgPitches": 85.2,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0.2,
+        "whiffFlag": null,
+        "savantNote": "K%=13.5% IP=28.7",
+        "careerNote": "career K%=19.8% (2025/2024/2023/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.11",
+        "veloTrendMph": -0.5666666666666629,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.967391304347826,
+        "ttoNote": "TTO3=5.0BF(22%)→×0.967"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1.126608784473953,
+        "raw_adj_factor": 1.126608784473953,
+        "park_factor": 1.02,
+        "park_team": "CIN",
+        "weather_mult": 1,
+        "weather_note": "wind=8mph temp=60°F (neutral)",
+        "ump_factor": 1,
+        "ump_name": "Bruce Dreckman",
+        "lambda_final": 3.9459772868691187
+      },
+      "expected_nb_r": 50,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.7426893890923986,
+        "4": 0.5488126178821067,
+        "5": 0.36090812143702156,
+        "6": 0.2124662421064505,
+        "7": 0.11293408897077206,
+        "8": 0.054690396248621376,
+        "9": 0.024335462692405274,
+        "10": 0.010026429647535418,
+        "11": 0.003851133153378261,
+        "12": 0.0013872965930579184
+      },
+      "production_model_input": {
+        "opp_team": "CIN",
+        "opp_k_pct": 0.24785393258426963,
+        "opp_kpct_source": "lineup_slot(8)",
+        "hand": "R",
+        "n_starts": 5,
+        "bf_source": "BF×5(85pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": -0.5666666666666629
+      },
+      "archetype": "lineup_posted"
+    },
+    {
+      "fixture_id": "571945_2026-04-30",
+      "fixture_built_at": "2026-04-30T21:51:15.830Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 53234,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "571945",
+      "pitcher_name": "Miles Mikolas",
+      "bet_date": "2026-04-30",
+      "game_id": "823634",
+      "game_label": "WSH@NYM",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-28",
+            "ip": 5,
+            "k": 4,
+            "bf": 25,
+            "pitches": 97,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-03",
+            "ip": 4.333333333333333,
+            "k": 4,
+            "bf": 25,
+            "pitches": 87,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-08",
+            "ip": 3,
+            "k": 3,
+            "bf": 17,
+            "pitches": 55,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-14",
+            "ip": 3.3333333333333335,
+            "k": 0,
+            "bf": 14,
+            "pitches": 49,
+            "bb": 2,
+            "started": false
+          },
+          {
+            "date": "2026-04-19",
+            "ip": 4,
+            "k": 4,
+            "bf": 17,
+            "pitches": 61,
+            "bb": 1,
+            "started": false
+          },
+          {
+            "date": "2026-04-24",
+            "ip": 3.6666666666666665,
+            "k": 1,
+            "bf": 13,
+            "pitches": 51,
+            "bb": 0,
+            "started": false
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 4,
+            "k": 3,
+            "bf": 16,
+            "pitches": 79,
+            "bb": 1,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-30",
+        "savant": {
+          "player_id": "571945",
+          "k_pct": 0.14400000000000002,
+          "swstr_pct": 0.194,
+          "fb_velo": 92.4,
+          "fb_spin": 2180,
+          "gb_pct": 0.471,
+          "bb_pct": 0.09,
+          "ip": 23.333333333333332,
+          "pa": 111,
+          "k_pct_vs_l": 0.14400000000000002,
+          "k_pct_vs_r": 0.14400000000000002,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.15664705882352942,
+          "k9": 5.986719930803239,
+          "avg_ip": null,
+          "seasons": [
+            2023,
+            2025,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "571945",
+            "game_date": "2026-04-08",
+            "ip": 3,
+            "bf": 17,
+            "ks": 3,
+            "pitches": 55,
+            "bb": 3
+          },
+          {
+            "pitcher_id": "571945",
+            "game_date": "2026-04-03",
+            "ip": 4.333333333333333,
+            "bf": 25,
+            "ks": 4,
+            "pitches": 87,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "571945",
+            "game_date": "2026-03-28",
+            "ip": 5,
+            "bf": 25,
+            "ks": 4,
+            "pitches": 97,
+            "bb": 3
+          }
+        ],
+        "careerAvgFbVelo": 92.77777777777777
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:15.830Z",
+      "expected_inner": {
+        "lambdaBase": 3.965673468978309,
+        "k9": 7.558739559632865,
+        "pK_blended": 0.18915764663745907,
+        "pK_formula": 0.15011330992098332,
+        "ml_pK": 0.1932572887032562,
+        "k9_l5": 6.440204797190519,
+        "k9_season": 6.165257142857143,
+        "k9_career": 6.259616470588236,
+        "w_career": 0.1666666666666667,
+        "w_season": 0.6,
+        "w_l5": 0.23333333333333328,
+        "expectedBF": 20.964912280701757,
+        "avgIp": 4.721827090248143,
+        "bfSource": "BF×3(80pc)→capped(21.0BF)",
+        "avgPitches": 79.66666666666667,
+        "leashFlag": true,
+        "nStarts": 3,
+        "confidence": "medium(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=14.4% IP=23.3",
+        "careerNote": "career K%=15.7% (2023/2025/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.17",
+        "veloTrendMph": -0.3777777777777658,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.978786610878661,
+        "ttoNote": "TTO3=3.0BF(14%)→×0.979"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1.0938457609805923,
+        "raw_adj_factor": 1.0938457609805923,
+        "park_factor": 1.01,
+        "park_team": "NYM",
+        "weather_mult": 1.02,
+        "weather_note": "humid=83%→×1.02 (net×1.020)",
+        "ump_factor": 1,
+        "ump_name": "Brian Walsh",
+        "lambda_final": 4.468837733902072
+      },
+      "expected_nb_r": 50,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.8106247217881767,
+        "4": 0.6417259442981971,
+        "5": 0.45811910203153006,
+        "6": 0.2954297632123455,
+        "7": 0.17307609043471173,
+        "8": 0.09276907709818527,
+        "9": 0.04582456601102991,
+        "10": 0.021003708487763117,
+        "11": 0.008988943773028168,
+        "12": 0.0036121879663277845
+      },
+      "production_model_input": {
+        "opp_team": "NYM",
+        "opp_k_pct": 0.2406460674157303,
+        "opp_kpct_source": "lineup_slot(8)",
+        "hand": "R",
+        "n_starts": 3,
+        "bf_source": "BF×3(80pc)→capped(21.0BF)",
+        "confidence": "medium(career+savant+l5)",
+        "velo_trend_mph": -0.3777777777777658
+      },
+      "archetype": "lineup_posted"
+    },
+    {
+      "fixture_id": "605135_2026-04-29",
+      "fixture_built_at": "2026-04-30T21:51:17.252Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 40030,
+      "production_match": false,
+      "mismatch_reason": "data_drift_likely",
+      "mismatch_fields": [
+        {
+          "field": "lambdaBase",
+          "production_logged_as": "lambda_base",
+          "expected": 2.715183848308182,
+          "actual": 2.8115396026540576,
+          "abs_diff": 0.09635575434587551
+        },
+        {
+          "field": "pK_blended",
+          "production_logged_as": "p_k_blended",
+          "expected": 0.13085223365340637,
+          "actual": 0.1301638704932434,
+          "abs_diff": 0.0006883631601629636
+        },
+        {
+          "field": "ttoPenalty",
+          "production_logged_as": "tto_penalty",
+          "expected": 0.9801204819277108,
+          "actual": 0.975,
+          "abs_diff": 0.005120481927710863
+        },
+        {
+          "field": "expectedBF",
+          "production_logged_as": "expected_bf",
+          "expected": 20.75,
+          "actual": 21.6,
+          "abs_diff": 0.8500000000000014
+        },
+        {
+          "field": "avgPitches",
+          "production_logged_as": "avg_pitches",
+          "expected": 87.75,
+          "actual": 87.8,
+          "abs_diff": 0.04999999999999716
+        },
+        {
+          "field": "ttoNote",
+          "production_logged_as": "tto_note",
+          "expected": "TTO3=2.8BF(13%)→×0.980",
+          "actual": "TTO3=3.6BF(17%)→×0.975"
+        },
+        {
+          "field": "bfSource",
+          "production_logged_as": "bf_source",
+          "expected": "BF×4(88pc)",
+          "actual": "BF×5(88pc)"
+        }
+      ],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "605135",
+      "pitcher_name": "Chris Bassitt",
+      "bet_date": "2026-04-29",
+      "game_id": "824850",
+      "game_label": "HOU@BAL",
+      "pitcher_side": "home",
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-30",
+            "ip": 4.333333333333333,
+            "k": 3,
+            "bf": 25,
+            "pitches": 100,
+            "bb": 4,
+            "started": true
+          },
+          {
+            "date": "2026-04-05",
+            "ip": 2,
+            "k": 0,
+            "bf": 15,
+            "pitches": 62,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-11",
+            "ip": 4.666666666666667,
+            "k": 2,
+            "bf": 21,
+            "pitches": 89,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-17",
+            "ip": 5,
+            "k": 2,
+            "bf": 22,
+            "pitches": 100,
+            "bb": 4,
+            "started": true
+          },
+          {
+            "date": "2026-04-22",
+            "ip": 5.333333333333333,
+            "k": 3,
+            "bf": 25,
+            "pitches": 88,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 6.666666666666667,
+            "k": 7,
+            "bf": 27,
+            "pitches": 94,
+            "bb": 1,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-29",
+        "savant": {
+          "player_id": "605135",
+          "k_pct": 0.093,
+          "swstr_pct": 0.2,
+          "fb_velo": 91,
+          "fb_spin": 2103,
+          "gb_pct": 0.451,
+          "bb_pct": 0.12,
+          "ip": 21.333333333333332,
+          "pa": 108,
+          "k_pct_vs_l": 0.093,
+          "k_pct_vs_r": 0.093,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.22452941176470592,
+          "k9": 8.787702678836498,
+          "avg_ip": null,
+          "seasons": [
+            2025,
+            2023,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "605135",
+            "game_date": "2026-04-22",
+            "ip": 5.333333333333333,
+            "bf": 25,
+            "ks": 3,
+            "pitches": 88,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "605135",
+            "game_date": "2026-04-17",
+            "ip": 5,
+            "bf": 22,
+            "ks": 2,
+            "pitches": 100,
+            "bb": 4
+          },
+          {
+            "pitcher_id": "605135",
+            "game_date": "2026-04-11",
+            "ip": 4.666666666666667,
+            "bf": 21,
+            "ks": 2,
+            "pitches": 89,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "605135",
+            "game_date": "2026-04-05",
+            "ip": 2,
+            "bf": 15,
+            "ks": 0,
+            "pitches": 62,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "605135",
+            "game_date": "2026-03-30",
+            "ip": 4.333333333333333,
+            "bf": 25,
+            "ks": 3,
+            "pitches": 100,
+            "bb": 4
+          }
+        ],
+        "careerAvgFbVelo": 91.17777777777776
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:17.252Z",
+      "expected_inner": {
+        "lambdaBase": 2.8115396026540576,
+        "k9": 5.201348264910006,
+        "pK_blended": 0.1301638704932434,
+        "pK_formula": 0.11746524328249819,
+        "ml_pK": 0.1335014056340958,
+        "k9_l5": 3.7,
+        "k9_season": 4.2373125,
+        "k9_career": 8.972195294117649,
+        "w_career": 0.18666666666666668,
+        "w_season": 0.6,
+        "w_l5": 0.21333333333333337,
+        "expectedBF": 21.6,
+        "avgIp": 4.864864864864865,
+        "bfSource": "BF×5(88pc)",
+        "avgPitches": 87.8,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0.2,
+        "whiffFlag": "K%-may-improve",
+        "savantNote": "K%=9.3% IP=21.3",
+        "careerNote": "career K%=22.5% (2025/2023/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.19",
+        "veloTrendMph": -0.17777777777776294,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.975,
+        "ttoNote": "TTO3=3.6BF(17%)→×0.975"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1,
+        "raw_adj_factor": 0.8883248730964467,
+        "park_factor": 1.01,
+        "park_team": "BAL",
+        "weather_mult": 1.02,
+        "weather_note": "humid=86%→×1.02 (net×1.020)",
+        "ump_factor": 1,
+        "ump_name": null,
+        "lambda_final": 2.7971824005270896
+      },
+      "expected_nb_r": 50,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.5247033246486779,
+        "4": 0.30858813459082035,
+        "5": 0.15687918125541622,
+        "6": 0.07007412792185475,
+        "7": 0.027917439492692653,
+        "8": 0.010049827385061882,
+        "9": 0.0033051462114945807,
+        "10": 0.0010023423457307112,
+        "11": 0.0002825304789105809,
+        "12": 0.00007451885328813024
+      },
+      "production_model_input": {
+        "opp_team": "HOU",
+        "opp_k_pct": 0.19543147208121828,
+        "opp_kpct_source": "db(2026-04-28)",
+        "hand": "R",
+        "n_starts": 5,
+        "bf_source": "BF×4(88pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": -0.17499999999999716
+      },
+      "archetype": "lineup_absent"
+    },
+    {
+      "fixture_id": "657277_2026-04-29",
+      "fixture_built_at": "2026-04-30T21:51:18.268Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 40051,
+      "production_match": false,
+      "mismatch_reason": "data_drift_likely",
+      "mismatch_fields": [
+        {
+          "field": "lambdaBase",
+          "production_logged_as": "lambda_base",
+          "expected": 5.901614246906551,
+          "actual": 6.02164035636983,
+          "abs_diff": 0.12002610946327952
+        },
+        {
+          "field": "pK_blended",
+          "production_logged_as": "p_k_blended",
+          "expected": 0.2235459942010057,
+          "actual": 0.2230237169025863,
+          "abs_diff": 0.0005222772984194157
+        },
+        {
+          "field": "ttoPenalty",
+          "production_logged_as": "tto_penalty",
+          "expected": 0.9522727272727273,
+          "actual": 0.95,
+          "abs_diff": 0.002272727272727315
+        },
+        {
+          "field": "expectedBF",
+          "production_logged_as": "expected_bf",
+          "expected": 26.4,
+          "actual": 27,
+          "abs_diff": 0.6000000000000014
+        },
+        {
+          "field": "avgPitches",
+          "production_logged_as": "avg_pitches",
+          "expected": 95.8,
+          "actual": 98.2,
+          "abs_diff": 2.4000000000000057
+        },
+        {
+          "field": "ttoNote",
+          "production_logged_as": "tto_note",
+          "expected": "TTO3=8.4BF(32%)→×0.952",
+          "actual": "TTO3=9.0BF(33%)→×0.950"
+        },
+        {
+          "field": "bfSource",
+          "production_logged_as": "bf_source",
+          "expected": "BF×5(96pc)",
+          "actual": "BF×5(98pc)"
+        }
+      ],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "657277",
+      "pitcher_name": "Logan Webb",
+      "bet_date": "2026-04-29",
+      "game_id": "823471",
+      "game_label": "SF@PHI",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-25",
+            "ip": 5,
+            "k": 7,
+            "bf": 26,
+            "pitches": 86,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-03-31",
+            "ip": 6,
+            "k": 5,
+            "bf": 25,
+            "pitches": 104,
+            "bb": 4,
+            "started": true
+          },
+          {
+            "date": "2026-04-05",
+            "ip": 7,
+            "k": 3,
+            "bf": 28,
+            "pitches": 92,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-11",
+            "ip": 6,
+            "k": 6,
+            "bf": 26,
+            "pitches": 98,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-17",
+            "ip": 6,
+            "k": 6,
+            "bf": 27,
+            "pitches": 99,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-23",
+            "ip": 7,
+            "k": 5,
+            "bf": 29,
+            "pitches": 98,
+            "bb": 2,
+            "started": true
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 7,
+            "k": 6,
+            "bf": 27,
+            "pitches": 92,
+            "bb": 2,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-29",
+        "savant": {
+          "player_id": "657277",
+          "k_pct": 0.199,
+          "swstr_pct": 0.201,
+          "fb_velo": 92.2,
+          "fb_spin": 2004,
+          "gb_pct": 0.593,
+          "bb_pct": 0.081,
+          "ip": 37,
+          "pa": 161,
+          "k_pct_vs_l": 0.199,
+          "k_pct_vs_r": 0.199,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.23988235294117646,
+          "k9": 8.886619375692497,
+          "avg_ip": null,
+          "seasons": [
+            2025,
+            2023,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "657277",
+            "game_date": "2026-04-23",
+            "ip": 7,
+            "bf": 29,
+            "ks": 5,
+            "pitches": 98,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "657277",
+            "game_date": "2026-04-17",
+            "ip": 6,
+            "bf": 27,
+            "ks": 6,
+            "pitches": 99,
+            "bb": 2
+          },
+          {
+            "pitcher_id": "657277",
+            "game_date": "2026-04-11",
+            "ip": 6,
+            "bf": 26,
+            "ks": 6,
+            "pitches": 98,
+            "bb": 3
+          },
+          {
+            "pitcher_id": "657277",
+            "game_date": "2026-04-05",
+            "ip": 7,
+            "bf": 28,
+            "ks": 3,
+            "pitches": 92,
+            "bb": 1
+          },
+          {
+            "pitcher_id": "657277",
+            "game_date": "2026-03-31",
+            "ip": 6,
+            "bf": 25,
+            "ks": 5,
+            "pitches": 104,
+            "bb": 4
+          }
+        ],
+        "careerAvgFbVelo": 92.43333333333334
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:18.267Z",
+      "expected_inner": {
+        "lambdaBase": 6.02164035636983,
+        "k9": 8.912027727427349,
+        "pK_blended": 0.2230237169025863,
+        "pK_formula": 0.19511498910675384,
+        "ml_pK": 0.2347618072658803,
+        "k9_l5": 7.4,
+        "k9_season": 7.793270270270272,
+        "k9_career": 9.585698823529412,
+        "w_career": 0.029999999999999985,
+        "w_season": 0.6,
+        "w_l5": 0.37,
+        "expectedBF": 27,
+        "avgIp": 6.081081081081081,
+        "bfSource": "BF×5(98pc)",
+        "avgPitches": 98.2,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=19.9% IP=37.0",
+        "careerNote": "career K%=24.0% (2025/2023/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.03",
+        "veloTrendMph": -0.23333333333333428,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.95,
+        "ttoNote": "TTO3=9.0BF(33%)→×0.950"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1,
+        "raw_adj_factor": 0.9480903711672941,
+        "park_factor": 1.02,
+        "park_team": "PHI",
+        "weather_mult": 1,
+        "weather_note": "wind=10mph temp=62°F (neutral)",
+        "ump_factor": 1,
+        "ump_name": null,
+        "lambda_final": 6.019646531844682
+      },
+      "expected_nb_r": 30,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.9212542179917088,
+        "4": 0.8253074059291756,
+        "5": 0.6930207488350791,
+        "6": 0.5426869961705121,
+        "7": 0.39613057997681167,
+        "8": 0.27016820481071935,
+        "9": 0.17280740740803802,
+        "10": 0.10410740483714964,
+        "11": 0.05933062019527324,
+        "12": 0.0321191658081309
+      },
+      "production_model_input": {
+        "opp_team": "PHI",
+        "opp_k_pct": 0.20857988165680472,
+        "opp_kpct_source": "db(2026-04-28)",
+        "hand": "R",
+        "n_starts": 5,
+        "bf_source": "BF×5(96pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": -0.23125000000000284
+      },
+      "archetype": "lineup_absent"
+    },
+    {
+      "fixture_id": "663567_2026-04-30",
+      "fixture_built_at": "2026-04-30T21:51:16.477Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 56573,
+      "production_match": true,
+      "mismatch_reason": null,
+      "mismatch_fields": [],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "663567",
+      "pitcher_name": "Peter Lambert",
+      "bet_date": "2026-04-30",
+      "game_id": "824848",
+      "game_label": "HOU@BAL",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-04-17",
+            "ip": 5,
+            "k": 8,
+            "bf": 24,
+            "pitches": 90,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-22",
+            "ip": 6,
+            "k": 8,
+            "bf": 24,
+            "pitches": 96,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-30",
+            "ip": 4.333333333333333,
+            "k": 3,
+            "bf": 18,
+            "pitches": 91,
+            "bb": 3,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-30",
+        "savant": {
+          "player_id": "663567",
+          "k_pct": 0.33299999999999996,
+          "swstr_pct": 0.415,
+          "fb_velo": 94.4,
+          "fb_spin": 2278,
+          "gb_pct": 0.5379999999999999,
+          "bb_pct": 0.083,
+          "ip": 11,
+          "pa": 48,
+          "k_pct_vs_l": 0.33299999999999996,
+          "k_pct_vs_r": 0.33299999999999996,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.18042857142857138,
+          "k9": 7.347329074012611,
+          "avg_ip": null,
+          "seasons": [
+            2024,
+            2023,
+            2023,
+            2024,
+            2024,
+            2024,
+            2024,
+            2024,
+            2024,
+            2024
+          ],
+          "weight": 2.8
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "663567",
+            "game_date": "2026-04-17",
+            "ip": 5,
+            "bf": 24,
+            "ks": 8,
+            "pitches": 90,
+            "bb": 1
+          }
+        ],
+        "careerAvgFbVelo": 94.16
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:16.477Z",
+      "expected_inner": {
+        "lambdaBase": 6.3859834843108425,
+        "k9": 10.632662501377553,
+        "pK_blended": 0.26608264517961844,
+        "pK_formula": 0.2533339135320304,
+        "ml_pK": 0.27644950148531783,
+        "k9_l5": 9.184161342515765,
+        "k9_season": 13.077818181818179,
+        "k9_career": 7.209925714285713,
+        "w_career": 0.29,
+        "w_season": 0.36666666666666664,
+        "w_l5": 0.3433333333333333,
+        "expectedBF": 24,
+        "avgIp": 5.405405405405405,
+        "bfSource": "logBF×2",
+        "avgPitches": null,
+        "leashFlag": false,
+        "nStarts": 2,
+        "confidence": "low(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=33.3% IP=11.0",
+        "careerNote": "career K%=18.0% (2024/2023/2023/2024/2024/2024/2024/2024/2024/2024) w=0.29",
+        "veloTrendMph": 0.2400000000000091,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9625,
+        "ttoNote": "TTO3=6.0BF(25%)→×0.963"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1.1226762002042896,
+        "raw_adj_factor": 1.1226762002042896,
+        "park_factor": 1.01,
+        "park_team": "BAL",
+        "weather_mult": 0.97,
+        "weather_note": "wind=16mph→×0.97 (net×0.970)",
+        "ump_factor": 1.04,
+        "ump_name": "Rob Drake",
+        "lambda_final": 7.304807142648036
+      },
+      "expected_nb_r": 20,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.9577490442936878,
+        "4": 0.8994787395898403,
+        "5": 0.8098422634652532,
+        "6": 0.6947368754448756,
+        "7": 0.5664287817796844,
+        "8": 0.43893206492277437,
+        "9": 0.3238142812502707,
+        "10": 0.22800058762051156,
+        "11": 0.1536652665611954,
+        "12": 0.09942854472799834
+      },
+      "production_model_input": {
+        "opp_team": "BAL",
+        "opp_k_pct": 0.24698876404494371,
+        "opp_kpct_source": "lineup_slot(9)",
+        "hand": "R",
+        "n_starts": 2,
+        "bf_source": "logBF×2",
+        "confidence": "low(career+savant+l5)",
+        "velo_trend_mph": 0.2400000000000091
+      },
+      "archetype": "l5_spike_regressed"
+    },
+    {
+      "fixture_id": "622663_2026-04-29",
+      "fixture_built_at": "2026-04-30T21:51:17.738Z",
+      "source": "decision_pipeline_plus_harvest_helper",
+      "production_row_id": 40072,
+      "production_match": false,
+      "mismatch_reason": "data_drift_likely",
+      "mismatch_fields": [
+        {
+          "field": "lambdaBase",
+          "production_logged_as": "lambda_base",
+          "expected": 6.115911327326968,
+          "actual": 6.1132949997945545,
+          "abs_diff": 0.002616327532413365
+        },
+        {
+          "field": "pK_blended",
+          "production_logged_as": "p_k_blended",
+          "expected": 0.2754915012309445,
+          "actual": 0.27537364863939434,
+          "abs_diff": 0.00011785259155017158
+        }
+      ],
+      "pk_ridge_weights_hash": "9b0794f8400d9e644a7a3541e79d5dfcbf85dc81e726a9e06b369483b87f2268",
+      "pk_ridge_weights_trained_at": "2026-04-25T18:41:07.918425",
+      "pitcher_id": "622663",
+      "pitcher_name": "Luis Severino",
+      "bet_date": "2026-04-29",
+      "game_id": "825015",
+      "game_label": "KC@ATH",
+      "pitcher_side": null,
+      "inputs": {
+        "log": [
+          {
+            "date": "2026-03-27",
+            "ip": 5,
+            "k": 3,
+            "bf": 20,
+            "pitches": 84,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-01",
+            "ip": 3.3333333333333335,
+            "k": 7,
+            "bf": 18,
+            "pitches": 91,
+            "bb": 5,
+            "started": true
+          },
+          {
+            "date": "2026-04-08",
+            "ip": 5,
+            "k": 7,
+            "bf": 22,
+            "pitches": 100,
+            "bb": 5,
+            "started": true
+          },
+          {
+            "date": "2026-04-13",
+            "ip": 6,
+            "k": 7,
+            "bf": 26,
+            "pitches": 94,
+            "bb": 3,
+            "started": true
+          },
+          {
+            "date": "2026-04-18",
+            "ip": 5.333333333333333,
+            "k": 3,
+            "bf": 25,
+            "pitches": 96,
+            "bb": 4,
+            "started": true
+          },
+          {
+            "date": "2026-04-24",
+            "ip": 6.666666666666667,
+            "k": 5,
+            "bf": 26,
+            "pitches": 98,
+            "bb": 1,
+            "started": true
+          },
+          {
+            "date": "2026-04-29",
+            "ip": 7,
+            "k": 8,
+            "bf": 25,
+            "pitches": 103,
+            "bb": 2,
+            "started": true
+          }
+        ],
+        "gameDate": "2026-04-29",
+        "savant": {
+          "player_id": "622663",
+          "k_pct": 0.247,
+          "swstr_pct": 0.24,
+          "fb_velo": 95.8,
+          "fb_spin": 2219,
+          "gb_pct": 0.423,
+          "bb_pct": 0.142,
+          "ip": 38.333333333333336,
+          "pa": 162,
+          "k_pct_vs_l": 0.247,
+          "k_pct_vs_r": 0.247,
+          "nb_r": null,
+          "manager_leash_factor": null
+        },
+        "career": {
+          "k_pct": 0.18947058823529417,
+          "k9": 7.321098329853486,
+          "avg_ip": null,
+          "seasons": [
+            2023,
+            2025,
+            2024,
+            2023,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025,
+            2024,
+            2025
+          ],
+          "weight": 6.799999999999999
+        },
+        "recentStartsData": [
+          {
+            "pitcher_id": "622663",
+            "game_date": "2026-04-18",
+            "ip": 5.333333333333333,
+            "bf": 25,
+            "ks": 3,
+            "pitches": 96,
+            "bb": 4
+          },
+          {
+            "pitcher_id": "622663",
+            "game_date": "2026-04-13",
+            "ip": 6,
+            "bf": 26,
+            "ks": 7,
+            "pitches": 94,
+            "bb": 3
+          },
+          {
+            "pitcher_id": "622663",
+            "game_date": "2026-04-08",
+            "ip": 5,
+            "bf": 22,
+            "ks": 7,
+            "pitches": 100,
+            "bb": 5
+          },
+          {
+            "pitcher_id": "622663",
+            "game_date": "2026-04-01",
+            "ip": 3.3333333333333335,
+            "bf": 18,
+            "ks": 7,
+            "pitches": 91,
+            "bb": 5
+          },
+          {
+            "pitcher_id": "622663",
+            "game_date": "2026-03-27",
+            "ip": 5,
+            "bf": 20,
+            "ks": 3,
+            "pitches": 84,
+            "bb": 3
+          }
+        ],
+        "careerAvgFbVelo": 95.32222222222222
+      },
+      "snapshot_taken_at": "2026-04-30T21:51:17.738Z",
+      "expected_inner": {
+        "lambdaBase": 6.1132949997945545,
+        "k9": 11.0039309996302,
+        "pK_blended": 0.27537364863939434,
+        "pK_formula": 0.23914628865914667,
+        "ml_pK": 0.2834165507554267,
+        "k9_l5": 9.151372912316857,
+        "k9_season": 9.394591304347825,
+        "k9_career": 7.571244705882355,
+        "w_career": 0.016666666666666653,
+        "w_season": 0.6,
+        "w_l5": 0.3833333333333334,
+        "expectedBF": 22.2,
+        "avgIp": 4.999999999999999,
+        "bfSource": "BF×5(93pc)",
+        "avgPitches": 93,
+        "leashFlag": false,
+        "nStarts": 5,
+        "confidence": "high(career+savant+l5)",
+        "earlyExitRate": 0,
+        "whiffFlag": null,
+        "savantNote": "K%=24.7% IP=38.3",
+        "careerNote": "career K%=18.9% (2023/2025/2024/2023/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025/2024/2025) w=0.02",
+        "veloTrendMph": 0.4777777777777743,
+        "veloAdj": 1,
+        "bbPenalty": 1,
+        "ttoPenalty": 0.9716216216216216,
+        "ttoNote": "TTO3=4.2BF(19%)→×0.972"
+      },
+      "expected_outer_chain_from_production": {
+        "split_adj": 1,
+        "opp_adj": 1.0331716036772214,
+        "raw_adj_factor": 1.0331716036772214,
+        "park_factor": 1.02,
+        "park_team": "ATH",
+        "weather_mult": 1,
+        "weather_note": "wind=7mph temp=64°F (neutral)",
+        "ump_factor": 1,
+        "ump_name": "John Libka",
+        "lambda_final": 6.4451616322821295
+      },
+      "expected_nb_r": 30,
+      "expected_nb_r_source": "archetype_kpct",
+      "expected_prob_at_least_by_strike": {
+        "3": 0.9392559134909096,
+        "4": 0.8593268552003599,
+        "5": 0.7427123491043117,
+        "6": 0.6024776708586863,
+        "7": 0.4578117789897731,
+        "8": 0.3262394561412596,
+        "9": 0.21862510001961433,
+        "10": 0.1382715199265967,
+        "11": 0.08285187094921809,
+        "12": 0.04721291200467448
+      },
+      "production_model_input": {
+        "opp_team": "KC",
+        "opp_k_pct": 0.22729775280898873,
+        "opp_kpct_source": "lineup_slot(9)",
+        "hand": "R",
+        "n_starts": 5,
+        "bf_source": "BF×5(93pc)",
+        "confidence": "high(career+savant+l5)",
+        "velo_trend_mph": 0.48125000000000284
+      },
+      "archetype": "l5_spike_regressed"
+    }
+  ]
+}

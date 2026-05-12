@@ -5,7 +5,9 @@ import { renderTicker } from './ticker.js'
 import {
   renderDaySummary, renderGameCards, loadDay, loadLiveBets,
   updateBestCaseCard, stopLivePolling, reapplyCardFilter,
+  loadPositions, updatePositionsPanelKs,
 } from './views/today.js'
+import { onFeedUpdate } from './views/pipeline.js'
 
 // ── Live state tracker (for transition notifications) ───────────────────────
 
@@ -55,6 +57,7 @@ export function connectSSE() {
           }
         }
         if (state.view === 'today') {
+          loadPositions(date)
           loadDay(date).then(() => {
             const newlyCovered = new Set()
             for (const p of shared.dailyPitchers) {
@@ -83,21 +86,25 @@ export function connectSSE() {
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
       }
       if (ev.type === 'morning_bet') {
-        if (state.view === 'today') loadDay(date)
+        if (state.view === 'today') { loadDay(date); loadPositions(date) }
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
       }
       if (ev.type === 'fill_update') {
-        if (state.view === 'today') loadDay(date)
+        if (state.view === 'today') { loadDay(date); loadPositions(date) }
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
         renderTicker()
       }
       if (ev.type === 'balance_update' || ev.type === 'pnl_update') {
         document.dispatchEvent(new CustomEvent('ks:refresh-bettors'))
       }
+      if (ev.type === 'feed_update') {
+        onFeedUpdate()
+      }
       if (ev.type === 'live_update' && ev.pitchers?.length) {
         if (ev.lastDataUpdate) _updateLastUpdated(ev.lastDataUpdate)
         _checkTransitions(ev.pitchers)
         if (state.view === 'today') {
+          updatePositionsPanelKs(ev.pitchers)
           // Update overlay before re-render so renderGameCards picks up fresh live data
           for (const p of ev.pitchers) {
             shared.liveOverlay[String(p.pitcher_id)] = {

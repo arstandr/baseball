@@ -10,6 +10,7 @@ import {
   STARTING_BANKROLL, _balanceCache, BALANCE_CACHE_MS, seedDailyPnlFromRest,
 } from '../shared.js'
 import { getLastFillEventAt } from '../sse.js'
+import { getPnlFromDailyEvents, computeCurrentStreak } from '../../lib/ksMetrics.js'
 
 const router = express.Router()
 
@@ -21,14 +22,13 @@ router.get('/ks/summary', wrap(async (req, res) => {
   const monthAgo  = new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10)
 
   const uf = userFilter(req)
-  const [totals, pending, bankrollRow] = await Promise.all([
+  const [totals, pending, recentBets, liveTotals] = await Promise.all([
     db.one(`
       SELECT
-        SUM(CASE WHEN bet_date = ?  AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl,
-        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS week_pnl,
-        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS month_pnl,
-        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS ytd_pnl,
-        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END)                   AS total_pnl,
+        SUM(CASE WHEN bet_date = ?  AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl_fallback,
+        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS week_pnl_fallback,
+        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS month_pnl_fallback,
+        SUM(CASE WHEN bet_date >= ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS ytd_pnl_fallback,
         SUM(CASE WHEN result = 'win'  AND live_bet = 0 THEN 1 ELSE 0 END)                   AS wins,
         SUM(CASE WHEN result = 'loss' AND live_bet = 0 THEN 1 ELSE 0 END)                   AS losses,
         SUM(CASE WHEN live_bet = 0 AND result IN ('win','loss') THEN 1 ELSE 0 END)           AS settled,
@@ -37,25 +37,35 @@ router.get('/ks/summary', wrap(async (req, res) => {
       FROM ks_bets WHERE live_bet = 0 AND paper = 0 ${uf.clause}
     `, [today, weekAgo, monthAgo, yearStart, ...uf.args]),
     db.one(`SELECT COUNT(*) AS n FROM ks_bets WHERE result IS NULL AND live_bet = 0 AND paper = 0 ${uf.clause}`, uf.args),
-    db.one(`SELECT SUM(COALESCE(pnl,0)) AS total FROM ks_bets WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 ${uf.clause}`, uf.args),
+    db.all(
+      `SELECT result FROM ks_bets WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 ORDER BY settled_at DESC, id DESC LIMIT 10`
+    ),
+    db.one(`
+      SELECT
+        SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS total_pnl,
+        SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN result IS NULL  THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN bet_date = ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl
+      FROM ks_bets WHERE live_bet = 0 AND paper = 0
+    `, [today]),
   ])
 
   const wins   = Number(totals?.wins   || 0)
   const losses = Number(totals?.losses || 0)
-  const total  = Number(bankrollRow?.total || 0)
 
-  const recentBets = await db.all(
-    `SELECT result FROM ks_bets WHERE result IN ('win','loss') AND live_bet = 0 AND paper = 0 ORDER BY settled_at DESC, id DESC LIMIT 10`
-  )
-  let streak = 0
-  for (const r of recentBets) {
-    if (r.result === 'win')       { if (streak >= 0) streak++; else break }
-    else if (r.result === 'loss') { if (streak <= 0) streak--; else break }
-    else break
-  }
+  const streak = computeCurrentStreak(recentBets.map(r => r.result))
   const last5  = recentBets.slice(0, 5)
   const last5W = last5.filter(r => r.result === 'win').length
   const last5L = last5.filter(r => r.result === 'loss').length
+
+  // Period P&L — prefer daily_pnl_events (Kalshi-confirmed), fall back to ks_bets
+  const dpnl = await getPnlFromDailyEvents(db, { userId: uf.userId, today, weekAgo, monthAgo, yearStart })
+  const useDailyEvents = dpnl.event_count > 0
+  const todayPnl  = useDailyEvents ? dpnl.today_pnl  : Number(totals?.today_pnl_fallback  || 0)
+  const weekPnl   = useDailyEvents ? dpnl.week_pnl   : Number(totals?.week_pnl_fallback   || 0)
+  const monthPnl  = useDailyEvents ? dpnl.month_pnl  : Number(totals?.month_pnl_fallback  || 0)
+  const ytdPnl    = useDailyEvents ? dpnl.ytd_pnl    : Number(totals?.ytd_pnl_fallback    || 0)
 
   let kalshiBalance = null, kalshiCash = null, kalshiExposure = null
   try {
@@ -78,24 +88,14 @@ router.get('/ks/summary', wrap(async (req, res) => {
     if (uRow?.starting_bankroll) startingBankroll = Number(uRow.starting_bankroll)
     if (uRow?.kalshi_pnl != null) kalshiPnl = Number(uRow.kalshi_pnl)
   }
-  // Use fills+settlements based P&L when available — always matches Kalshi balance
-  const allTimePnl = kalshiPnl != null ? roundTo(kalshiPnl, 2) : roundTo(Number(totals?.total_pnl || 0), 2)
-
-  const liveTotals = await db.one(`
-    SELECT
-      SUM(CASE WHEN result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS total_pnl,
-      SUM(CASE WHEN result = 'win'  THEN 1 ELSE 0 END) AS wins,
-      SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
-      SUM(CASE WHEN result IS NULL  THEN 1 ELSE 0 END) AS pending,
-      SUM(CASE WHEN bet_date = ? AND result IN ('win','loss') THEN COALESCE(pnl,0) ELSE 0 END) AS today_pnl
-    FROM ks_bets WHERE live_bet = 0 AND paper = 0
-  `, [today])
+  // All-time P&L: users.kalshi_pnl (fills+settlements) > ytd from daily_pnl_events > ks_bets fallback
+  const allTimePnl = kalshiPnl != null ? roundTo(kalshiPnl, 2) : roundTo(ytdPnl, 2)
 
   res.json({
-    today_pnl:       roundTo(Number(totals?.today_pnl  || 0), 2),
-    week_pnl:        roundTo(Number(totals?.week_pnl   || 0), 2),
-    month_pnl:       roundTo(Number(totals?.month_pnl  || 0), 2),
-    ytd_pnl:         roundTo(Number(totals?.ytd_pnl    || 0), 2),
+    today_pnl:       roundTo(todayPnl, 2),
+    week_pnl:        roundTo(weekPnl, 2),
+    month_pnl:       roundTo(monthPnl, 2),
+    ytd_pnl:         roundTo(ytdPnl, 2),
     total_pnl:       allTimePnl,
     wins, losses,
     win_rate:        wins + losses > 0 ? roundTo(wins / (wins + losses), 4) : 0,
@@ -103,7 +103,7 @@ router.get('/ks/summary', wrap(async (req, res) => {
     total_bets:      Number(totals?.total_bets || 0),
     pending:         Number(pending?.n || 0),
     avg_edge:        totals?.avg_edge != null ? roundTo(totals.avg_edge, 4) : 0,
-    bankroll:        kalshiBalance ?? roundTo(startingBankroll + total, 2),
+    bankroll:        kalshiBalance ?? roundTo(startingBankroll + allTimePnl, 2),
     kalshi_balance:  kalshiBalance,
     kalshi_cash:     kalshiCash     ?? null,
     kalshi_exposure: kalshiExposure ?? null,
@@ -123,7 +123,7 @@ router.get('/ks/bettors', wrap(async (req, res) => {
   const today   = todayISO()
   const bettors = await db.all(
     `SELECT id, name, starting_bankroll, daily_risk_pct, paper, paper_temp, kalshi_key_id, kalshi_private_key, kalshi_pnl
-     FROM users WHERE active_bettor = 1 AND id != 1 ORDER BY id ASC`
+     FROM users WHERE active_bettor = 1 AND is_system_admin = 0 ORDER BY id ASC`
   )
 
   const result = await Promise.all(bettors.map(async u => {
@@ -164,7 +164,7 @@ router.get('/ks/bettors', wrap(async (req, res) => {
     if (!existingPnl?.n && (creds.keyId || process.env.KALSHI_KEY_ID)) {
       await seedDailyPnlFromRest(u.id, creds).catch(() => {})
     }
-    const [pnlRow, bestCaseRow, snapshotRow] = await Promise.all([
+    const [pnlRow, bestCaseRow, snapshotRow, bdRow, ksBetsSettledRow, pendingLockedRow] = await Promise.all([
       db.one(
         `SELECT COALESCE(SUM(pnl_usd), 0) AS pnl FROM daily_pnl_events WHERE user_id = ? AND date = ?`,
         [u.id, today]
@@ -178,7 +178,7 @@ router.get('/ks/bettors', wrap(async (req, res) => {
             END
           ELSE
             CASE WHEN filled_contracts > 0 AND fill_price IS NOT NULL
-              THEN filled_contracts * MAX((fill_price/100.0)*0.93, (fill_price/100.0)-0.0175)
+              THEN filled_contracts * MAX((1.0-fill_price/100.0)*0.93, (1.0-fill_price/100.0)-0.0175)
               ELSE COALESCE(bet_size,0) * (1.0 - ((100.0-COALESCE(market_mid,50))/100.0 + COALESCE(spread,4)/200.0)) * 0.93
             END
           END
@@ -186,21 +186,87 @@ router.get('/ks/bettors', wrap(async (req, res) => {
         FROM ks_bets
         WHERE user_id = ? AND bet_date = ? AND paper = 0
           AND result IS NULL
-          AND (order_id IS NOT NULL OR filled_contracts > 0)
+          AND filled_contracts > 0
       `, [u.id, today]).catch(() => null),
       db.one(
         `SELECT balance_usd FROM balance_snapshots WHERE user_id = ? AND date = ?`,
         [u.id, today]
       ).catch(() => null),
+      db.one(`
+        SELECT
+          COALESCE(SUM(CASE WHEN live_bet=0
+            THEN CASE WHEN result IS NULL THEN COALESCE(capital_at_risk,0)
+                      ELSE COALESCE(bet_size * fill_price / 100.0, capital_at_risk, 0) END
+            ELSE 0 END), 0) AS pregame_used,
+          COALESCE(SUM(CASE WHEN live_bet=1
+            AND (bet_mode IS NULL OR bet_mode NOT IN ('pulled','crossed-yes','blowout','dead-path'))
+            THEN CASE WHEN result IS NULL THEN COALESCE(capital_at_risk,0)
+                      ELSE COALESCE(filled_contracts * fill_price / 100.0, capital_at_risk, 0) END
+            ELSE 0 END), 0) AS ingame_used,
+          COALESCE(SUM(CASE WHEN live_bet=1
+            AND bet_mode IN ('pulled','crossed-yes','blowout','dead-path')
+            THEN CASE WHEN result IS NULL THEN COALESCE(capital_at_risk,0)
+                      ELSE COALESCE(filled_contracts * fill_price / 100.0, capital_at_risk, 0) END
+            ELSE 0 END), 0) AS freemoney_used
+        FROM ks_bets WHERE user_id=? AND bet_date=? AND paper=0
+      `, [u.id, today]).catch(() => null),
+      db.one(
+        // Priority: Kalshi-confirmed pnl_usd from daily_pnl_events (exact settlement amount).
+        // Fallback: computed from fill data (fee paid at fill, so locked win = contracts × (1-fill)).
+        // Final fallback: stored pnl column (older bets without fill data).
+        `SELECT COALESCE(SUM(
+           COALESCE(
+             dpnl.pnl_usd,
+             CASE b.result
+               WHEN 'win'  THEN CASE WHEN b.filled_contracts > 0 AND b.fill_price > 0
+                                THEN b.filled_contracts * (1.0 - b.fill_price / 100.0)
+                                ELSE b.pnl END
+               WHEN 'loss' THEN CASE WHEN b.filled_contracts > 0 AND b.fill_price > 0
+                                THEN -b.filled_contracts * (b.fill_price / 100.0)
+                                ELSE b.pnl END
+               ELSE b.pnl
+             END
+           )
+         ), 0) AS pnl
+         FROM ks_bets b
+         LEFT JOIN daily_pnl_events dpnl
+           ON dpnl.ticker  = b.ticker
+          AND dpnl.user_id = b.user_id
+          AND dpnl.date    = b.bet_date
+         WHERE b.user_id = ? AND b.bet_date = ?
+           AND b.result IN ('win','loss')
+           AND b.paper = 0`,
+        [u.id, today]
+      ).catch(() => null),
+      db.one(
+        // Wins locked in our system but not yet settled/paid by Kalshi (no daily_pnl_events entry).
+        // projected_bank = kalshi_cash + this amount.
+        `SELECT COALESCE(SUM(
+           b.filled_contracts * (1.0 - b.fill_price / 100.0)
+         ), 0) AS pnl
+         FROM ks_bets b
+         LEFT JOIN daily_pnl_events dpnl
+           ON dpnl.ticker  = b.ticker
+          AND dpnl.user_id = b.user_id
+          AND dpnl.date    = b.bet_date
+         WHERE b.user_id = ? AND b.bet_date = ?
+           AND b.result = 'win'
+           AND b.paper = 0
+           AND b.filled_contracts > 0 AND b.fill_price > 0
+           AND dpnl.pnl_usd IS NULL`,
+        [u.id, today]
+      ).catch(() => null),
     ])
-    // Balance-snapshot delta is the most accurate today P&L — captures all cash flow
-    // including settlements for Kalshi markets that have no matching ks_bets row.
+    // Always use ks_bets settled P&L for today's intraday LOCKED display.
+    // The system marks bets win/loss in real-time; daily_pnl_events lags by hours and
+    // partially populates during the day, causing the display to drop mid-day when Kalshi
+    // settles only some bets. ks_bets is authoritative for the current-day intraday view.
     const snapshotBalance = snapshotRow?.balance_usd != null ? Number(snapshotRow.balance_usd) : null
-    const todayPnl = (kalshiBalance != null && snapshotBalance != null)
-      ? roundTo(kalshiBalance - snapshotBalance, 2)
-      : roundTo(Number(pnlRow?.pnl || 0), 2)
+    const todayPnl = roundTo(Number(ksBetsSettledRow?.pnl || 0), 2)
+    const pendingLockedPnl = roundTo(Number(pendingLockedRow?.pnl || 0), 2)
+    const projectedBank = kalshiCash != null ? roundTo(kalshiCash + pendingLockedPnl, 2) : null
     const openWinPotential = roundTo(Number(bestCaseRow?.open_win_potential || 0), 2)
-    const bestCase         = roundTo(todayPnl + openWinPotential, 2)
+    const bestCase         = openWinPotential
     const startBankroll = Number(u.starting_bankroll || 1000)
     // Use fills+settlements based P&L (stored by settlement sync) — includes bets placed outside the system
     const allTimePnl   = u.kalshi_pnl != null ? roundTo(u.kalshi_pnl, 2) : roundTo(Number(row?.total_pnl || 0), 2)
@@ -217,6 +283,7 @@ router.get('/ks/bettors', wrap(async (req, res) => {
       db_total_pnl:    roundTo(Number(row?.total_pnl    || 0), 2),
       total_wagered:   roundTo(Number(row?.total_wagered || 0), 2),
       today_pnl:       todayPnl,
+      projected_bank:  projectedBank,
       best_case:       bestCase,
       start_balance:   snapshotBalance ?? (kalshiBalance != null ? roundTo(kalshiBalance - todayPnl, 2) : null),
       today_wagered:   roundTo(Number(row?.today_wagered || 0), 2),
@@ -225,6 +292,11 @@ router.get('/ks/bettors', wrap(async (req, res) => {
       pending:         Number(row?.pending || 0),
       daily_risk_pct:  Number(u.daily_risk_pct || 0.3),
       paper:           u.paper === 1,
+      pregame_budget:  roundTo((kalshiBalance ?? startBankroll) * 0.70, 2),
+      pregame_used:    roundTo(Number(bdRow?.pregame_used   || 0), 2),
+      ingame_budget:   roundTo((kalshiBalance ?? startBankroll) * 0.20, 2),
+      ingame_used:     roundTo(Number(bdRow?.ingame_used    || 0), 2),
+      freemoney_used:  roundTo(Number(bdRow?.freemoney_used || 0), 2),
     }
   }))
 
@@ -232,7 +304,7 @@ router.get('/ks/bettors', wrap(async (req, res) => {
 }))
 
 router.post('/ks/reconcile', wrap(async (req, res) => {
-  const bettors = await db.all(`SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor=1 AND id != 1`)
+  const bettors = await db.all(`SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor=1 AND is_system_admin = 0`)
   const results = await Promise.all(bettors.map(async u => {
     if (!u.kalshi_key_id) return { id: u.id, name: u.name, skipped: true }
     const r = await forceSync(u).catch(e => ({ error: e.message }))
@@ -275,8 +347,7 @@ router.get('/ks/daily', wrap(async (req, res) => {
             bet_mode, capital_at_risk, live_ks_at_bet, live_ip_at_bet, live_inning
      FROM ks_bets
      WHERE bet_date = ? AND live_bet = 0
-       AND (order_id IS NOT NULL OR filled_contracts > 0 OR result IS NOT NULL)
-       AND (paper = 0 OR filled_contracts > 0)
+       AND filled_contracts > 0
        ${uf.clause}
      ORDER BY pitcher_name, strike ASC`,
     [date, ...uf.args],
@@ -377,9 +448,9 @@ router.get('/ks/daily', wrap(async (req, res) => {
   for (const [, grp] of pitcherMap) {
     let p_pnl = 0, p_wins = 0, p_losses = 0, p_pending = 0
     for (const b of grp.bets) {
-      if (b.result === 'win')       { p_wins++;   p_pnl += Number(b.pnl || 0) }
-      else if (b.result === 'loss') { p_losses++; p_pnl += Number(b.pnl || 0) }
-      else p_pending++
+      if (b.result === 'win')        { p_wins++;   p_pnl += Number(b.pnl || 0) }
+      else if (b.result === 'loss')  { p_losses++; p_pnl += Number(b.pnl || 0) }
+      else if (b.result !== 'void')  p_pending++
     }
     day_pnl     += p_pnl
     day_wins    += p_wins
@@ -1009,6 +1080,78 @@ router.get('/ks/testing', wrap(async (req, res) => {
   res.json({ calibration, lambda_accuracy, thresholds, model_notes })
 }))
 
+// ── Item 1: CLV (Closing Line Value) ─────────────────────────────────────────
+router.get('/ks/clv', wrap(async (req, res) => {
+  const uf = userFilter(req)
+  const [bets, summary] = await Promise.all([
+    db.all(
+      `SELECT bet_date, pitcher_name, strike, side, fill_price,
+              closing_line_cents, clv_cents, closing_line_captured_at, result, pnl
+       FROM ks_bets
+       WHERE clv_cents IS NOT NULL AND paper = 0 ${uf.clause}
+       ORDER BY bet_date DESC, pitcher_name ASC, strike ASC
+       LIMIT 200`,
+      uf.args,
+    ),
+    db.one(
+      `SELECT
+         COUNT(*) AS total_with_clv,
+         ROUND(AVG(clv_cents), 2) AS avg_clv,
+         SUM(CASE WHEN clv_cents > 0 THEN 1 ELSE 0 END) AS beats_close,
+         SUM(CASE WHEN clv_cents <= 0 THEN 1 ELSE 0 END) AS loses_close,
+         ROUND(AVG(CASE WHEN result='win' THEN clv_cents END), 2) AS avg_clv_wins,
+         ROUND(AVG(CASE WHEN result='loss' THEN clv_cents END), 2) AS avg_clv_losses
+       FROM ks_bets
+       WHERE clv_cents IS NOT NULL AND paper = 0 ${uf.clause}`,
+      uf.args,
+    ),
+  ])
+  res.json({
+    bets: bets.map(r => ({ ...r, clv_cents: r.clv_cents != null ? roundTo(r.clv_cents, 1) : null })),
+    summary: summary ?? {},
+  })
+}))
+
+// ── Item 3: P&L by bet source ─────────────────────────────────────────────────
+router.get('/ks/pnl-by-source', wrap(async (req, res) => {
+  const uf = userFilter(req)
+  const rows = await db.all(
+    `SELECT
+       CASE
+         WHEN live_bet = 0 THEN 'pre_game'
+         WHEN live_bet = 1 AND bet_mode IN ('pulled','blowout','dead-path','crossed-yes','pull-hedge') THEN 'structural'
+         WHEN live_bet = 1 AND bet_mode = 'high-conviction' THEN 'probabilistic'
+         ELSE 'live_other'
+       END AS source,
+       COUNT(*) AS bets,
+       SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
+       SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+       SUM(COALESCE(pnl, 0)) AS pnl,
+       SUM(COALESCE(capital_at_risk, bet_size, 0)) AS wagered,
+       AVG(CASE WHEN result IS NOT NULL THEN edge END) AS avg_edge
+     FROM ks_bets
+     WHERE result IN ('win','loss') AND paper = 0 ${uf.clause}
+     GROUP BY source
+     ORDER BY pnl DESC`,
+    uf.args,
+  )
+  res.json(rows.map(r => {
+    const wins    = Number(r.wins   || 0)
+    const losses  = Number(r.losses || 0)
+    const wagered = Number(r.wagered || 0)
+    const pnl     = Number(r.pnl    || 0)
+    return {
+      source:   r.source,
+      bets:     Number(r.bets || 0),
+      wins, losses,
+      win_rate: wins + losses > 0 ? roundTo(wins / (wins + losses), 4) : 0,
+      pnl:      roundTo(pnl, 2),
+      roi:      wagered > 0 ? roundTo(pnl / wagered, 4) : 0,
+      avg_edge: r.avg_edge != null ? roundTo(r.avg_edge, 4) : null,
+    }
+  }))
+}))
+
 router.post('/ks/auto-settle', wrap(async (req, res) => {
   const { user_id } = req.body || {}
   const today  = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
@@ -1040,7 +1183,7 @@ router.post('/ks/auto-settle', wrap(async (req, res) => {
         ? bet.bet_size * (1 - fillFrac) * (1 - KALSHI_FEE)
         : -bet.bet_size * fillFrac
       await db.run(
-        `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=?`,
+        `UPDATE ks_bets SET actual_ks=?, result=?, settled_at=?, pnl=? WHERE id=? AND result IS NULL`,
         [actualKs, won ? 'win' : 'loss', now, Math.round(pnl * 100) / 100, bet.id],
       )
       settled++
@@ -1050,6 +1193,506 @@ router.post('/ks/auto-settle', wrap(async (req, res) => {
   }
 
   res.json({ settled, checked: pending.length })
+}))
+
+// ── System Feed helpers ──────────────────────────────────────────────────────
+
+function _translateLiveLog(row) {
+  const { tag, msg = '', pitcher: p = '', strike, side: sd = '', edge_cents, pnl } = row
+  const s = strike ? `${strike}+` : ''
+  const isFM = msg.includes('[FREE MONEY]')
+
+  const contractsM = msg.match(/(\d+)c @/)
+  const priceM     = msg.match(/@ ([\d.]+)¢/)
+  const filledM    = msg.match(/filled[=](\d+)/)
+  const profitM    = msg.match(/profit≈\+\$([\d.]+)/)
+
+  const contracts = contractsM ? parseInt(contractsM[1]) : null
+  const price     = priceM     ? parseFloat(priceM[1])   : null
+  const filled    = filledM    ? parseInt(filledM[1])     : null
+  const profit    = profitM    ? parseFloat(profitM[1])   : (pnl != null ? Math.abs(pnl) : null)
+
+  if (tag === 'BET' && isFM) {
+    const qty     = filled ?? contracts ?? '?'
+    const costStr = (qty !== '?' && price) ? ` Risking $${(qty * price / 100).toFixed(2)}.` : ''
+    return {
+      category: 'free_money', badge: 'FREE MONEY',
+      headline: `${p || 'Pitcher'} pulled — free money on ${s} ${sd} contracts`,
+      detail: `${p} was removed from the game. The system immediately placed ${qty} ${sd} contracts at ${price != null ? price + '¢' : '?'} each. When a pitcher is pulled, NO-side strikeout bets become near-certain winners — the pitcher can't rack up more Ks.${costStr}${profit ? ' Expected profit: +$' + profit.toFixed(2) + '.' : ''}`,
+      pitcher: p, pnl: profit,
+    }
+  }
+
+  if (tag === 'BET') {
+    const isMaker = msg.includes('(ask')
+    const qty     = filled ?? contracts ?? '?'
+    const edgeStr = edge_cents != null ? ` (${edge_cents.toFixed(1)}¢ edge)` : ''
+    const riskAmt = (qty !== '?' && price) ? '$' + (qty * price / 100).toFixed(2) : null
+    const sideDesc = sd === 'YES' ? `hit ${s} strikeouts` : `stay under ${s} strikeouts`
+    return {
+      category: 'bet_placed', badge: isMaker ? 'BET · MAKER' : 'BET · TAKER',
+      headline: `${p || 'Pitcher'} — ${s} ${sd} live bet placed${edgeStr}`,
+      detail: `Live ${isMaker ? 'maker' : 'taker'} bet on ${p || 'this pitcher'} to ${sideDesc}. ${qty} contracts at ${price != null ? price + '¢' : '?'}.${riskAmt ? ' Risk: ' + riskAmt + '.' : ''}${profit ? ' Expected profit: +$' + profit.toFixed(2) + '.' : ''}`,
+      pitcher: p, pnl: profit,
+    }
+  }
+
+  if (tag === 'COVER') {
+    const ksM = msg.match(/at (\d+)K/)
+    const ks  = ksM ? ksM[1] : null
+    return {
+      category: 'cover', badge: 'COVERED ✓',
+      headline: `${p || 'Pitcher'} ${s} YES covered${ks ? ` — ${ks} strikeouts` : ''}`,
+      detail: `${p || 'The pitcher'} crossed the ${s} strikeout threshold${ks ? ` with ${ks} Ks` : ''}. This YES bet is locked in as a winner.${pnl != null ? ' P&L: +$' + Math.abs(pnl).toFixed(2) + '.' : ''}`,
+      pitcher: p, pnl,
+    }
+  }
+
+  if (tag === 'DEAD') {
+    const ksM = msg.match(/at (\d+)K/)
+    const ks  = ksM ? ksM[1] : null
+    return {
+      category: 'dead', badge: 'PATH DEAD',
+      headline: `${p || 'Pitcher'} ${s} YES can't be reached — bet lost`,
+      detail: `${p || 'The pitcher'} was pulled${ks ? ` after ${ks} strikeouts` : ''}, short of the ${s} threshold. This YES bet is a loss.${pnl != null ? ' P&L: $' + pnl.toFixed(2) + '.' : ''}`,
+      pitcher: p, pnl,
+    }
+  }
+
+  if (tag === 'NO_LOST') {
+    const ksM = msg.match(/at (\d+)K/)
+    const ks  = ksM ? ksM[1] : null
+    return {
+      category: 'loss', badge: 'NO BLOWN',
+      headline: `${p || 'Pitcher'} ${s} NO bet blown${ks ? ` — hit ${ks} Ks` : ''}`,
+      detail: `${p || 'The pitcher'} crossed the ${s} strikeout mark${ks ? ` (${ks} Ks)` : ''}, so the NO bet on this threshold lost.${pnl != null ? ' P&L: $' + pnl.toFixed(2) + '.' : ''}`,
+      pitcher: p, pnl,
+    }
+  }
+
+  if (tag === 'SETTLED') {
+    const wM = msg.match(/(\d+)W/), lM = msg.match(/(\d+)L/)
+    const wins = wM ? parseInt(wM[1]) : 0, losses = lM ? parseInt(lM[1]) : 0
+    const gameLabel = msg.split('  ')[0] || 'Game'
+    const pnlStr    = pnl != null ? ' · ' + (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2) : ''
+    return {
+      category: pnl != null ? (pnl >= 0 ? 'win' : 'loss') : 'info', badge: 'GAME SETTLED',
+      headline: `${gameLabel} settled — ${wins}W / ${losses}L${pnlStr}`,
+      detail: `In-game bets for ${gameLabel} are finalized. Result: ${wins} win${wins !== 1 ? 's' : ''}, ${losses} loss${losses !== 1 ? 'es' : ''}.${pnl != null ? ' Net game P&L: ' + (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2) + '.' : ''}`,
+      pnl,
+    }
+  }
+
+  if (tag === 'SCRATCH') {
+    return {
+      category: 'skip', badge: 'SCRATCHED',
+      headline: `${p || 'Pitcher'} scratched — never threw a pitch`,
+      detail: `${p || 'This pitcher'} was confirmed as a scratch. Any pre-game bets on this pitcher have been voided and will be refunded by Kalshi.`,
+      pitcher: p,
+    }
+  }
+
+  if (tag === 'SELL') {
+    const sellM = msg.match(/@ (\d+)¢/)
+    return {
+      category: 'info', badge: 'AUTO-CLOSE',
+      headline: `${p || 'Pitcher'} ${s} YES position sold to lock in gains`,
+      detail: `The system auto-sold the ${p} ${s}+ YES position${sellM ? ` at ${sellM[1]}¢` : ''} before game end to capture profit early.`,
+      pitcher: p,
+    }
+  }
+
+  if (tag === 'STARTUP') {
+    const modeM = msg.match(/Mode=(LIVE|PAPER)/), pM = msg.match(/pitchers=(\d+)/), gM = msg.match(/games=(\d+)/), eM = msg.match(/edge≥(\d+)¢/)
+    const mode = modeM ? modeM[1] : 'PAPER', pitchers = pM ? pM[1] : '?', games = gM ? gM[1] : '?', edge = eM ? eM[1] : '5'
+    return {
+      category: 'system', badge: mode === 'LIVE' ? '🔴 LIVE MODE' : '📄 PAPER',
+      headline: `In-game monitor started — watching ${pitchers} pitcher${pitchers !== '1' ? 's' : ''} across ${games} game${games !== '1' ? 's' : ''}`,
+      detail: `The live betting system came online in ${mode} mode. It will monitor K counts, pitch counts, and Kalshi market prices every 15–30 seconds and auto-bet when it finds an edge above ${edge}¢.`,
+    }
+  }
+
+  if (tag === 'PULLED') {
+    const modelM = msg.match(/model=([\d.]+)%/), midM = msg.match(/mid=(\d+)¢/), edgeM = msg.match(/edge=([\d.]+)¢/), ksM = msg.match(/(\d+)K /)
+    return {
+      category: 'pulled', badge: 'PULL SIGNAL',
+      headline: `${p || 'Pitcher'} ${s} ${sd} — pulled pitcher opportunity being evaluated`,
+      detail: `${p || 'A pitcher'} was detected as pulled${ksM ? ` (${ksM[1]} Ks so far)` : ''}. Evaluating free money on ${sd} side — model: ${modelM ? modelM[1] + '%' : '?'}, market mid: ${midM ? midM[1] + '¢' : '?'}, edge: ${edgeM ? edgeM[1] + '¢' : '?'}.`,
+      pitcher: p,
+    }
+  }
+
+  if (tag === 'EDGE') {
+    const modelM = msg.match(/model=([\d.]+)%/), midM = msg.match(/mid=(\d+)¢/), edgeM = msg.match(/edge=([\d.]+)¢/), ksM = msg.match(/(\d+)K /)
+    return {
+      category: 'edge_found', badge: 'LIVE EDGE',
+      headline: `${p || 'Pitcher'} ${s} ${sd} — live edge found (${edgeM ? edgeM[1] : edge_cents != null ? edge_cents.toFixed(1) : '?'}¢)`,
+      detail: `Live model detected an in-game edge for ${p} ${s} ${sd}. Model probability: ${modelM ? modelM[1] + '%' : '?'}, market mid: ${midM ? midM[1] + '¢' : '?'}.${ksM ? ` Current Ks: ${ksM[1]}.` : ''}`,
+      pitcher: p, edge_cents,
+    }
+  }
+
+  if (tag === 'RULE_CHANGE') {
+    const arrowM = msg.match(/(\d[\d.]*) → (\d[\d.]*)/)
+    const labelM = msg.match(/Rule updated: (.+?) \d/)
+    return {
+      category: 'system', badge: '⚙ RULE CHANGED',
+      headline: msg.replace(/^Rule updated: /, '').slice(0, 120),
+      detail: `The calibration engine automatically updated a betting rule based on shadow analysis of banned bets. ${arrowM ? `Changed from ${arrowM[1]} → ${arrowM[2]}.` : ''} This takes effect on the next monitoring cycle.`,
+    }
+  }
+
+  if (tag === 'RULE_CONFIRM') {
+    return {
+      category: 'system', badge: '✓ RULE CONFIRMED',
+      headline: msg.replace(/^Rule confirmed: /, '').slice(0, 120),
+      detail: `Shadow analysis confirmed this rule is performing as intended — no change needed.`,
+    }
+  }
+
+  if (tag === 'RULE_WATCH') {
+    return {
+      category: 'system', badge: '👁 RULE WATCH',
+      headline: msg.replace(/^Shadow analysis: /, 'Watching rule groups — ').slice(0, 120),
+      detail: `Insufficient data to make a rule change yet. Continuing to accumulate shadow bet outcomes for analysis.`,
+    }
+  }
+
+  if (tag === 'INFO') {
+    return {
+      category: 'system', badge: 'INFO',
+      headline: msg.slice(0, 120),
+      detail: '',
+    }
+  }
+
+  if (tag === 'RETRY') {
+    return {
+      category: 'info', badge: 'RETRY',
+      headline: `${p || 'Order'} ${s} ${sd} — order retried at more aggressive price`,
+      detail: msg.slice(0, 200),
+      pitcher: p,
+    }
+  }
+
+  if (tag === 'ERROR') {
+    return {
+      category: 'error', badge: 'ERROR',
+      headline: `System error${p ? ' — ' + p : ''}`,
+      detail: (msg || 'An error occurred in the live monitor.').slice(0, 300),
+      pitcher: p,
+    }
+  }
+
+  return { category: 'info', badge: tag, headline: (msg || `Event: ${tag}`).slice(0, 120), detail: '' }
+}
+
+function _translatePipeline(row) {
+  let pf = null, bets = null, edges = null, rules = null
+  try { pf    = row.preflight_json    ? JSON.parse(row.preflight_json)    : null } catch {}
+  try { bets  = row.bets_placed_json  ? JSON.parse(row.bets_placed_json)  : null } catch {}
+  try { edges = row.edges_json        ? JSON.parse(row.edges_json)        : null } catch {}
+  try { rules = row.rule_filters_json ? JSON.parse(row.rule_filters_json) : null } catch {}
+
+  const pitcher  = row.pitcher_name   || 'Pitcher'
+  const game     = row.game_label     || ''
+  const lambda   = row.lambda         != null ? row.lambda.toFixed(1)            : '?'
+  const conf     = row.confidence     || 'unknown'
+  const bestEdge = row.best_edge      != null ? (row.best_edge * 100).toFixed(1) + '¢' : null
+  const n_edges  = row.n_edges        || 0
+  const n_bets   = row.n_bets_logged  || 0
+  const n_mkts   = row.n_markets      || 0
+
+  if (n_bets > 0) {
+    const betsRows  = bets?.rows || []
+    const totalRisk = bets?.total_risk_usd != null ? '$' + bets.total_risk_usd.toFixed(2) : '?'
+    const boosted   = pf?.action === 'boost'
+    const betSummary = betsRows.slice(0, 3).map(b => {
+      const p = Math.round((b.fill ?? 0) * 100)
+      return `${b.strike}+ ${b.side}${p ? ' @ ' + p + '¢' : ''}`
+    }).join(', ')
+
+    let kellyDetail = ''
+    if (betsRows[0] && Array.isArray(edges)) {
+      const me = edges.find(e => e.strike === betsRows[0].strike && e.passed)
+      if (me) {
+        const mp = Math.round((me.model_prob || 0) * 100)
+        const kp = Math.round((me.mid || 0) * 100)
+        const ec = ((me.best_edge || 0) * 100).toFixed(1)
+        kellyDetail = ` Model gives ${mp}% probability vs market's ${kp}% — a ${ec}¢ edge. Quarter-Kelly sizing → ${totalRisk} total risk.`
+      }
+    }
+
+    return {
+      category: boosted ? 'boost' : 'bet_scheduled', badge: boosted ? 'PRE-GAME (BOOSTED)' : 'PRE-GAME BET',
+      headline: `${pitcher} — ${n_bets} pre-game bet${n_bets !== 1 ? 's' : ''} placed, total risk ${totalRisk}`,
+      detail: `Model predicts ${lambda} Ks for ${pitcher}${game ? ` (${game})` : ''} with ${conf} confidence. Placed bets: ${betSummary || n_bets + ' markets'}.${kellyDetail}${boosted && pf?.reason ? ' Boost reason: ' + pf.reason + '.' : ''}`,
+      ts: row.updated_at,
+    }
+  }
+
+  if (row.final_action === 'preflight_skip') {
+    const reason    = pf?.reason || row.skip_reason || 'news or risk flagged'
+    const headlines = (pf?.headlines || []).filter(h => h.signal !== 'neutral').slice(0, 1)
+    const newsText  = headlines.length ? ` Key headline: "${headlines[0].text.slice(0, 100)}"` : ''
+    return {
+      category: 'skip', badge: 'SKIPPED',
+      headline: `${pitcher} skipped — AI flagged a concern before betting`,
+      detail: `The pre-flight AI news check blocked this bet. Reason: ${reason}.${newsText} Had ${n_edges} edge${n_edges !== 1 ? 's' : ''} but no orders were placed.`,
+      ts: row.updated_at,
+    }
+  }
+
+  if (row.final_action === 'filtered_out') {
+    const rA = rules?.rule_a_drops?.length || 0
+    const rD = rules?.rule_d_drops?.length || 0
+    const names = []
+    if (rA) names.push(`Rule A (${rA} low-probability NO bet${rA !== 1 ? 's' : ''} removed)`)
+    if (rD) names.push(`Rule D (${rD} high-probability YES bet${rD !== 1 ? 's' : ''} removed)`)
+    const ruleText = names.length ? names.join('; ') : 'internal rule filter'
+    return {
+      category: 'filtered', badge: 'RULE FILTER',
+      headline: `${pitcher} — ${n_edges} edge${n_edges !== 1 ? 's' : ''} found but blocked by rules`,
+      detail: `Model found ${n_edges} edge${n_edges !== 1 ? 's' : ''} for ${pitcher}${game ? ` (${game})` : ''}, best at ${bestEdge || '?'}, but removed by: ${ruleText}. These rules prevent bets where the risk/reward is unfavorable even with an edge.`,
+      ts: row.updated_at,
+    }
+  }
+
+  if (row.final_action === 'no_edge') {
+    return {
+      category: 'no_edge', badge: 'NO EDGE',
+      headline: `${pitcher} — no profitable edge found across ${n_mkts} market${n_mkts !== 1 ? 's' : ''}`,
+      detail: `Evaluated ${n_mkts} market${n_mkts !== 1 ? 's' : ''} for ${pitcher}${game ? ` (${game})` : ''}. Model predicts ${lambda} Ks (${conf} confidence). Best edge found: ${bestEdge || 'none'} — need at least 5¢ to place a bet. The market is fairly priced today.`,
+      ts: row.updated_at,
+    }
+  }
+
+  if (row.final_action === 'no_markets') {
+    return {
+      category: 'no_edge', badge: 'NO MARKETS',
+      headline: `${pitcher} — no Kalshi strikeout contracts available yet`,
+      detail: `${pitcher}${game ? ` (${game})` : ''} was evaluated but Kalshi hasn't listed any contracts for this pitcher. Markets typically open 2–4 hours before first pitch.`,
+      ts: row.updated_at,
+    }
+  }
+
+  if (row.final_action === 'error') {
+    return {
+      category: 'error', badge: 'ERROR',
+      headline: `${pitcher} — pipeline error during evaluation`,
+      detail: `Something went wrong evaluating ${pitcher}. The system will retry automatically on the next scan cycle. Reason: ${row.skip_reason || 'unknown'}.`,
+      ts: row.updated_at,
+    }
+  }
+
+  return {
+    category: 'info', badge: 'EVALUATED',
+    headline: `${pitcher} — ${n_edges} edge${n_edges !== 1 ? 's' : ''} found (${row.final_action || 'processing'})`,
+    detail: `Model predicts ${lambda} Ks for ${pitcher}. Status: ${row.final_action || 'processing'}.`,
+    ts: row.updated_at,
+  }
+}
+
+// GET /ks/feed — real-time system event feed for Pipeline tab
+router.get('/ks/feed', wrap(async (req, res) => {
+  const date  = req.query.date || todayISO()
+  const limit = Math.min(parseInt(req.query.limit || '150', 10), 300)
+
+  const [liveRows, pipeRows] = await Promise.all([
+    db.all(
+      `SELECT id, ts, tag, msg, pitcher, strike, side, edge_cents, pnl
+       FROM live_log WHERE bet_date=? ORDER BY ts DESC LIMIT 120`,
+      [date],
+    ).catch(() => []),
+    db.all(
+      `SELECT pitcher_name, game_label, game_time, final_action,
+              n_markets, n_edges, n_bets_logged, best_edge, lambda, confidence,
+              skip_reason, preflight_json, bets_placed_json, rule_filters_json, edges_json,
+              updated_at, created_at
+       FROM decision_pipeline WHERE bet_date=? ORDER BY updated_at DESC`,
+      [date],
+    ).catch(() => []),
+  ])
+
+  const events = []
+
+  for (const row of liveRows) {
+    const ev = _translateLiveLog(row)
+    events.push({ id: `ll_${row.id}`, ts: row.ts, source: 'live', ...ev })
+  }
+
+  for (const row of pipeRows) {
+    const ev = _translatePipeline(row)
+    events.push({ id: `dp_${row.pitcher_name}_${(row.updated_at || '').replace(/\W/g, '')}`, ts: row.updated_at || row.created_at, source: 'pipeline', ...ev })
+  }
+
+  events.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''))
+
+  res.json({ date, events: events.slice(0, limit) })
+}))
+
+// Balance adjustments — record deposits/withdrawals so the balance-delta P&L
+// calculation doesn't mistake a mid-day deposit as a trading gain.
+router.post('/ks/balance-adjustment', wrap(async (req, res) => {
+  const { user_id, amount_usd, note } = req.body ?? {}
+  if (!user_id || amount_usd == null || isNaN(Number(amount_usd))) {
+    return res.status(400).json({ error: 'user_id and amount_usd required' })
+  }
+  await db.run(
+    `INSERT INTO manual_balance_adjustments (user_id, amount_usd, note, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [user_id, Number(amount_usd), note ?? null, new Date().toISOString()],
+  )
+  res.json({ ok: true })
+}))
+
+router.get('/ks/balance-adjustments', wrap(async (req, res) => {
+  const date = req.query.date || todayISO()
+  const rows = await db.all(
+    `SELECT id, user_id, amount_usd, note, created_at FROM manual_balance_adjustments
+     WHERE created_at >= ? AND created_at < ?
+     ORDER BY created_at DESC`,
+    [date + 'T00:00:00.000Z', date + 'T23:59:59.999Z'],
+  )
+  res.json({ date, adjustments: rows })
+}))
+
+// GET /ks/contra-test — status of the NO contra-test experiment.
+// See memory: project_baseball_contra_test_apr29.md  Decision date: 2026-05-20.
+router.get('/ks/contra-test', wrap(async (req, res) => {
+  const DECISION_DATE = '2026-05-20'
+  const summary = await db.one(`
+    SELECT COUNT(*) AS bets,
+           SUM(CASE WHEN result='win'  THEN 1 ELSE 0 END) AS wins,
+           SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses,
+           SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) AS pending,
+           ROUND(SUM(pnl), 2) AS total_pnl,
+           ROUND(SUM(capital_at_risk), 2) AS total_risk,
+           MIN(bet_date) AS started,
+           MAX(bet_date) AS latest
+    FROM ks_bets
+    WHERE bet_mode = 'contra-test' AND user_id = 2
+  `).catch(() => null)
+  const recent = await db.all(`
+    SELECT bet_date, pitcher_name, strike, fill_price, capital_at_risk,
+           actual_ks, result, pnl
+    FROM ks_bets
+    WHERE bet_mode = 'contra-test' AND user_id = 2
+    ORDER BY id DESC LIMIT 10
+  `).catch(() => [])
+  const today = todayISO()
+  const decisionMs = Date.parse(DECISION_DATE + 'T09:00:00-04:00')
+  const daysToDecision = Math.max(0, Math.ceil((decisionMs - Date.now()) / 86400000))
+  const totalRisk = Number(summary?.total_risk || 0)
+  const totalPnl  = Number(summary?.total_pnl  || 0)
+  const roi_pct   = totalRisk > 0 ? Math.round((totalPnl / totalRisk) * 1000) / 10 : null
+  res.json({
+    decision_date: DECISION_DATE,
+    days_to_decision: daysToDecision,
+    success_threshold_roi: 3.0,  // graduate if ≥3% over 50+ bets
+    bets:    Number(summary?.bets || 0),
+    wins:    Number(summary?.wins || 0),
+    losses:  Number(summary?.losses || 0),
+    pending: Number(summary?.pending || 0),
+    total_pnl: totalPnl,
+    total_risk: totalRisk,
+    roi_pct,
+    started: summary?.started ?? null,
+    latest:  summary?.latest  ?? null,
+    recent,
+    sufficient_sample: Number(summary?.bets || 0) >= 50,
+  })
+}))
+
+// GET /ks/fade-test — IDEAL fade model paper test status (started 2026-05-07)
+router.get('/ks/fade-test', wrap(async (req, res) => {
+  const TEST_START = '2026-05-07'
+  const STARTING_BANKROLL = 5000
+  // v3 filter: K=6 OR K>=10, with H-H (ipL5>=5) and H-I (confidence>0.3) requirements.
+  // Pre-May-11 fires that pass this filter retroactively count as v3 results.
+  const V3_FILTER = `
+    AND (b.strike = 6 OR b.strike >= 10)
+    AND (p.avg_innings_l5 IS NULL OR p.avg_innings_l5 >= 5.0)
+    AND (p.confidence IS NULL OR p.confidence > 0.3)
+  `
+  const summary = await db.one(`
+    SELECT
+      COUNT(*) AS fires,
+      SUM(CASE WHEN b.result='win'  THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN b.result='loss' THEN 1 ELSE 0 END) AS losses,
+      SUM(CASE WHEN b.result IS NULL OR b.result='pending' THEN 1 ELSE 0 END) AS pending,
+      ROUND(SUM(CASE WHEN b.result IN ('win','loss') THEN b.pnl ELSE 0 END), 2) AS total_pnl,
+      ROUND(SUM(CASE WHEN b.result IN ('win','loss') THEN b.filled_contracts * b.fill_price / 100.0 ELSE 0 END), 2) AS total_stake
+    FROM ks_bets b
+    LEFT JOIN pitcher_signals p ON p.pitcher_id = b.pitcher_id AND p.signal_date = b.bet_date
+    WHERE b.strategy_mode = 'pregame_fade_yes' AND b.bet_date >= ?
+    ${V3_FILTER}
+  `, [TEST_START]).catch(() => null)
+  const recent = await db.all(`
+    SELECT b.bet_date, b.pitcher_name, b.strike, b.fill_price, b.filled_contracts,
+           b.model_prob, b.edge, b.result, b.pnl, b.actual_ks
+    FROM ks_bets b
+    LEFT JOIN pitcher_signals p ON p.pitcher_id = b.pitcher_id AND p.signal_date = b.bet_date
+    WHERE b.strategy_mode = 'pregame_fade_yes' AND b.bet_date >= ?
+    ${V3_FILTER}
+    ORDER BY b.id DESC LIMIT 25
+  `, [TEST_START]).catch(() => [])
+  const dailyPnl = await db.all(`
+    SELECT b.bet_date,
+           COUNT(*) AS n,
+           SUM(CASE WHEN b.result='win' THEN 1 ELSE 0 END) AS w,
+           ROUND(SUM(CASE WHEN b.result IN ('win','loss') THEN b.pnl ELSE 0 END), 2) AS pnl
+    FROM ks_bets b
+    LEFT JOIN pitcher_signals p ON p.pitcher_id = b.pitcher_id AND p.signal_date = b.bet_date
+    WHERE b.strategy_mode='pregame_fade_yes' AND b.bet_date >= ?
+    ${V3_FILTER}
+    GROUP BY b.bet_date ORDER BY b.bet_date
+  `, [TEST_START]).catch(() => [])
+
+  const fires = Number(summary?.fires || 0)
+  const wins  = Number(summary?.wins  || 0)
+  const losses = Number(summary?.losses || 0)
+  const settled = wins + losses
+  const totalPnl = Number(summary?.total_pnl || 0)
+  const totalStake = Number(summary?.total_stake || 0)
+  const winPct = settled > 0 ? Math.round((wins / settled) * 1000) / 10 : null
+  const roi = totalStake > 0 ? Math.round((totalPnl / totalStake) * 1000) / 10 : null
+  const bankroll = STARTING_BANKROLL + totalPnl
+
+  // Compute peak/drawdown from running daily P&L
+  let peak = STARTING_BANKROLL, maxDD = 0, runningBank = STARTING_BANKROLL
+  for (const d of dailyPnl) {
+    runningBank += Number(d.pnl || 0)
+    if (runningBank > peak) peak = runningBank
+    const dd = (peak - runningBank) / peak
+    if (dd > maxDD) maxDD = dd
+  }
+
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+  const dayCount = Math.max(0, Math.floor((Date.parse(today) - Date.parse(TEST_START)) / 86400000) + 1)
+  const milestone = dayCount < 7 ? 'pre-Day-7' :
+                    dayCount < 14 ? 'Day-7→Day-14' :
+                    dayCount < 30 ? 'Day-14→Day-30' : 'Day-30+'
+
+  res.json({
+    test_start: TEST_START,
+    day_count: dayCount,
+    milestone,
+    starting_bankroll: STARTING_BANKROLL,
+    bankroll,
+    return_pct: Math.round((bankroll / STARTING_BANKROLL - 1) * 1000) / 10,
+    fires, wins, losses, pending: Number(summary?.pending || 0),
+    settled,
+    win_pct: winPct,
+    roi_pct: roi,
+    total_pnl: totalPnl,
+    total_stake: totalStake,
+    max_drawdown_pct: Math.round(maxDD * 1000) / 10,
+    daily: dailyPnl,
+    recent,
+    backtest_target_roi: 60,  // ~50% of +127% test backtest after deflation
+    milestone_days: { sanity: 7, decision: 14, confidence: 30 },
+  })
 }))
 
 export default router

@@ -23,6 +23,11 @@ import { notifyEdges, notifyDailyReport, getAllWebhooks } from '../../lib/discor
 import { parseArgs } from '../../lib/cli-args.js'
 import { recordPipelineStep } from '../../lib/pipelineLog.js'
 import { correlatedKellyDivide, opportunityDiscount } from '../../lib/kelly.js'
+import { getRules as getBettingRules } from '../../lib/bettingRules.js'
+import { getAvailablePool, addCommitted } from '../../lib/bankrollState.js'
+import { STRATEGY_MODES, validateStrategyMode } from '../../lib/strategyMode.js'
+import { checkAllCaps } from '../../lib/strategyCaps.js'
+import { acquireBetLock, confirmBetPlaced, releaseBetLock } from '../../lib/betLock.js'
 
 const MODE = process.argv[2] || 'report'
 
@@ -123,6 +128,22 @@ async function logEdges() {
     edgesJson = edgesJson.filter(e => e.pitcher_id && String(e.pitcher_id) === pid)
     if (!edgesJson.length) {
       console.log(`[ks-bets] No edges found for pitcher ${pid} — nothing to log`)
+      // Write a pipeline entry so the cleanup SQL correctly marks bet_schedule as 'skipped'
+      // instead of 'error'. Without this, missing K-prop data looks like a process crash.
+      const schedRow = await db.one(
+        `SELECT pitcher_name, game_id, game_label, game_time, pitcher_side FROM bet_schedule WHERE bet_date=? AND pitcher_id=?`,
+        [TODAY, pid],
+      ).catch(() => null)
+      if (schedRow) {
+        recordPipelineStep({
+          bet_date: TODAY, pitcher_id: pid, pitcher_name: schedRow.pitcher_name,
+          game_id: schedRow.game_id, game_label: schedRow.game_label,
+          pitcher_side: schedRow.pitcher_side, game_time: schedRow.game_time,
+          step: 'rule_filters',
+          payload: { inputs_count: 0, passed_count: 0, note: 'no K-prop edge data from strikeoutEdge' },
+          summary: { final_action: 'no_markets', skip_reason: 'no K-prop data', inputs_count: 0, passed_count: 0 },
+        }).catch(() => {})
+      }
       await db.close()
       return
     }
@@ -197,9 +218,42 @@ async function logEdges() {
   const hedgesRemoved = rawEdges.length - bestByKey.size
   if (hedgesRemoved > 0) console.log(`[ks-bets] Removed ${hedgesRemoved} hedged opposite-side bet(s)`)
 
-  // Cap YES bets per pitcher at 3 (sorted highest edge first) to prevent
-  // stacking losses on a single pitcher who underperforms.
-  const MAX_YES_PER_PITCHER = 3
+  // Read configurable thresholds from DB (10-min cached); fall back to hardcoded defaults
+  // Must be read BEFORE YES cap so max_yes_per_pitcher rule is available.
+  const _R = await getBettingRules().catch(() => ({}))
+  const yesPregameMinProb   = _R.yes_pregame_min_prob    ?? 0.35
+  const yesPregameMinProbHi = _R.yes_pregame_min_prob_hi ?? 0.65
+  const yesPregameMaxMid    = _R.yes_pregame_max_mid     ?? 35
+  const yesMaxStrikePg      = _R.yes_max_strike          ?? 6
+  const noMaxStrikePg       = _R.no_max_strike           ?? 6
+  const noMaxMidPg          = _R.no_max_market_mid       ?? 45
+  const minBetFloor         = _R.min_bet_floor           ?? 8
+  const MAX_YES_PER_PITCHER = _R.max_yes_per_pitcher     ?? 5
+  // Rules 1-6 (deployed 2026-05-04 from data-driven backtest)
+  const yesBlockK5          = (_R.yes_block_k5 ?? 0) >= 1                  // Rule 1: ban K5 YES
+  const coldYesBlock        = (_R.cold_yes_block ?? 0) >= 1                // Rule 3: skip YES on cold pitchers
+  const maxPctBankrollPerBet = Number(_R.max_pct_bankroll_per_bet ?? 0)    // Rule 4: per-bet bankroll cap
+  const highConfThreshold   = Number(_R.high_conf_threshold ?? 0.65)       // Rule 6: above this, apply size haircut
+  const highConfSizeHaircut = Number(_R.high_conf_size_haircut ?? 1)       // Rule 6 multiplier (1 = no haircut)
+  // Strategy B (cross-strike arb) — deployed 2026-05-06 after POC validated 78% win rate
+  const csEnabled              = (_R.cross_strike_enabled ?? 1) >= 1
+  const csMaxPctBankroll       = Number(_R.cross_strike_max_pct_bankroll ?? 0.03)  // tighter than 4% main cap
+  const csTailDollarCap        = Number(_R.cross_strike_tail_dollar_cap ?? 5)      // hard $ cap on tail bets (ask < 25¢)
+  const csTailAskThreshold     = Number(_R.cross_strike_tail_ask_threshold ?? 25)  // ask < this triggers tail cap
+
+  // Pitcher blocklist (Rule 5): pulled from pitcher_blocklist table at run time.
+  // 5-min cached in module scope to avoid hammering the DB.
+  let _pitcherBlocklist = new Set()
+  try {
+    const rows = await db.all(`SELECT pitcher_name FROM pitcher_blocklist`)
+    _pitcherBlocklist = new Set(rows.map(r => r.pitcher_name))
+    if (_pitcherBlocklist.size > 0) {
+      console.log(`[ks-bets] Pitcher blocklist active: ${[..._pitcherBlocklist].join(', ')}`)
+    }
+  } catch { /* missing table — skip */ }
+
+  // Cap YES bets per pitcher (sorted highest edge first) to prevent stacking losses.
+  // Correlated Kelly already handles correlation math; this is a hard ceiling.
   const yesCounts = {}
   const deduped = [...bestByKey.values()].sort((a, b) => b._edgeVal - a._edgeVal)
   const withFill = deduped.filter(e => {
@@ -210,24 +264,196 @@ async function logEdges() {
   const yesCapRemoved = deduped.length - withFill.length
   if (yesCapRemoved > 0) console.log(`[ks-bets] Capped ${yesCapRemoved} YES bet(s) (max ${MAX_YES_PER_PITCHER} per pitcher)`)
 
-  // ── Protection rules (A / D / E / F) ─────────────────────────────────────
+  // ── Protection rules (A / D / E / F / I / K + strike/mid caps) ───────────
   // Rule A: Ban NO bets where market_mid ≥ 65 AND model also thinks YES is favored (model_prob ≥ 0.50)
-  //         Both market and model agree YES is likely — no conviction to bet NO.
-  //         If model says NO wins outright (model_prob < 0.50), let it through regardless of market price.
-  // Rule D: Ban YES bets where model_prob < 0.25 (matches YES_MIN_PROB upstream filter in strikeoutEdge.js)
-  //         Exception: if edge ≥ 18¢, let it through — large edge overrides low-conviction
-  // Rule E: Ban NO bets where market_mid < 15 — market already near-certain NO, no edge to capture
-  // Rule F: Ban NO bets at strike ≤ 4 — Apr 2026: strike 3 NO 0% WR (-$53), strike 4 NO 27.8% WR (-$41)
-  // Rule C (strike=3 skip) removed — live data shows K≤3 bets have 47% ROI
-  const guardedEdges = withFill.filter(e => {
-    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false  // Rule A
-    if (e.side === 'YES' && e.model_prob < 0.25 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false  // Rule D (waived if edge ≥ 18¢)
-    if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false                            // Rule E
-    if (e.side === 'NO' && e.strike <= 4) return false                                         // Rule F
+  // Rule D: Ban YES bets where model_prob < 0.25 — Exception: edge ≥ 18¢ overrides
+  // Rule E: Ban NO bets where market_mid < 15 — near-certain NO, no edge
+  // Rule F: Ban NO bets at strike ≤ 4
+  // Rule I: NO 7+ requires all: YES mid ≤ 35¢, model_prob < 0.18, edge ≥ 20¢
+  // Rule K: Two-tier pre-game YES gate (replaces Rule J strike-only ban).
+  //         Tier 1: ban YES if model_prob < yes_pregame_min_prob (default 0.35) — too low-confidence.
+  //         Tier 2: ban YES if model_prob < yes_pregame_min_prob_hi (default 0.65) AND market_mid >
+  //                 yes_pregame_max_mid (default 35¢) — medium-confidence bets need cheap fills.
+  //         Allows high-strike YES when model is genuinely confident AND fill is cheap.
+  // Strike caps: yes_max_strike / no_max_strike ban bets above the configured threshold.
+  // NO mid cap:  no_max_market_mid bans NO when YES mid is too high (outcome too uncertain).
+  let guardedEdges = withFill.filter(e => {
+    // Cross-strike candidates (Strategy B) bypass most YES-side filters.
+    // Math-based, not model-based, so YES-side biases (K5/K7 ban, cold-pitcher
+    // block, model_prob thresholds) don't apply. Still respects pitcher_blocklist,
+    // min_bet_floor, and per-bet sizing caps (those are risk discipline, not
+    // strategy-specific). Cross-strike has its own filters added below.
+    if (e.strategy_mode === 'pregame_cross_strike') {
+      if (!csEnabled) return false
+      if (_pitcherBlocklist.has(e.pitcher)) return false
+      // All cross-strike-specific filters were already applied in
+      // lib/crossStrikeCandidates.js → filterCandidates(). Just pass through.
+      return true
+    }
+
+    // Rules 1-6 deployed 2026-05-04 (data-driven backtest, last 30 days)
+    if (_pitcherBlocklist.has(e.pitcher)) return false                                            // Rule 5: blocklist
+    if (e.side === 'YES' && yesBlockK5 && e.strike === 5) return false                            // Rule 1: ban K5 YES
+    if (e.side === 'YES' && coldYesBlock                                                          // Rule 3: cold YES block
+        && Number(e.k9_career ?? 0) > 0
+        && Number(e.k9_l5 ?? 0) < Number(e.k9_career ?? 0)) return false
+    // Pre-existing rules
+    if (e.side === 'YES' && yesMaxStrikePg > 0 && e.strike > yesMaxStrikePg) return false       // yes_max_strike
+    if (e.side === 'NO'  && noMaxStrikePg  > 0 && e.strike > noMaxStrikePg)  return false       // no_max_strike
+    if (e.side === 'NO'  && noMaxMidPg     > 0 && (e.market_mid ?? 50) > noMaxMidPg) return false // no_max_mid
+    if (e.side === 'NO'  && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false   // Rule A
+    if (e.side === 'YES' && e.model_prob < 0.25 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false  // Rule D
+    if (e.side === 'NO'  && (e.market_mid ?? 50) < 15) return false                             // Rule E
+    if (e.side === 'NO'  && e.strike <= 4) return false                                          // Rule F
+    if (e.side === 'YES' && (                                                                    // Rule K
+      e.model_prob < yesPregameMinProb ||
+      (e.model_prob < yesPregameMinProbHi && (e.market_mid ?? 50) > yesPregameMaxMid)
+    )) return false
+    if (e.side === 'NO'  && e.strike === 7 && (                                                  // Rule I
+      (e.market_mid ?? 50) > 35 ||
+      e.model_prob >= 0.18 ||
+      (e._edgeVal ?? e.edge ?? 0) < 0.20
+    )) return false
     return true
   })
   const guardsRemoved = withFill.length - guardedEdges.length
-  if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/D/E/F: removed ${guardsRemoved} bet(s)`)
+  if (guardsRemoved > 0) console.log(`[ks-bets] Protection rules A/D/E/F/G/H/I/K: removed ${guardsRemoved} bet(s)`)
+
+  // ── Same-pitcher conflict guard ─────────────────────────────────────────
+  // Block direct contradictions: YES at strike S and NO at strike ≤ S on the
+  // same pitcher means we're betting against ourselves. Different strategies
+  // can fire on the same pitcher at non-overlapping strikes (legitimate
+  // "exactly K=N" positions), but YES K7 + NO K6 is impossible to both win.
+  // Drop the smaller-edge side when conflicts detected.
+  const beforeConflict = guardedEdges.length
+  const byPitcher = new Map()
+  for (const e of guardedEdges) {
+    if (!byPitcher.has(e.pitcher)) byPitcher.set(e.pitcher, [])
+    byPitcher.get(e.pitcher).push(e)
+  }
+  const dropSet = new Set()
+  for (const [pitcher, edges] of byPitcher) {
+    const yesEdges = edges.filter(e => e.side === 'YES')
+    const noEdges  = edges.filter(e => e.side === 'NO')
+    if (yesEdges.length === 0 || noEdges.length === 0) continue
+    for (const yes of yesEdges) {
+      for (const no of noEdges) {
+        if (Number(no.strike) <= Number(yes.strike)) {
+          // Direct contradiction. Keep the higher-edge side, drop the other.
+          const yesEdge = Math.abs(Number(yes._edgeVal ?? yes.edge ?? 0))
+          const noEdge  = Math.abs(Number(no._edgeVal ?? no.edge ?? 0))
+          const drop = yesEdge >= noEdge ? no : yes
+          dropSet.add(drop)
+          console.warn(`[conflict] ${pitcher}: YES K${yes.strike} (${yesEdge.toFixed(3)}) + NO K${no.strike} (${noEdge.toFixed(3)}) → dropping ${drop.side} K${drop.strike}`)
+        }
+      }
+    }
+  }
+  if (dropSet.size > 0) {
+    guardedEdges = guardedEdges.filter(e => !dropSet.has(e))
+    console.log(`[ks-bets] Same-pitcher conflict guard: removed ${beforeConflict - guardedEdges.length} bet(s)`)
+  }
+
+  // ── INVERSION (Apr 25-May 2 empirical: model is reliably wrong on YES side) ───
+  // When INVERT_YES_TO_NO=true, every YES edge that passed the guards becomes a
+  // NO bet at the same strike+price. The K model is treated as a candidate
+  // detector; the inversion layer decides direction; Kelly handles only sizing.
+  //
+  // ARCHITECTURE: Kelly is side-agnostic — given (modelProb, marketPrice, side)
+  // it computes probWin (= modelProb for YES, 1-modelProb for NO) and the
+  // fee-adjusted edge. If the calibrated probability we pass doesn't justify
+  // betting, Kelly correctly returns betSize=0 — that's the system working as
+  // intended. We do NOT hack the calibration to force bets.
+  //
+  // CALIBRATION: PAV-monotonized empirical win rates from the 7-day backtest.
+  // For each model-confidence bucket, we compute the actual fraction of YES
+  // wins and pass that to Kelly. Buckets where the model was most anti-
+  // calibrated (low and mid confidence) generate the strongest NO edges.
+  const INVERT_YES_TO_NO = String(process.env.INVERT_YES_TO_NO ?? '').toLowerCase() === 'true'
+  function _calibrateYesProb(p) {
+    // RECALIBRATED 2026-05-04 against new engine's actual selections (Rules 1-6):
+    // After applying K5/K7+ ban + cold-pitcher block + pitcher blocklist + sizing
+    // caps, the surviving bets show a different calibration profile than the
+    // original 305-bet population. Smaller sample (109 bets) but it's the
+    // population the live engine will actually create going forward.
+    //   model_prob bucket  → actual YES win (n)
+    //   <0.42              → 53.3%   (n=15)  — outperforms claim by +17pp
+    //   0.42-0.52          → 33.3%   (n=12)
+    //   0.52-0.65          → 38.5%   (n=39)
+    //   >=0.65             → 58.1%   (n=43)
+    if (p < 0.42) return 0.53
+    if (p < 0.52) return 0.33
+    if (p < 0.65) return 0.39
+    return 0.58
+  }
+  // Conditional inversion filters (May 2 realistic-pricing audit):
+  //   strike ∈ [5, 7]               — K5/K6/K7 had ROI 18-50%; skip K3-4 thin, K8+ weak
+  //   (k9_l5 - careerK9) ≥ 0.5      — RELATIVE hotness: pitcher running ≥0.5 K9 above his
+  //                                    own career baseline. Replaces absolute 7-11 range
+  //                                    so an ace's "cold" 8 K9 doesn't trip the filter.
+  //   model_prob ≥ 0.50             — skip low-confidence (mid+ is where bias bites)
+  // All four are env-tunable; defaults match the audit.
+  const INVERT_STRIKE_MIN = Number(process.env.INVERT_STRIKE_MIN ?? 5)
+  const INVERT_STRIKE_MAX = Number(process.env.INVERT_STRIKE_MAX ?? 7)
+  const INVERT_L5_GAP_MIN = Number(process.env.INVERT_L5_GAP_MIN ?? 0.5)
+  const INVERT_MODELP_MIN = Number(process.env.INVERT_MODELP_MIN ?? 0.50)
+
+  function _shouldInvert(e) {
+    if (e.side !== 'YES') return false
+    const k = Number(e.strike)
+    if (k < INVERT_STRIKE_MIN || k > INVERT_STRIKE_MAX) return false
+    const l5 = Number(e.k9_l5 ?? 0)
+    const career = Number(e.k9_career ?? 0)
+    if (career > 0 && (l5 - career) < INVERT_L5_GAP_MIN) return false  // not relatively hot
+    if (Number(e.model_prob) < INVERT_MODELP_MIN) return false
+    return true
+  }
+
+  let invertedEdges = guardedEdges
+  if (INVERT_YES_TO_NO) {
+    invertedEdges = guardedEdges.map(e => {
+      if (!_shouldInvert(e)) return e
+      const yesMid = Number(e.market_mid ?? 50)
+      const origYesProb = Number(e.model_prob)
+      const calYesProb = _calibrateYesProb(origYesProb)
+      // NO bet edge (YES-convention): market_yes_price - calibrated_yes_prob.
+      const noEdge = (yesMid / 100) - calYesProb
+      return {
+        ...e,
+        side: 'NO',
+        model_prob: calYesProb,        // YES-frame; Kelly does probWin=1-modelProb
+        raw_model_prob: calYesProb,
+        // market_mid unchanged (still YES price) — Kelly handles the conversion
+        edge: noEdge,
+        edge_yes: undefined,
+        edge_no: noEdge,
+        best_edge: noEdge,
+        _edgeVal: noEdge,
+        _inverted: true,
+        _original_yes_prob: origYesProb,
+      }
+    })
+    const flipped = invertedEdges.filter(e => e._inverted).length
+    const skipped = guardedEdges.filter(e => e.side === 'YES' && !invertedEdges.find(x => x === e)?._inverted).length
+    console.log(`[ks-bets] INVERT_YES_TO_NO active (conditional: K${INVERT_STRIKE_MIN}-${INVERT_STRIKE_MAX}, l5_gap≥${INVERT_L5_GAP_MIN}, model_prob≥${INVERT_MODELP_MIN}) — flipped ${flipped} YES → NO, kept ${skipped} YES as-is`)
+    guardedEdges = invertedEdges
+  }
+
+  // ── Shadow audit: record what would happen at gap thresholds 0.0/0.2/0.5
+  // for every YES candidate, plus calibrated-YES selection at edge thresholds
+  // 0.0/0.03/0.05. Analytical-only, no orders placed. See lib/shadowInversion.js.
+  try {
+    const { recordShadowCandidates, recordCalibratedYesCandidates } = await import('../../lib/shadowInversion.js')
+    const shadowCount = await recordShadowCandidates({ betDate: TODAY, candidates: guardedEdges })
+    const calCount    = await recordCalibratedYesCandidates({ betDate: TODAY, candidates: guardedEdges })
+    if (shadowCount > 0 || calCount > 0) {
+      console.log(`[shadow] recorded inversion=${shadowCount} cal_yes=${calCount} row(s) for ${TODAY}`)
+    }
+  } catch (err) {
+    console.warn(`[shadow] record failed: ${err.message}`)
+  }
+
+
 
   // ── Pipeline: emit rule_filters per pitcher ─────────────────────────────
   // Group edges by pitcher to record one pipeline row per pitcher
@@ -243,6 +469,10 @@ async function logEdges() {
         dropped_yes_cap: [],
         dropped_rule_a: [],
         dropped_rule_d: [],
+        dropped_rule_g: [],
+        dropped_rule_h: [],
+        dropped_rule_i: [],
+        dropped_rule_k: [],
         total_input: 0,
       })
     }
@@ -265,8 +495,17 @@ async function logEdges() {
     if (!guardedEdges.includes(e)) {
       const entry = _ruleFiltersByPitcher.get(String(e.pitcher_id || e.pitcher))
       if (entry) {
-        const reason = e.side === 'NO' ? 'rule_a' : 'rule_d'
+        let reason = 'rule_d'
+        if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) reason = 'rule_a'
+        else if (e.side === 'YES' && (
+          e.model_prob < yesPregameMinProb ||
+          (e.model_prob < yesPregameMinProbHi && (e.market_mid ?? 50) > yesPregameMaxMid)
+        )) reason = 'rule_k'
+        else if (e.side === 'NO' && e.strike === 7) reason = 'rule_i'
+        else if (e.side === 'NO') reason = 'rule_a'
         if (reason === 'rule_a') entry.dropped_rule_a.push({ strike: e.strike, side: e.side })
+        else if (reason === 'rule_k') entry.dropped_rule_k.push({ strike: e.strike, side: e.side })
+        else if (reason === 'rule_i') entry.dropped_rule_i.push({ strike: e.strike, side: e.side })
         else entry.dropped_rule_d.push({ strike: e.strike, side: e.side })
       }
     }
@@ -281,12 +520,19 @@ async function logEdges() {
         yes_per_pitcher_cap: { dropped: entry.dropped_yes_cap },
         rule_a_no_ban: { dropped: entry.dropped_rule_a },
         rule_d_yes_low_prob: { dropped: entry.dropped_rule_d },
+        rule_g_yes_high_strike: { dropped: entry.dropped_rule_g },
+        rule_h_yes7_edge: { dropped: entry.dropped_rule_h },
+        rule_i_no7_conditions: { dropped: entry.dropped_rule_i },
+        rule_k_pregame: { dropped: entry.dropped_rule_k },
         inputs_count: entry.total_input,
         passed_count: allPassedPitcher.length,
       },
       summary: noPassedAtAll ? {
         final_action: 'filtered_out',
-        skip_reason: entry.dropped_rule_a.length > 0 ? 'rule_a' : entry.dropped_rule_d.length > 0 ? 'rule_d' : 'yes_cap',
+        skip_reason: entry.dropped_rule_a.length > 0 ? 'rule_a'
+          : entry.dropped_rule_k.length > 0 ? 'rule_k'
+          : entry.dropped_rule_i.length > 0 ? 'rule_i'
+          : entry.dropped_rule_d.length > 0 ? 'rule_d' : 'yes_cap',
       } : {},
     }).catch(() => {})
   }
@@ -329,36 +575,59 @@ async function logEdges() {
   }
 
   // ── Log bets for each bettor (staggered to avoid market impact) ───────────
-  const STAGGER_MS = 45_000   // 45s between users on live orders
+  // Apr 28 — reduced from 45s to 2s. Original 45s caused the second user to consistently
+  // get 0 fills on thin Kalshi books because the first user swept the displayed liquidity
+  // and the orderbook had time to move/disappear before user 2's order hit. 2s is enough
+  // for Kalshi's match engine to settle user 1's IOC + WS fill confirmation without
+  // letting the orderbook materially shift.
+  const STAGGER_MS = 2_000
   let logged = 0
   const _webhooksWithBets = []  // only bettors who actually logged bets get Discord
 
   const _betsPlacedByPitcher = new Map()
 
-  for (let bi = 0; bi < bettors.length; bi++) {
-    const bettor = bettors[bi]
-    if (bi > 0) {
-      console.log(`[ks-bets] Staggering ${STAGGER_MS / 1000}s before next user…`)
-      await new Promise(r => setTimeout(r, STAGGER_MS))
-    }
+  // Apr 28 — parallel placement (Option B). Each user's order placement runs concurrently
+  // via Promise.all. Both users hit Kalshi at roughly the same instant; matching engine
+  // splits available depth fairly. Eliminates the "first user sweeps liquidity, second
+  // user gets 0" pattern that was systematically screwing Adam-Live across multiple days.
+  await Promise.all(bettors.map(async (bettor, bi) => {
+   try {
 
     const pregameRiskPct = bettor.pregame_risk_pct ?? 0.60
     const isLive  = bettor.paper === 0
+    // Paper-mode short-circuit at the lib/kalshi.js level: when set, every user
+    // (paper OR live) routes through placeOrder, but the wrapper returns
+    // synthetic fills instead of touching real Kalshi. Lets us shadow-test
+    // paper users that would otherwise never reach the placement code.
+    const _pmFlag = String(process.env.KALSHI_PAPER_MODE ?? '').toLowerCase()
+    const isPaperMode = _pmFlag === 'true' || _pmFlag === '1' || _pmFlag === 'yes'
+    // creds: only meaningful for live users with real keys. Default {} so the
+    // paper-user path can still call placeOrder/getOrderbook (which work
+    // anonymously or short-circuit to synthetic in paper mode).
+    const creds = (bettor.kalshi_key_id)
+      ? { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
+      : {}
 
-    // For live accounts, pull actual Kalshi balance as the bankroll source of truth.
-    // This guarantees we never size bets beyond what's actually in the account.
+    // For live accounts, Kelly base = Kalshi balance minus capital already committed today by THIS user.
+    // Per-user calculation from ks_bets — avoids shared bankroll_state contamination between users.
     let bankroll
     if (isLive) {
       try {
-        const creds = bettor.kalshi_key_id
-          ? { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
-          : {}
         const kb = await getKalshiBalance(creds)
-        bankroll = kb.balance_usd
-        console.log(`[ks-bets] ${bettor.name} · Kalshi portfolio: $${bankroll.toFixed(2)} (cash $${kb.cash_usd?.toFixed(2)} + exposure $${kb.exposure_usd?.toFixed(2)})`)
+        const kalshiBalance = kb.balance_usd
+        const committedRow = await db.one(
+          `SELECT COALESCE(SUM(capital_at_risk), 0) as c FROM ks_bets
+           WHERE bet_date=? AND user_id=? AND result IS NULL AND paper=0
+             AND order_status NOT IN ('cancelled','void')`,
+          [TODAY, bettor.id],
+        ).catch(() => ({ c: 0 }))
+        const alreadyCommitted = committedRow?.c ?? 0
+        const availPool = Math.max(0, kalshiBalance - alreadyCommitted)
+        bankroll = availPool > 0 ? availPool : kalshiBalance
+        console.log(`[ks-bets] ${bettor.name} · Kalshi: $${kalshiBalance.toFixed(2)} | committed: $${alreadyCommitted.toFixed(2)} | available: $${availPool.toFixed(2)} → Kelly base: $${bankroll.toFixed(2)}`)
       } catch (err) {
         console.error(`[ks-bets] ${bettor.name} · Kalshi balance fetch failed: ${err.message} — skipping bets`)
-        continue
+        return  // Apr 28: was 'continue' for the for-loop; now 'return' exits this map callback only
       }
     } else {
       // Paper/shadow accounts use computed bankroll (no real money involved)
@@ -382,24 +651,18 @@ async function logEdges() {
 
     // ── Kelly-based sizing ────────────────────────────────────────────────────
     // Opportunity discount: reduces effective bankroll when many games remain,
-    // preserving capital for later opportunities that may have stronger edge.
-    const pendingRow = await db.one(
-      `SELECT COUNT(*) as cnt FROM bet_schedule bs
-       JOIN games g ON g.id = bs.game_id
-       WHERE bs.bet_date=? AND bs.status='pending' AND g.game_time > datetime('now')`,
-      [TODAY],
-    ).catch(() => ({ cnt: 0 }))
-    const pendingCount = Number(pendingRow?.cnt || 0)
-    const etHour = Number(new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }))
-    const unknownBuffer = etHour < 12 ? 2 : etHour < 15 ? 1 : 0
-    const totalExpected = Math.max(1, pendingCount + unknownBuffer)
+    // Opportunity discount: use count of pitchers with actual edge in this run.
+    // Raw pending-game count over-discounts on large slates where most games have no edge.
+    // The portfolio cap is the primary total-exposure constraint; discount is a secondary lever.
+    const edgePitcherCount  = new Set(guardedEdges.map(e => String(e.pitcher_id || e.pitcher))).size
+    const effectiveCount    = Math.max(1, edgePitcherCount)
 
     const pregamePool       = bankroll * pregameRiskPct
-    const discount          = opportunityDiscount(totalExpected)
+    const discount          = opportunityDiscount(effectiveCount)
     const effectiveBankroll = pregamePool * discount
     const perPitcherCap     = pregamePool * 0.10
 
-    console.log(`[ks-bets] ${bettor.name} · pre-game pool $${pregamePool.toFixed(0)} · discount ${discount.toFixed(2)} (${totalExpected} expected games) · effective $${effectiveBankroll.toFixed(0)}`)
+    console.log(`[ks-bets] ${bettor.name} · pre-game pool $${pregamePool.toFixed(0)} · discount ${discount.toFixed(2)} (${effectiveCount} edge pitchers) · effective $${effectiveBankroll.toFixed(0)}`)
 
     // Group edges by pitcher and apply correlated Kelly per group
     const edgesByPitcher = new Map()
@@ -409,7 +672,7 @@ async function logEdges() {
       edgesByPitcher.get(key).push(e)
     }
 
-    const sized = []
+    let sized = []
     for (const [, pitcherEdges] of edgesByPitcher) {
       const kellyInputs = pitcherEdges.map(e => ({
         modelProb:   e.model_prob,
@@ -426,13 +689,52 @@ async function logEdges() {
         const k = kellyResults[i]
         if (!k || k.betSize <= 0) continue
         const corrDisc   = getCorrelationDiscount(e.game)
-        const betDollars = k.betSize * capScale * corrDisc
+        let betDollars = k.betSize * capScale * corrDisc
+
+        // Rule 6: high-confidence size haircut — calibration shows model_prob ≥ 0.65
+        // bucket actual win rate is 48% (claim 75%, 27pp gap). Halve the size to
+        // mitigate. Applies only to YES (the calibration is YES-frame).
+        if (e.side === 'YES' && Number(e.model_prob ?? 0) >= highConfThreshold && highConfSizeHaircut < 1) {
+          betDollars *= highConfSizeHaircut
+        }
+
+        // Rule 4: per-bet bankroll cap — D9-D10 sizing decile lost money.
+        // Cap each bet at maxPctBankrollPerBet * RAW bankroll (Kalshi balance,
+        // NOT effective bankroll which is post-discount). Using effective
+        // would over-cap on busy days when discount is small. Default 4%:
+        // Adam-Live $260 → $10 max, Isaiah $513 → $20 max.
+        if (maxPctBankrollPerBet > 0 && bankroll > 0) {
+          const perBetCap = maxPctBankrollPerBet * bankroll
+          if (betDollars > perBetCap) betDollars = perBetCap
+        }
+
+        // Strategy B (cross-strike) — tighter cap to limit per-fire variance.
+        // Math-based strategy with asymmetric payouts: tail bets at <25¢ ask
+        // get hard $ cap to prevent one bad outcome wiping multiple wins.
+        if (e.strategy_mode === 'pregame_cross_strike') {
+          if (csMaxPctBankroll > 0 && bankroll > 0) {
+            const csCap = csMaxPctBankroll * bankroll
+            if (betDollars > csCap) betDollars = csCap
+          }
+          // Tail bet hard cap (ask < threshold cents)
+          const askCents = e._ask_cents ?? Math.round(e._fill * 100)
+          if (askCents < csTailAskThreshold && betDollars > csTailDollarCap) {
+            betDollars = csTailDollarCap
+          }
+        }
+
         if (betDollars < 0.01) continue
         const face = Math.max(1, Math.round(betDollars / e._fill))
         sized.push({ ...e, _face: face, _actualRisk: face * e._fill, kelly_fraction: k.kellyFraction * capScale })
       }
     }
     sized.sort((a, b) => b._actualRisk - a._actualRisk)
+
+    // Min bet floor: drop positions too small to be worth the execution overhead and fees.
+    // A $3 bet at 47¢ (6 contracts) has $0.11 in Kalshi fees — ~4% friction on top of spread.
+    const floorDropped = sized.filter(e => e._actualRisk < minBetFloor).length
+    if (floorDropped > 0) console.log(`[ks-bets] Min bet floor $${minBetFloor}: dropped ${floorDropped} sub-floor bet(s)`)
+    sized = sized.filter(e => e._actualRisk >= minBetFloor)
 
     // Portfolio-level cap: total pre-game risk cannot exceed the pre-game pool.
     // Kelly sizes bets independently per pitcher, but with many opportunities the
@@ -452,11 +754,19 @@ async function logEdges() {
       `\n[ks-bets] ${bettor.name} · Bankroll $${bankroll.toFixed(0)} · ${sized.length} bets · total risk $${sized.reduce((s,e)=>s+e._actualRisk,0).toFixed(0)} · ${isLive ? 'LIVE' : 'paper'}`,
     )
 
+    // Pre-fire summary — opt-in via DISCORD_PREFIRE_REPORT_ENABLED. Posts to
+    // Discord BEFORE the placement loop so the user can see what's about to
+    // fire alongside calibrated-YES shadow context (would-skip / would-fire)
+    // and the Civale-style risk flag (K≤5 + mp 0.50-0.60 + sized > $10).
+    if (sized.length > 0) {
+      try {
+        const { notifyPrefireSummary } = await import('../../lib/cageAlerts.js')
+        await notifyPrefireSummary({ bettorName: bettor.name, sized, betDate: TODAY }).catch(() => {})
+      } catch { /* non-fatal — never block placement on Discord */ }
+    }
+
     const now = new Date().toISOString()
     let bettorLogged = 0, ordersPlaced = 0, ordersFailed = 0
-    const creds = bettor.kalshi_key_id
-      ? { keyId: bettor.kalshi_key_id, privateKey: bettor.kalshi_private_key }
-      : {}
 
     for (const e of sized) {
       // Enforce per-pitcher YES cap accounting for bets already in DB from prior runs
@@ -469,15 +779,24 @@ async function logEdges() {
         existingYesCounts[e.pitcher] = alreadyYes + 1  // reserve slot for this bet
       }
 
-      // Skip pitchers whose game has already started per the games table
+      // Skip pitchers whose game has already started per the games table.
+      // Hard guard: if game_time is more than 5 min in the future, ignore stale 'live' flags —
+      // the MLB API occasionally returns 'live' during warmups hours before first pitch.
       if (e.pitcher_id) {
         const gameRow = await db.one(
           `SELECT status, game_time FROM games WHERE date=? AND (pitcher_home_id=? OR pitcher_away_id=?)`,
           [TODAY, String(e.pitcher_id), String(e.pitcher_id)],
         )
         if (gameRow && (gameRow.status === 'live' || gameRow.status === 'final')) {
-          console.log(`  [skip] ${e.pitcher} — game already live/final (${gameRow.status})`)
-          continue
+          const _gt = gameRow.game_time && !String(gameRow.game_time).endsWith('Z') && !String(gameRow.game_time).includes('+')
+            ? gameRow.game_time + 'Z' : gameRow.game_time
+          const _gameMs = _gt ? new Date(_gt).getTime() : 0
+          if (_gameMs > Date.now() + 5 * 60_000) {
+            console.log(`  [guard] ${e.pitcher} — game shows ${gameRow.status} but starts in ${Math.round((_gameMs - Date.now()) / 60000)}min — proceeding`)
+          } else {
+            console.log(`  [skip] ${e.pitcher} — game already live/final (${gameRow.status})`)
+            continue
+          }
         }
       }
 
@@ -539,7 +858,14 @@ async function logEdges() {
         raw_adj_factor:  e.raw_adj_factor  ?? null,
         spread:          e.spread          ?? null,
         live_bet:        0,
-        paper:           isLive ? 0 : 1,
+        paper:           (isLive && !isPaperMode) ? 0 : 1,
+        // Preserve strategy_mode if set by candidate generator (e.g. pregame_cross_strike).
+        // Otherwise default to pregame_inversion if flipped, else pregame_normal.
+        strategy_mode:   validateStrategyMode(
+                           e.strategy_mode ??
+                             (e._inverted ? STRATEGY_MODES.PREGAME_INVERSION : STRATEGY_MODES.PREGAME_NORMAL),
+                           'ksBets:pregame_upsert'),
+        strategy_submode: e.strategy_submode ?? (e._inverted ? 'inverted_'+e.side : null),
       }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
       bettorLogged++
       logged++
@@ -563,8 +889,8 @@ async function logEdges() {
         pbp.total_risk += e._face * e._fill
       }
 
-      if (isLive && e.ticker && !existing?.order_id) {
-        try {
+      if ((isLive || isPaperMode) && e.ticker && !existing?.order_id) {
+        {
           const mid        = e.market_mid ?? 50
           const halfSpread = (e.spread ?? 4) / 2
           let askCents     = e.side === 'YES'
@@ -576,23 +902,27 @@ async function logEdges() {
 
           // API-level dedup: check Kalshi for existing fills + resting orders on this ticker+side.
           // Catches cases where DB row was overwritten (multi-user schema collision) or script re-ran.
-          try {
-            const sideKey = e.side.toLowerCase()
-            const [existingFills, restingOrders] = await Promise.all([
-              getFills({ ticker: e.ticker, limit: 200 }, creds).catch(() => []),
-              listOrders({ ticker: e.ticker, status: 'resting' }, creds).catch(() => []),
-            ])
-            const filledContracts = existingFills
-              .filter(f => f.side === sideKey)
-              .reduce((s, f) => s + Number(f.count_fp || 0), 0)
-            const restingContracts = restingOrders
-              .filter(o => o.side === sideKey)
-              .reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
-            if (filledContracts + restingContracts > 0) {
-              console.log(`  [kalshi] SKIP    ${e.side} ${e.strike}+ ${e.pitcher} — already ${filledContracts} filled + ${restingContracts} resting on Kalshi`)
-              continue
-            }
-          } catch { /* non-fatal — proceed with order */ }
+          // Skip for paper users in paper mode — they have no real-Kalshi state to dedupe against,
+          // and these calls would either fail (no creds) or pollute the paper run with real fills.
+          if (isLive && !isPaperMode) {
+            try {
+              const sideKey = e.side.toLowerCase()
+              const [existingFills, restingOrders] = await Promise.all([
+                getFills({ ticker: e.ticker, limit: 200 }, creds).catch(() => []),
+                listOrders({ ticker: e.ticker, status: 'resting' }, creds).catch(() => []),
+              ])
+              const filledContracts = existingFills
+                .filter(f => f.side === sideKey)
+                .reduce((s, f) => s + Number(f.count_fp || 0), 0)
+              const restingContracts = restingOrders
+                .filter(o => o.side === sideKey)
+                .reduce((s, o) => s + Number(o.remaining_count || o.count || 0), 0)
+              if (filledContracts + restingContracts > 0) {
+                console.log(`  [kalshi] SKIP    ${e.side} ${e.strike}+ ${e.pitcher} — already ${filledContracts} filled + ${restingContracts} resting on Kalshi`)
+                continue
+              }
+            } catch { /* non-fatal — proceed with order */ }
+          }
           try {
             const ob = await getOrderbook(e.ticker, 10, creds)
             if (ob) {
@@ -608,29 +938,324 @@ async function logEdges() {
             }
           } catch { /* non-fatal — proceed with original sizing */ }
 
-          const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, askCents, creds)
-          const order  = result?.order ?? result
+          // Acquire DB mutex before placing — prevents Railway+Closer double-betting same market.
+          // INSERT OR IGNORE: first process wins, second sees acquired=false and skips.
+          const lockAcquired = await acquireBetLock(TODAY, String(e.pitcher_id ?? e.pitcher), e.strike, e.side, bettor.id)
+          if (!lockAcquired) {
+            console.log(`  [lock] SKIP    ${e.side} ${e.strike}+ ${e.pitcher} — another process holds the lock`)
+            continue
+          }
 
-          const orderId     = order?.order_id    ?? null
-          // Always store fill_price as YES price so best_case formula (profit = fill_price/100 for NO) is consistent.
-          // For YES bets askCents IS the YES price. For NO bets askCents is the NO ask, so complement it.
-          const fillPrice   = e.side === 'NO' ? (100 - askCents) : askCents
-          const filledConts = order?.filled_count ?? 0   // taker fills may be immediate
-          const placedAt    = order?.created_time ?? new Date().toISOString()
-          const status      = order?.status      ?? 'executed'
+          // ── Hard caps (Day 1 cage) ─────────────────────────────
+          // Per-user inversion + live caps + global daily loss. Inversion bets get
+          // strategy_mode='pregame_inversion'; non-inverted YES/NO get 'pregame_normal'
+          // (capless tonight beyond the global $500 brake).
+          {
+            const capMode = e._inverted ? STRATEGY_MODES.PREGAME_INVERSION : STRATEGY_MODES.PREGAME_NORMAL
+            const capCheck = await checkAllCaps({
+              db,
+              userId: bettor.id,
+              pitcherId: String(e.pitcher_id || e.pitcher),
+              betDate: TODAY,
+              strategy_mode: capMode,
+            })
+            if (!capCheck.allowed) {
+              console.log(`  [cap] SKIP    ${e.side} ${e.strike}+ ${e.pitcher} (${bettor.name}) — ${capCheck.reason}`)
+              continue
+            }
+          }
 
-          await db.run(
-            `UPDATE ks_bets SET order_id=?, fill_price=?, filled_at=?, filled_contracts=?, order_status=?, paper=0,
-               ticker=COALESCE(ticker, ?)
-             WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0
-               AND (user_id=? OR (user_id IS NULL AND ? IS NULL))`,
-            [orderId, fillPrice, placedAt, filledConts, status, e.ticker ?? null, TODAY, e.pitcher, e.strike, e.side, bettor.id, bettor.id],
-          )
-          ordersPlaced++
-          console.log(`  [kalshi] TAKER  ${e.side} ${e.strike}+ ${e.pitcher.padEnd(24)} ${contracts}c @ ${askCents}¢  id=${orderId}`)
-        } catch (err) {
-          ordersFailed++
-          console.error(`  [kalshi] FAILED  ${e.side} ${e.strike}+ ${e.pitcher}: ${err.message}`)
+          // ── Oracle gate ─────────────────────────────────────────
+          // ORACLE_STAGE: 0=off (default; behaves as before)
+          //               1=shadow (log only, no enforcement)
+          //               2=skip-only veto
+          //               3=skip + Critic concern downgrade (BOOST DISABLED:
+          //                 if Critic boosted size_down→fire, revert to size_down)
+          //               4=full ladder (skip + concern + BOOST upgrade)
+          // FAIL OPEN on any error: production decides as before.
+          const oracleStage = Number(process.env.ORACLE_STAGE ?? 0)
+          if (oracleStage > 0) {
+            try {
+              const { runOracleGate } = await import('./oracleGate.js')
+              const gate = await runOracleGate({
+                bet_date:     TODAY,
+                pitcher_id:   String(e.pitcher_id ?? e.pitcher),
+                pitcher_name: e.pitcher,
+                strike:       e.strike,
+                side:         e.side,
+                market_mid:   e.mid_cents ?? Math.round(askCents),
+                spread:       e.spread_cents ?? null,
+                bankroll:     1000,
+                bet_id:       null,
+                ticker:       e.ticker ?? null,
+              })
+
+              // Stage 3 vs 4: detect Critic boost. Boost upgrades size_down→fire.
+              // Stage 3 reverts that back to size_down (keeps Critic conservative).
+              // Stage 4 lets it stand.
+              const criticApplied = gate.oracle?.critic_applied ?? []
+              const boostUpgraded = criticApplied.includes('boost')
+              let effectiveAction = gate.action
+              let stage3RevertedBoost = false
+              if (oracleStage === 3 && boostUpgraded) {
+                effectiveAction = 'size_down'
+                stage3RevertedBoost = true
+              }
+
+              const { appendFileSync, mkdirSync } = await import('node:fs')
+              const path = await import('node:path')
+              mkdirSync(path.resolve('oracle'), { recursive: true })
+              appendFileSync(
+                path.resolve(`oracle/oracle-sim-${TODAY}.jsonl`),
+                JSON.stringify({
+                  ts: new Date().toISOString(), source: 'ksBets_hook',
+                  bet_date: TODAY, pitcher_id: String(e.pitcher_id ?? e.pitcher),
+                  pitcher_name: e.pitcher, strike: e.strike, side: e.side,
+                  ticker: e.ticker ?? null,
+                  market_mid: askCents, oracle_action: gate.action,
+                  effective_action: effectiveAction,
+                  stage3_reverted_boost: stage3RevertedBoost,
+                  oracle_baseline: gate.baseline, oracle: gate.oracle,
+                  oracle_error: gate.error, elapsed_ms: gate.timing?.elapsed_ms,
+                  stage_in_effect: oracleStage,
+                  critic_reason_text: gate.oracle?.critic_reason_text ?? '',
+                }) + '\n', 'utf-8',
+              )
+
+              // Persist trace to Turso so it survives Railway redeploys.
+              // JSONL is on the ephemeral filesystem; oracle_bet_traces is durable.
+              try {
+                const decisionId = `ksbet-${TODAY}-${String(e.pitcher_id ?? e.pitcher)}-${e.strike}-${e.side}-${bettor.id}`
+                const sizeUsd = Math.round((Math.max(1, Math.round(e._face)) * (askCents / 100)) * 100) / 100
+                const traceMode = e._inverted ? STRATEGY_MODES.PREGAME_INVERSION : STRATEGY_MODES.PREGAME_NORMAL
+                const traceSubmode = e._inverted ? 'inverted_'+e.side : null
+                await db.run(
+                  `INSERT OR REPLACE INTO oracle_bet_traces (
+                     decision_id, system, pitcher_id, game_pk, market_ticker,
+                     bet_date, strike, side, final_decision, final_size_usd,
+                     would_have_executed, executed, bet_id, created_at,
+                     strategy_mode, strategy_submode
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                  [
+                    decisionId,
+                    `oracle_stage${oracleStage}_user${bettor.id}`,
+                    String(e.pitcher_id ?? e.pitcher),
+                    e.game_id ?? null,
+                    e.ticker ?? null,
+                    TODAY,
+                    Number(e.strike),
+                    e.side,
+                    effectiveAction,
+                    sizeUsd,
+                    effectiveAction === 'pass' ? 1 : 0,
+                    effectiveAction !== 'skip' ? 1 : 0,
+                    null,
+                    new Date().toISOString(),
+                    validateStrategyMode(traceMode, 'oracle_bet_traces'),
+                    traceSubmode,
+                  ],
+                )
+              } catch (traceErr) {
+                console.warn(`  [oracle] trace insert failed (non-fatal): ${traceErr.message}`)
+              }
+
+              const tag = effectiveAction === 'pass' && boostUpgraded && oracleStage === 4 ? 'BOOST→FIRE'
+                       : effectiveAction.toUpperCase()
+              console.log(`  [oracle:${oracleStage}] ${e.side} ${e.strike}+ ${e.pitcher} → ${tag} (${gate.oracle?.reason ?? gate.error ?? '?'})`)
+
+              if (oracleStage >= 2 && effectiveAction === 'skip') {
+                console.log(`  [oracle] ENFORCING SKIP for ${e.pitcher} ${e.strike}+ ${e.side}`)
+                // Delete the speculative ks_bets row inserted at L597 so settlement
+                // doesn't compute phantom P&L on a never-placed order.
+                await db.run(
+                  `DELETE FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=?
+                   AND user_id=? AND live_bet=0 AND order_id IS NULL`,
+                  [TODAY, e.pitcher, e.strike, e.side, bettor.id],
+                ).catch(err => console.warn(`  [oracle] skip-cleanup delete failed (non-fatal): ${err.message}`))
+                continue
+              }
+              if (oracleStage >= 3 && effectiveAction === 'size_down') {
+                const orig = contracts
+                contracts = Math.max(1, Math.floor(contracts * 0.5))
+                console.log(`  [oracle] ENFORCING SIZE_DOWN for ${e.pitcher} ${e.strike}+ ${e.side}: ${orig}→${contracts}c${stage3RevertedBoost ? ' (Stage 3 reverted boost)' : ''}`)
+              }
+              // Stage 4 + boost: effectiveAction='pass'; bet fires at full size
+              // (already the default behavior)
+            } catch (oracleErr) {
+              console.error(`  [oracle] GATE ERROR (failing open): ${oracleErr.message}`)
+            }
+          }
+
+          let orderId = null
+          try {
+            const result = await placeOrder(e.ticker, e.side.toLowerCase(), contracts, askCents, creds)
+            const order  = result?.order ?? result
+
+            orderId = order?.order_id    ?? null
+            // Always store fill_price as YES price so best_case formula (profit = fill_price/100 for NO) is consistent.
+            // For YES bets askCents IS the YES price. For NO bets askCents is the NO ask, so complement it.
+            const fillPrice   = e.side === 'NO' ? (100 - askCents) : askCents
+            let filledConts   = order?.filled_count ?? 0
+            const placedAt    = order?.created_time ?? new Date().toISOString()
+
+            // IOC simulation: Kalshi processes fills async — wait 2s then check order status.
+            // If still unfilled, cancel (true taker: no resting orders). If filled, keep.
+            if (orderId && filledConts < contracts) {
+              await new Promise(r => setTimeout(r, 2000))
+              const confirmed = await getOrder(orderId, creds).catch(() => null)
+              filledConts = Math.round(parseFloat(confirmed?.fill_count_fp ?? confirmed?.filled_count ?? filledConts))
+              if (filledConts < contracts) {
+                await cancelOrder(orderId, creds).catch(() => {})
+                console.log(`  [taker-IOC] ${e.pitcher} ${e.strike}+ ${e.side}: ${filledConts}/${contracts} filled — cancelled unfilled ${contracts - filledConts}c`)
+              }
+            }
+
+            const status = filledConts >= contracts ? 'filled' : (filledConts > 0 ? 'partial' : 'cancelled')
+
+            // paper flag: 0 only when this is a real-money fill (live user AND not paper-mode).
+            const paperFlag = (isLive && !isPaperMode) ? 0 : 1
+            await db.run(
+              `UPDATE ks_bets SET order_id=?, fill_price=?, filled_at=?, filled_contracts=?, order_status=?, paper=?,
+                 ticker=COALESCE(ticker, ?)
+               WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0
+                 AND (user_id=? OR (user_id IS NULL AND ? IS NULL))`,
+              [orderId, fillPrice, placedAt, filledConts, status, paperFlag, e.ticker ?? null, TODAY, e.pitcher, e.strike, e.side, bettor.id, bettor.id],
+            )
+
+            // Confirm lock (sets bet_id so it's never swept as stale) and track committed capital.
+            const betRow = await db.one(`SELECT id FROM ks_bets WHERE bet_date=? AND pitcher_name=? AND strike=? AND side=? AND live_bet=0 AND (user_id=? OR (user_id IS NULL AND ? IS NULL)) LIMIT 1`, [TODAY, e.pitcher, e.strike, e.side, bettor.id, bettor.id]).catch(() => null)
+            await confirmBetPlaced(TODAY, String(e.pitcher_id ?? e.pitcher), e.strike, e.side, betRow?.id ?? orderId, bettor.id)
+            const capitalAtRisk = Math.round(e._face * e._fill * 100) / 100
+            await addCommitted(TODAY, capitalAtRisk)
+
+            ordersPlaced++
+            console.log(`  [kalshi] TAKER  ${e.side} ${e.strike}+ ${e.pitcher.padEnd(24)} ${contracts}c @ ${askCents}¢  id=${orderId}  committed=$${capitalAtRisk.toFixed(2)}`)
+
+            // Calibrate-Kelly shadow: record what size Kelly WOULD have produced
+            // if it had been fed calibrated_yes_prob instead of raw model_prob.
+            // Same fire/skip decision (we keep the actual fire), just resized.
+            if (e.side === 'YES' && betRow?.id) {
+              try {
+                const { recordCalibrateKellyShadow } = await import('../../lib/shadowInversion.js')
+                await recordCalibrateKellyShadow({
+                  ks_bet_id:      betRow.id,
+                  betDate:        TODAY,
+                  userId:         bettor.id,
+                  pitcherName:    e.pitcher,
+                  strike:         e.strike,
+                  side:           e.side,
+                  modelProb:      e.model_prob,
+                  marketMid:      e.market_mid,
+                  spread:         e.spread,
+                  bankroll,
+                  kellyFraction:  e.kelly_fraction ?? null,
+                  capitalAtRisk,
+                }).catch(() => {})
+              } catch { /* non-fatal */ }
+            }
+
+            // ── Apr 29 — NO contra-test experiment ──────────────────────────────
+            // See memory: project_baseball_contra_test_apr29.md  Decision: 2026-05-20.
+            // Hypothesis: tail-strike NO is under-priced. Backtest 4/22-4/28 showed
+            // +5.2% realized ROI on 207 inverted-fill NOs vs 1.2% YES baseline.
+            // 1-contract NO at strikes 6/7/8 when implied NO ∈ [35,65]¢, Adam only.
+            try {
+              const eligibleStrike = [6, 7, 8].includes(e.strike)
+              const impliedNo = 100 - askCents
+              const inBand = impliedNo >= 35 && impliedNo <= 65
+              if (
+                bettor.id === 2 &&            // Adam only
+                e.side === 'YES' &&
+                filledConts > 0 &&            // parent YES actually filled
+                eligibleStrike &&
+                inBand
+              ) {
+                // Daily + per-pitcher caps
+                const dailyCount = await db.one(
+                  `SELECT COUNT(*) AS n FROM ks_bets
+                   WHERE bet_date = ? AND user_id = ? AND bet_mode = 'contra-test'`,
+                  [TODAY, bettor.id],
+                ).catch(() => ({ n: 999 }))
+                const pitcherCount = await db.one(
+                  `SELECT COUNT(*) AS n FROM ks_bets
+                   WHERE bet_date = ? AND user_id = ? AND bet_mode = 'contra-test' AND pitcher_id = ?`,
+                  [TODAY, bettor.id, String(e.pitcher_id ?? '')],
+                ).catch(() => ({ n: 999 }))
+
+                if (dailyCount.n >= 5) {
+                  console.log(`  [contra-test] SKIP — daily cap (5) reached`)
+                } else if (pitcherCount.n >= 2) {
+                  console.log(`  [contra-test] SKIP ${e.pitcher} ${e.strike}+ — pitcher cap (2) reached`)
+                } else {
+                  const ob2 = await getOrderbook(e.ticker, 5, creds).catch(() => null)
+                  const noAskCents = ob2?.best_no_ask ?? (impliedNo + 2)
+                  if (noAskCents < 35 || noAskCents > 70) {
+                    console.log(`  [contra-test] SKIP ${e.pitcher} ${e.strike}+ — fresh no_ask ${noAskCents}¢ outside band`)
+                  } else {
+                    let contraOrderId = null, contraFilled = 0
+                    try {
+                      const cr = await placeOrder(e.ticker, 'no', 1, noAskCents, creds)
+                      const o = cr?.order ?? cr
+                      contraOrderId = o?.order_id ?? null
+                      contraFilled  = Number(o?.filled_count ?? 0)
+                      if (contraOrderId && contraFilled < 1) {
+                        await new Promise(r => setTimeout(r, 2000))
+                        const conf = await getOrder(contraOrderId, creds).catch(() => null)
+                        contraFilled = Math.round(parseFloat(conf?.fill_count_fp ?? conf?.filled_count ?? contraFilled))
+                        if (contraFilled < 1) await cancelOrder(contraOrderId, creds).catch(() => {})
+                      }
+                    } catch (cerr) {
+                      console.log(`  [contra-test] FAIL ${e.pitcher} ${e.strike}+ NO @${noAskCents}¢ — ${cerr.message}`)
+                    }
+                    if (contraFilled >= 1) {
+                      const contraStatus = 'filled'
+                      // Insert ks_bets row tagged contra-test. fill_price stored as YES-equiv (100 - noAsk) for consistency with rest of system.
+                      await db.upsert('ks_bets', {
+                        bet_date:        TODAY,
+                        logged_at:       new Date().toISOString(),
+                        user_id:         bettor.id,
+                        pitcher_id:      e.pitcher_id || null,
+                        pitcher_name:    e.pitcher,
+                        team:            e.team,
+                        game:            e.game,
+                        strike:          e.strike,
+                        side:            'NO',
+                        model_prob:      e.model_prob,
+                        market_mid:      e.market_mid,
+                        edge:            e.edge,
+                        lambda:          e.lambda,
+                        ticker:          e.ticker,
+                        bet_size:        1,
+                        capital_at_risk: Math.round(noAskCents) / 100,
+                        bet_mode:        'contra-test',
+                        order_id:        contraOrderId,
+                        fill_price:      100 - noAskCents,
+                        filled_at:       new Date().toISOString(),
+                        filled_contracts: contraFilled,
+                        order_status:    contraStatus,
+                        live_bet:        0,
+                        // Paper flag must respect KALSHI_PAPER_MODE — synthetic
+                        // paper-prefix order_ids must NEVER be flagged paper=0
+                        // (recon halt cascade: 2026-05-04 JR Ritchie incident).
+                        paper:           (isLive && !isPaperMode) ? 0 : 1,
+                        strategy_mode:   validateStrategyMode(STRATEGY_MODES.PREGAME_INVERSION, 'ksBets:contra_test'),
+                        strategy_submode: 'contra_test_legacy',
+                      }, ['bet_date', 'pitcher_name', 'strike', 'side', 'live_bet', 'user_id'])
+                      console.log(`  [contra-test] PLACED  ${e.pitcher} ${e.strike}+ NO 1c @${noAskCents}¢ (parent YES @${askCents}¢, implied NO ${impliedNo}¢)`)
+                    }
+                  }
+                }
+              }
+            } catch (cerr) {
+              console.error(`  [contra-test] ERROR ${e.pitcher} ${e.strike}+: ${cerr.message}`)
+            }
+          } catch (err) {
+            // Release lock on failure so other processes (or a retry) can place this bet
+            await releaseBetLock(TODAY, String(e.pitcher_id ?? e.pitcher), e.strike, e.side, bettor.id)
+            orderId = null
+            ordersFailed++
+            console.error(`  [kalshi] FAILED  ${e.side} ${e.strike}+ ${e.pitcher}: ${err.message}`)
+          }
         }
       } else if (existing?.order_id) {
         console.log(`  [kalshi] SKIP    ${e.side} ${e.strike}+ ${e.pitcher} — already ordered`)
@@ -640,7 +1265,19 @@ async function logEdges() {
     const totalRisk = sized.reduce((s, e) => s + e._face * e._fill, 0)
     console.log(`[ks-bets] ${bettor.name}: logged ${bettorLogged} · orders ${ordersPlaced} placed / ${ordersFailed} failed · risk $${totalRisk.toFixed(0)} of $${bankroll.toFixed(0)} (${(totalRisk/bankroll*100).toFixed(1)}%)`)
     if (bettorLogged > 0 && bettor.discord_webhook) _webhooksWithBets.push(bettor.discord_webhook)
-  }
+   } catch (err) {
+     // Apr 28 — per-user error fence. Previously an exception thrown while processing
+     // user N (e.g. Kalshi API timeout, DB write race, balance fetch fail after stagger)
+     // killed the whole subprocess so user N+1 (Adam-Live often) never got a chance to
+     // place orders. This caused chronic missed bets visible in the data:
+     //   • Wrobleski 5+ Apr 26: Adam 0 vs Isaiah 84 (a winner Adam missed)
+     //   • Tolle 6+/7+ Apr 28: Adam 0 vs Isaiah filled both
+     //   • Messick 7+ Apr 27: Adam 0 vs Isaiah 24
+     // Now we log the failure and continue to the next user.
+     console.error(`[ks-bets] ${bettor.name} processing FAILED — ${err.message} — other users continue`)
+     try { db.saveLog?.({ tag: 'BUG', level: 'error', msg: `ksBets per-user failure: ${bettor.name} — ${err.message}` })?.catch?.(() => {}) } catch {}
+   }
+  }))
 
   // Cache today's Kalshi open prices for real-price backtest
   try {
@@ -650,6 +1287,22 @@ async function logEdges() {
     })
   } catch (err) {
     console.warn('[ks-bets] Price cache step failed (non-fatal):', err.message?.slice(0, 100))
+  }
+
+  // ── Pipeline: emit no_execution for pitchers whose edges passed filters but got no bets ──
+  // Happens when: game already live/final at bet time, Kalshi order rejected, all skipped by per-pitcher cap.
+  // Without this, the pipeline shows a 'rule_filters' step with no final_action — looks like a process crash.
+  const pitchersWithPassedEdges = new Set(guardedEdges.map(e => String(e.pitcher_id || e.pitcher)))
+  for (const pid of pitchersWithPassedEdges) {
+    if (!_betsPlacedByPitcher.has(pid)) {
+      const srcEdge = guardedEdges.find(e => String(e.pitcher_id || e.pitcher) === pid)
+      recordPipelineStep({
+        bet_date: TODAY, pitcher_id: pid, pitcher_name: srcEdge?.pitcher ?? pid,
+        step: 'bets_placed',
+        payload: {},
+        summary: { final_action: 'no_execution', skip_reason: 'edge passed filters but no bet placed (game live/final or Kalshi error)' },
+      }).catch(() => {})
+    }
   }
 
   // ── Pipeline: emit bets_placed per pitcher ─────────────────────────────
@@ -1111,6 +1764,20 @@ async function settleBets() {
     seasonL:      (sp.n || 0) - (sp.w || 0),
     totalWagered: sp.wagered || 0,
   }, await getAllWebhooks(db))
+
+  // Settle all four shadow tables now that ks_bets has actual_ks populated.
+  try {
+    const { settleShadowDay, settleCalibratedYesDay, settleCalibrateKellyDay, settleFullDistributionDay } = await import('../../lib/shadowInversion.js')
+    const invUpdated = await settleShadowDay({ betDate: TODAY })
+    const calUpdated = await settleCalibratedYesDay({ betDate: TODAY })
+    const kelUpdated = await settleCalibrateKellyDay({ betDate: TODAY })
+    const fdUpdated  = await settleFullDistributionDay({ betDate: TODAY })
+    if (invUpdated > 0 || calUpdated > 0 || kelUpdated > 0 || fdUpdated > 0) {
+      console.log(`[shadow] settled inversion=${invUpdated} cal_yes=${calUpdated} cal_kelly=${kelUpdated} full_dist=${fdUpdated} row(s) for ${TODAY}`)
+    }
+  } catch (err) {
+    console.warn(`[shadow] settle failed: ${err.message}`)
+  }
 }
 
 // ── REPORT mode ───────────────────────────────────────────────────────────────
@@ -1234,12 +1901,197 @@ async function runCancelScratched() {
   if (!anyCancelled && !dryRun) console.log('[cancel-scratched] No scratched pitchers found')
 }
 
+// ── TOP-UP mode ───────────────────────────────────────────────────────────────
+// Every 5 min: for every pre-game bet where filled_contracts < bet_size (the original Kelly
+// target), check if the edge still exists at the current ask. If yes, buy the remaining
+// contracts as a taker, cancel any unfilled remainder immediately. Stops at T-5 to game.
+
+async function runTopUp() {
+  const now    = Date.now()
+  const isLive = process.env.LIVE_TRADING === 'true'
+
+  // Find base rows where total filled across all rows < original Kelly target.
+  // bet_mode='normal' rows are the original bets — topup rows are additional fills.
+  // Pull strategy_mode so the topup row can inherit the parent's bucket for caps.
+  const candidates = await db.all(`
+    SELECT b.id, b.user_id, b.pitcher_name, b.pitcher_id, b.strike, b.side, b.ticker, b.bet_size, b.strategy_mode
+    FROM ks_bets b
+    WHERE b.bet_date=? AND b.live_bet=0 AND b.result IS NULL
+      AND b.bet_mode='normal'
+      AND b.bet_size > 0
+      AND (
+        SELECT COALESCE(SUM(filled_contracts), 0) FROM ks_bets
+        WHERE bet_date=b.bet_date AND user_id=b.user_id AND pitcher_id=b.pitcher_id
+          AND strike=b.strike AND side=b.side AND live_bet=0
+      ) < b.bet_size
+    ORDER BY b.user_id, b.pitcher_name, b.strike
+  `, [TODAY])
+
+  if (!candidates.length) { console.log('[topup] no unfilled positions'); return }
+
+  // Load edge cache — one row per pitcher, edges_json has per-strike model_prob
+  const edgeRows = await db.all(
+    `SELECT pitcher_id, edges_json FROM pitcher_edge_cache WHERE bet_date=?`, [TODAY],
+  )
+  const edgeMap = new Map()  // pitcher_id → Map(strike → { model_prob, edge_yes })
+  for (const row of edgeRows) {
+    try {
+      const edges = JSON.parse(row.edges_json ?? '[]')
+      const byStrike = new Map(edges.map(e => [e.strike, e]))
+      edgeMap.set(String(row.pitcher_id), byStrike)
+    } catch { /* skip malformed */ }
+  }
+
+  // Load game times for game-start guard
+  const games = await db.all(
+    `SELECT pitcher_name, game_time FROM bet_schedule WHERE bet_date=?`, [TODAY],
+  )
+  const gameTimeMap = new Map(games.map(g => [g.pitcher_name, g.game_time]))
+
+  // Load creds for all candidate users
+  const userIds = [...new Set(candidates.map(c => c.user_id))]
+  const userRows = await db.all(
+    `SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE id IN (${userIds.map(() => '?').join(',')}) AND kalshi_key_id IS NOT NULL`,
+    userIds,
+  )
+  const credsMap = new Map(userRows.map(u => [u.id, { name: u.name, keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key }]))
+
+  for (const bet of candidates) {
+    const u = credsMap.get(bet.user_id)
+    if (!u?.keyId) continue  // no Kalshi creds = can't place real orders
+
+    // Game-start guard: stop topping up within 5 min of first pitch
+    const rawGt = gameTimeMap.get(bet.pitcher_name)
+    if (rawGt) {
+      const gtMs = new Date(!String(rawGt).endsWith('Z') ? rawGt + 'Z' : rawGt).getTime()
+      const minsToGame = (gtMs - now) / 60000
+      if (minsToGame <= 5) {
+        console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ — T-${minsToGame.toFixed(0)}min, too close to game`)
+        continue
+      }
+    }
+
+    // Edge still there? Pull from pitcher_edge_cache (updated every 10 min by edge rescan).
+    const pitcherEdges = edgeMap.get(String(bet.pitcher_id))
+    const edgeEntry    = pitcherEdges?.get(bet.strike)
+    const modelProb    = edgeEntry?.model_prob
+    const edgeYes      = edgeEntry?.edge_yes ?? edgeEntry?.best_edge
+    if (!modelProb) { console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ — no model_prob in cache, skipping`); continue }
+    if ((edgeYes ?? 0) < 0.03) { console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ — edge ${((edgeYes ?? 0)*100).toFixed(1)}¢ below floor`); continue }
+
+    // How many more contracts do we need?
+    const totalFilled = await db.one(
+      `SELECT COALESCE(SUM(filled_contracts), 0) as n FROM ks_bets
+       WHERE bet_date=? AND user_id=? AND pitcher_id=? AND strike=? AND side=? AND live_bet=0 AND paper=0`,
+      [TODAY, bet.user_id, bet.pitcher_id, bet.strike, bet.side],
+    )
+    const remaining = bet.bet_size - (totalFilled?.n ?? 0)
+    if (remaining <= 0) continue
+
+    const creds = { keyId: u.keyId, privateKey: u.privateKey }
+
+    // Current orderbook — verify ask price gives positive edge
+    const ob = await getOrderbook(bet.ticker, 10, creds).catch(() => null)
+    if (!ob) { console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ — no orderbook`); continue }
+
+    const askCents = bet.side === 'YES' ? ob.best_yes_ask : ob.best_no_ask
+    if (!askCents) { console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ — no ask (no liquidity)`); continue }
+
+    // Edge check at current ask price
+    if (askCents / 100 >= modelProb) {
+      console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — edge gone (ask ${askCents}¢ ≥ model ${(modelProb*100).toFixed(0)}¢)`)
+      continue
+    }
+
+    // Cancel any resting orders so we can re-place at the current ask.
+    // Orders are placed at the ask (taker intent) but Kalshi may leave unfilled remainder resting.
+    // The top-up replaces them every cycle with a fresh order at the live ask price.
+    const resting = await listOrders({ ticker: bet.ticker, status: 'resting' }, creds).catch(() => [])
+    const restingOrders = resting.filter(o => o.side === bet.side.toLowerCase())
+    if (restingOrders.length > 0) {
+      for (const ro of restingOrders) {
+        await cancelOrder(ro.order_id, creds).catch(() => {})
+      }
+      const restingCount = restingOrders.reduce((s, o) => s + Number(o.remaining_count || 0), 0)
+      console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ — cancelled ${restingCount} resting contracts, replacing at current ask`)
+    }
+
+    // Cap at available depth
+    let contracts = remaining
+    const depth = availableDepth(ob, bet.side.toLowerCase(), askCents)
+    if (depth > 0 && contracts > depth) {
+      console.log(`[topup] ${bet.pitcher_name} ${bet.strike}+ depth cap ${contracts}→${depth}c`)
+      contracts = depth
+    }
+    if (contracts <= 0) continue
+
+    const edgeCents = (modelProb - askCents / 100) * 100
+    console.log(`[topup] ${u.name} ${bet.pitcher_name} ${bet.strike}+ ${bet.side} — ${remaining} remaining, edge +${edgeCents.toFixed(1)}¢ @ ${askCents}¢`)
+
+    if (!isLive) {
+      console.log(`  [topup PAPER] would buy ${contracts}c @ ${askCents}¢`)
+      continue
+    }
+
+    try {
+      const result = await placeOrder(bet.ticker, bet.side.toLowerCase(), contracts, askCents, creds)
+      const order = result?.order ?? result
+      const orderId = order?.order_id ?? null
+      let filledConts = Math.round(parseFloat(order?.filled_count ?? order?.fill_count_fp ?? '0'))
+
+      // IOC simulation: wait 2s for Kalshi async fill processing, then cancel unfilled remainder
+      if (orderId && filledConts < contracts) {
+        await new Promise(r => setTimeout(r, 2000))
+        const confirmed = await getOrder(orderId, creds).catch(() => null)
+        filledConts = Math.round(parseFloat(confirmed?.fill_count_fp ?? confirmed?.filled_count ?? filledConts))
+        if (filledConts < contracts) {
+          await cancelOrder(orderId, creds).catch(() => {})
+          console.log(`  [topup-IOC] ${filledConts}/${contracts} filled — cancelled resting ${contracts - filledConts}c`)
+        }
+      }
+
+      if (filledConts > 0) {
+        const fillPrice = bet.side === 'NO' ? (100 - askCents) : askCents
+        // Topup inherits parent's strategy_mode for cap accounting. Day 1 safety:
+        // if parent strategy_mode is unknown/missing, REJECT the topup.
+        const parentMode = bet.strategy_mode
+        if (!parentMode) {
+          console.log(`  [topup] REJECT — parent ks_bets row ${bet.id} has no strategy_mode (likely legacy); skipping topup`)
+          continue
+        }
+        try { validateStrategyMode(parentMode, 'ksBets:topup_parent') } catch (verr) {
+          console.log(`  [topup] REJECT — parent strategy_mode invalid (${parentMode}): ${verr.message}`)
+          continue
+        }
+        await db.run(
+          `INSERT INTO ks_bets (bet_date, logged_at, user_id, pitcher_id, pitcher_name, strike, side,
+             live_bet, paper, order_id, ticker, fill_price, filled_at, filled_contracts, order_status,
+             bet_size, market_mid, bet_mode, strategy_mode, strategy_submode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, 'filled', ?, ?, 'topup', ?, ?)`,
+          [TODAY, new Date().toISOString(), bet.user_id, bet.pitcher_id, bet.pitcher_name,
+           bet.strike, bet.side, orderId, bet.ticker, fillPrice, new Date().toISOString(),
+           filledConts, filledConts, Math.round(askCents), parentMode, 'topup_'+parentMode],
+        )
+        await addCommitted(TODAY, filledConts * (askCents / 100))
+        const newTotal = (totalFilled?.n ?? 0) + filledConts
+        console.log(`  [topup] ✓ ${u.name} ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: +${filledConts}c @ ${askCents}¢ — ${newTotal}/${bet.bet_size} total`)
+      } else {
+        console.log(`  [topup] ${u.name} ${bet.pitcher_name} ${bet.strike}+ — 0 fills at ask`)
+      }
+    } catch (err) {
+      console.error(`  [topup] FAILED ${bet.pitcher_name} ${bet.strike}+ ${bet.side}: ${err.message}`)
+    }
+  }
+
+  console.log('[topup] done')
+}
+
 // ── CANCEL-ALL mode ───────────────────────────────────────────────────────────
 
 async function runCancelAll() {
   console.log(`[cancel-all] Cancelling ALL resting orders for ${TODAY}`)
   const users = await db.all(
-    `SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor=1 AND kalshi_key_id IS NOT NULL AND id != 1`,
+    `SELECT id, name, kalshi_key_id, kalshi_private_key FROM users WHERE active_bettor=1 AND kalshi_key_id IS NOT NULL AND is_system_admin = 0`,
   )
   for (const u of users) {
     const creds = { keyId: u.kalshi_key_id, privateKey: u.kalshi_private_key }
@@ -1249,9 +2101,11 @@ async function runCancelAll() {
     })
     console.log(`[cancel-all] ${u.name}: cancelled ${result.cancelled_count} orders`)
   }
+  // Only void rows with no real fills — never void a bet that partially or fully filled.
   await db.run(
     `UPDATE ks_bets SET order_status='cancelled', result='void', pnl=0, settled_at=?
-      WHERE bet_date=? AND order_status IN ('resting','partial') AND result IS NULL AND paper=0`,
+      WHERE bet_date=? AND order_status IN ('resting','partial') AND result IS NULL AND paper=0
+        AND (filled_contracts IS NULL OR filled_contracts = 0)`,
     [new Date().toISOString(), TODAY],
   )
   console.log('[cancel-all] Done')
@@ -1316,14 +2170,27 @@ async function planPortfolio() {
     return yesCounts[e.pitcher] <= MAX_YES_PER_PITCHER
   })
 
-  // Protection rules A / D / E / F (mirrors logEdges filter — keeps denominator consistent)
+  // Read configurable Rule K thresholds (mirrors logEdges — keeps denominator consistent)
+  const _Rp = await getBettingRules().catch(() => ({}))
+  const yesPregameMinProb   = _Rp.yes_pregame_min_prob    ?? 0.45
+  const yesPregameMinProbHi = _Rp.yes_pregame_min_prob_hi ?? 0.65
+  const yesPregameMaxMid    = _Rp.yes_pregame_max_mid     ?? 35
+
+  // Protection rules A / D / E / F / G / H / I / K (mirrors logEdges filter — keeps denominator consistent)
   const guardedEdges = withFill.filter(e => {
-    if (e.side === 'NO' && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false
-    // B10: edge override — if _edgeVal >= 0.18, allow through even with low model_prob (mirrors logEdges)
-    // Rule D threshold = 0.25, matching YES_MIN_PROB in strikeoutEdge.js upstream filter
-    if (e.side === 'YES' && e.model_prob < 0.25 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false
-    if (e.side === 'NO' && (e.market_mid ?? 50) < 15) return false
-    if (e.side === 'NO' && e.strike <= 4) return false   // Rule F — matches logEdges filter
+    if (e.side === 'NO'  && (e.market_mid ?? 50) >= 65 && e.model_prob >= 0.50) return false   // Rule A
+    if (e.side === 'YES' && e.model_prob < 0.25 && (e._edgeVal ?? e.edge ?? 0) < 0.18) return false  // Rule D
+    if (e.side === 'NO'  && (e.market_mid ?? 50) < 15) return false                             // Rule E
+    if (e.side === 'NO'  && e.strike <= 4) return false                                          // Rule F
+    if (e.side === 'YES' && (                                                                    // Rule K
+      e.model_prob < yesPregameMinProb ||
+      (e.model_prob < yesPregameMinProbHi && (e.market_mid ?? 50) > yesPregameMaxMid)
+    )) return false
+    if (e.side === 'NO'  && e.strike === 7 && (                                                  // Rule I
+      (e.market_mid ?? 50) > 35 ||
+      e.model_prob >= 0.18 ||
+      (e._edgeVal ?? e.edge ?? 0) < 0.20
+    )) return false
     return true
   })
 
@@ -1377,10 +2244,11 @@ async function main() {
   else if (MODE === 'report')          await report()
   else if (MODE === 'plan')            { await planPortfolio(); return db.close() }
   else if (MODE === 'build-schedule')  { await buildSchedule(); return }
+  else if (MODE === 'topup')           { await runTopUp();       return db.close() }
   else if (MODE === 'cancel-scratched') { await runCancelScratched(); return db.close() }
   else if (MODE === 'cancel-all')       { await runCancelAll();       return db.close() }
   else {
-    console.error(`Unknown mode: ${MODE}. Use log | settle | report | plan | build-schedule | cancel-scratched | cancel-all`)
+    console.error(`Unknown mode: ${MODE}. Use log | settle | report | plan | build-schedule | topup | cancel-scratched | cancel-all`)
     process.exit(1)
   }
 

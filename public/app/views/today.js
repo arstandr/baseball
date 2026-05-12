@@ -4,6 +4,106 @@ import { fmt$, esc, fmtDatePill, fmtDateFull, fmtGameTime, fmtTs, renderSparklin
 import { fetchJson } from '../api.js'
 import { renderTicker } from '../ticker.js'
 
+// ── NO contra-test status panel (Apr 29 experiment, decision 2026-05-20) ──
+// See memory: project_baseball_contra_test_apr29.md
+
+// ── Fade Model Paper Test panel (started 2026-05-07, decision 2026-05-21) ──
+
+async function renderFadeTestPanel() {
+  const el = document.getElementById('fade-test-panel')
+  if (!el) return
+  const d = await fetchJson('/api/ks/fade-test').catch(() => null)
+  if (!d) { el.hidden = true; return }
+  const settled = d.settled || 0
+  if (d.fires === 0) {
+    el.hidden = false
+    el.innerHTML = `
+      <div class="ct-row">
+        <div class="ct-title">🎯 Fade v3 Paper Test</div>
+        <div class="ct-status ct-waiting">awaiting first fire</div>
+      </div>
+      <div class="ct-meta">Started ${esc(d.test_start)} · Day ${d.day_count} of test · target ≥${d.backtest_target_roi}% ROI · decision Day ${d.milestone_days.decision}</div>
+    `
+    return
+  }
+  const roi = d.roi_pct
+  const roiCls = roi == null ? 'ct-neutral'
+              : roi >= d.backtest_target_roi ? 'ct-good'
+              : roi <= 0 ? 'ct-bad' : 'ct-neutral'
+  const milestone = d.day_count >= 30 ? `Day ${d.day_count} (post-decision)` :
+                    d.day_count >= 14 ? `Day ${d.day_count} of 30 (confidence window)` :
+                    d.day_count >= 7  ? `Day ${d.day_count} of 14 (decision window)` :
+                                        `Day ${d.day_count} of 7 (sanity window)`
+  const recentRows = (d.recent || []).slice(0, 8).map(r => {
+    const status = r.result === 'win' ? '✅' : r.result === 'loss' ? '❌' : '⏳'
+    const pnl = r.pnl != null ? `${r.pnl >= 0 ? '+' : ''}$${Number(r.pnl).toFixed(0)}` : ''
+    const edgePct = r.edge != null ? `+${(Number(r.edge) * 100).toFixed(0)}c` : ''
+    return `<div class="ct-recent-row">${status} <strong>${esc(r.pitcher_name ?? '?')}</strong> K≥${r.strike} @ ${r.fill_price}¢ · edge ${edgePct}${r.actual_ks != null ? ` · actual ${r.actual_ks}` : ''} ${pnl}</div>`
+  }).join('')
+  el.hidden = false
+  el.innerHTML = `
+    <div class="ct-row">
+      <div class="ct-title">🎯 Fade v3 Paper Test</div>
+      <div class="ct-status ${roiCls}">
+        ${roi == null ? '—' : (roi >= 0 ? '+' : '') + roi.toFixed(1) + '% ROI'}
+      </div>
+    </div>
+    <div class="ct-stats">
+      <span><strong>$${d.bankroll.toFixed(0)}</strong> bankroll <span class="${d.return_pct >= 0 ? 'ct-good-text' : 'ct-bad-text'}">(${d.return_pct >= 0 ? '+' : ''}${d.return_pct.toFixed(1)}%)</span></span>
+      <span><strong>${d.fires}</strong> fires</span>
+      <span class="ct-good-text">${d.wins}W</span>
+      <span class="ct-bad-text">${d.losses}L</span>
+      ${d.pending ? `<span class="ct-neutral-text">${d.pending} pending</span>` : ''}
+      ${d.win_pct != null ? `<span>${d.win_pct.toFixed(0)}% win</span>` : ''}
+      ${d.max_drawdown_pct ? `<span>maxDD <strong>${d.max_drawdown_pct.toFixed(1)}%</strong></span>` : ''}
+    </div>
+    <div class="ct-meta">${esc(milestone)} · v3: NB r=8 / K=6 or K≥10 / edge 5-20¢ / H-H + H-I / lineup-aware / news-skip</div>
+    ${recentRows ? `<div class="ct-recent" style="margin-top:8px;font-size:12px;display:flex;flex-direction:column;gap:2px">${recentRows}</div>` : ''}
+  `
+}
+
+async function renderContraTestPanel() {
+  const el = document.getElementById('contra-test-panel')
+  if (!el) return
+  const data = await fetchJson('/api/ks/contra-test').catch(() => null)
+  if (!data) { el.hidden = true; return }
+  if (!data.bets) {
+    // No bets placed yet — show waiting state with decision date
+    el.hidden = false
+    el.innerHTML = `
+      <div class="ct-row">
+        <div class="ct-title">🔬 NO Contra-Test</div>
+        <div class="ct-status ct-waiting">awaiting first signal</div>
+      </div>
+      <div class="ct-meta">Decision ${esc(data.decision_date)} · ${data.days_to_decision}d remaining · target ≥${data.success_threshold_roi}% ROI on 50+ bets</div>
+    `
+    return
+  }
+  const roi = data.roi_pct
+  const roiCls = roi == null ? 'ct-neutral'
+              : roi >= data.success_threshold_roi ? 'ct-good'
+              : roi <= 0 ? 'ct-bad' : 'ct-neutral'
+  const sample = data.sufficient_sample ? '✓ sufficient sample' : `${50 - data.bets} bets to reach 50 sample`
+  el.hidden = false
+  el.innerHTML = `
+    <div class="ct-row">
+      <div class="ct-title">🔬 NO Contra-Test</div>
+      <div class="ct-status ${roiCls}">
+        ${roi == null ? '—' : (roi >= 0 ? '+' : '') + roi.toFixed(1) + '% ROI'}
+      </div>
+    </div>
+    <div class="ct-stats">
+      <span><strong>${data.bets}</strong> bets</span>
+      <span class="ct-good-text">${data.wins}W</span>
+      <span class="ct-bad-text">${data.losses}L</span>
+      ${data.pending ? `<span class="ct-neutral-text">${data.pending} pending</span>` : ''}
+      <span>P&L <strong>${data.total_pnl >= 0 ? '+' : ''}$${data.total_pnl.toFixed(2)}</strong></span>
+      <span>Risk $${data.total_risk.toFixed(2)}</span>
+    </div>
+    <div class="ct-meta">Decision ${esc(data.decision_date)} · ${data.days_to_decision}d remaining · target ≥${data.success_threshold_roi}% ROI · ${esc(sample)}</div>
+  `
+}
+
 // ── Live polling timers ──────────────────────────────────────────────────
 
 export function startLivePolling(_date) {
@@ -75,8 +175,8 @@ function calcPitcherStatus(p, live) {
   const pulled      = live?.still_in === false
   const gameFinal   = live?.is_final === true
   const allSettled  = pending.length === 0
-  const hasLiveData = live != null && (live.ip > 0 || live.ks > 0 || live.inning_state != null || live.pitches > 0)
-  const earlyGame   = hasLiveData && (live.ip ?? 0) < 1.0
+  const hasLiveData = live != null && (live.ip > 0 || live.ks > 0 || live.inning_state != null || live.pitches > 0 || live.is_warmup || live.is_delayed)
+  const earlyGame   = hasLiveData && (live.ip ?? 0) < 1.0 && !live.is_warmup && !live.is_delayed
 
   let status
   if (pulled || gameFinal || allSettled) {
@@ -101,6 +201,7 @@ function calcPitcherStatus(p, live) {
   const pendingYesBets = pending.filter(b => b.side === 'YES').sort((a, b) => a.strike - b.strike)
   const pendingNoBets  = pending.filter(b => b.side === 'NO')
   const nextYes = pendingYesBets[0]
+  const maxPendingYes = pendingYesBets[pendingYesBets.length - 1]
   const allYesBets = enriched.filter(b => b.side === 'YES').sort((a, b) => a.strike - b.strike)
   const lowestYesStrike = allYesBets[0]?.strike
 
@@ -142,7 +243,8 @@ function calcPitcherStatus(p, live) {
       // Game is live but very early — pitcher has 0 or 1 IP
       const ksStr = (ks ?? 0) === 0 ? 'No Ks yet' : `${ks} K${ks !== 1 ? 's' : ''} so far`
       if (nextYes) {
-        storySentence = `Game underway — ${ksStr}, needs ${nextYes.strike - (ks ?? 0)} more for ${nextYes.strike}+.${proj}`
+        const _maxNeed = maxPendingYes.strike - (ks ?? 0)
+        storySentence = `Game underway — ${ksStr}, needs ${_maxNeed} more for ${maxPendingYes.strike}+.${proj}`
       } else if (pendingNoBets.length) {
         storySentence = `Game underway — ${ksStr}. Watching the NO on ${pendingNoBets[0].strike}+.`
       } else {
@@ -150,7 +252,7 @@ function calcPitcherStatus(p, live) {
       }
     } else {
       if (nextYes) {
-        storySentence = `Needs ${nextYes.strike}+ strikeouts. Game hasn't started yet.${proj}`
+        storySentence = `Needs ${maxPendingYes.strike}+ strikeouts. Game hasn't started yet.${proj}`
       } else if (pendingNoBets.length) {
         storySentence = `Betting he stays under ${pendingNoBets[0].strike} Ks. Game hasn't started yet.`
       } else {
@@ -165,10 +267,11 @@ function calcPitcherStatus(p, live) {
         storySentence = nextNext
           ? `${nextYes.strike}+ covered — now needs ${nextNext.strike - (ks ?? 0)} more for ${nextNext.strike}+.`
           : `${nextYes.strike}+ covered — waiting on the game to end.`
-      } else if (need === 1) {
-        storySentence = `At ${ks ?? '?'} Ks — needs just 1 more for the ${nextYes.strike}+ target.`
       } else {
-        storySentence = `At ${ks ?? '?'} Ks — needs ${need} more for the ${nextYes.strike}+ target.`
+        const maxNeed = maxPendingYes.strike - (ks ?? 0)
+        storySentence = maxNeed === 1
+          ? `At ${ks ?? '?'} Ks — needs just 1 more for the ${maxPendingYes.strike}+ target.`
+          : `At ${ks ?? '?'} Ks — needs ${maxNeed} more for the ${maxPendingYes.strike}+ target.`
       }
     } else if (pendingNoBets.length) {
       const no = pendingNoBets[0]
@@ -190,8 +293,8 @@ function calcPitcherStatus(p, live) {
   let whatNeeds = null
   if (!gameFinal && !pulled && !allSettled && pending.length > 0) {
     if (nextYes) {
-      const need = Math.max(0, nextYes.strike - (ks ?? 0))
-      whatNeeds = need === 0 ? `${nextYes.strike}+ already covered` : `Needs ${need} more K${need > 1 ? 's' : ''} for ${nextYes.strike}+`
+      const need = Math.max(0, maxPendingYes.strike - (ks ?? 0))
+      whatNeeds = need === 0 ? `${maxPendingYes.strike}+ already covered` : `Needs ${need} more K${need > 1 ? 's' : ''} for ${maxPendingYes.strike}+`
     } else if (pendingNoBets.length) {
       const noSafe = pendingNoBets[0].strike - (ks ?? 0)
       whatNeeds = noSafe <= 0
@@ -410,6 +513,10 @@ export async function loadDay(date) {
   ])
   if (schedData?.schedule) shared.betSchedule = schedData.schedule
 
+  // Render contra-test status panel (fire-and-forget — failure does not block the page)
+  renderContraTestPanel().catch(() => {})
+  renderFadeTestPanel().catch(() => {})
+
   const list  = document.getElementById('pitcher-list')
   const empty = document.getElementById('empty-today')
   const hdr   = document.getElementById('day-header')
@@ -444,22 +551,7 @@ export async function loadDay(date) {
   empty.hidden = true
 
   if (hasPitchers) {
-    hdr.hidden = false
-    const pnlCls = data.day_pnl >= 0 ? 'good' : 'bad'
-    const maxT = computeMaxTheoretical(data.pitchers)
-    hdr.innerHTML = `
-      <div>
-        <div class="day-date">${fmtDateFull(date)}</div>
-        <div class="day-meta">${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''} · ${data.day_bets} bets</div>
-      </div>
-      <div>
-        <span id="day-wl" class="day-meta">${data.day_wins}W · ${data.day_losses}L${data.day_pending > 0 ? ` · ${data.day_pending} pending` : ''}</span>
-      </div>
-      <div id="day-pnl-val" class="day-pnl ${pnlCls}">${data.day_pnl >= 0 ? '+' : ''}${fmt$(data.day_pnl)}</div>
-      <div class="day-max-wrap">
-        <span class="day-max-label">best case</span>
-        <span class="day-max-val" id="day-max-val">${maxT >= 0 ? '+' : ''}${fmt$(maxT)}</span>
-      </div>`
+    hdr.hidden = true
 
     const sorted = [...data.pitchers].sort((a, b) => {
       if (a.game_time && b.game_time) return a.game_time.localeCompare(b.game_time)
@@ -509,6 +601,7 @@ export async function loadDay(date) {
   }
 
   startCountdowns()
+  loadPositions(date).catch(() => {})
 
   if (data?.day_pending > 0) startLivePolling(date)
 }
@@ -517,59 +610,40 @@ export async function renderDaySummary(date, data) {
   const verdictEl = document.getElementById('sh-verdict')
   const recordEl  = document.getElementById('sh-record')
 
-  if (!data || !data.pitchers?.length) {
-    if (verdictEl) verdictEl.textContent = 'No bets for this day.'
-    if (recordEl)  recordEl.textContent = ''
-  } else {
-    if (verdictEl) {
-      const pnl = state.liveBettorTodayPnl ?? data.day_pnl
-      if (pnl === 0 && data.day_wins === 0 && data.day_losses === 0) {
-        verdictEl.textContent = `No settled bets yet today.`
-      } else {
-        const direction = pnl > 0 ? 'UP' : pnl < 0 ? 'DOWN' : 'EVEN'
-        const cls       = pnl > 0 ? 'good' : pnl < 0 ? 'bad' : ''
-        const amount    = Math.abs(pnl) > 0.005 ? ` <span class="${cls}">${direction} ${fmt$(Math.abs(pnl))}</span>` : ` <span>EVEN</span>`
-        verdictEl.innerHTML = `Today you are${amount}`
-      }
-    }
-
-    if (recordEl) {
-      const parts = []
-      if (data.day_wins > 0)    parts.push(`${data.day_wins} bet${data.day_wins !== 1 ? 's' : ''} won`)
-      if (data.day_losses > 0)  parts.push(`${data.day_losses} lost`)
-      if (data.day_pending > 0) parts.push(`${data.day_pending} still settling`)
-      if (parts.length === 0 && (data.day_wins + data.day_losses + data.day_pending) === 0)
-        parts.push('No activity yet')
-      recordEl.textContent = parts.join(' · ')
-    }
-  }
+  const heroEl = document.getElementById('status-hero')
+  if (heroEl) heroEl.hidden = true
+  if (verdictEl) verdictEl.textContent = ''
+  if (recordEl)  recordEl.textContent  = ''
 
   const el = document.getElementById('day-summary')
   if (el) el.hidden = true
 
   const scSummary = document.getElementById('sc-summary')
   const scDate    = document.getElementById('sc-summary-date')
+  const scCounts  = document.getElementById('sc-meta-counts')
   const scWon     = document.getElementById('sc-won-count')
   const scLost    = document.getElementById('sc-lost-count')
   const scWait    = document.getElementById('sc-wait-count')
-  const scTotal   = document.getElementById('sc-day-total')
-
   if (scSummary) {
     if (!data || !data.pitchers?.length) {
       scSummary.hidden = true
     } else {
       scSummary.hidden = false
-      if (scDate) scDate.textContent = new Date(date + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
-      if (scWon)  scWon.textContent  = data.day_wins    || 0
-      if (scLost) scLost.textContent = data.day_losses   || 0
-      if (scWait) scWait.textContent = data.day_pending  || 0
-      if (scTotal) {
-        const pnl = data.day_pnl || 0
-        const sign = pnl > 0 ? '+' : ''
-        scTotal.textContent = pnl === 0 && data.day_wins === 0 && data.day_losses === 0
-          ? 'No settled bets yet'
-          : `${pnl > 0 ? 'UP' : pnl < 0 ? 'DOWN' : 'EVEN'} ${sign}${fmt$(Math.abs(pnl))} today`
-        scTotal.className = `sc-day-total ${pnl > 0 ? 'sc-up' : pnl < 0 ? 'sc-down' : 'sc-even'}`
+      if (scDate)   scDate.textContent   = fmtDateFull(date)
+      if (scCounts) scCounts.textContent = `${data.pitchers.length} pitcher${data.pitchers.length !== 1 ? 's' : ''} · ${data.day_bets} bets`
+      if (scWon)    scWon.textContent    = data.day_wins    || 0
+      if (scLost)   scLost.textContent   = data.day_losses  || 0
+      if (scWait)   scWait.textContent   = data.day_pending || 0
+
+      scSummary.onclick = (e) => {
+        // Scorebox clicks filter cards; Show All resets filter — don't also toggle positions
+        if (e.target.closest('.sc-scorebox') || e.target.closest('#sc-filter-reset')) return
+        const panel = document.getElementById('positions-panel')
+        if (!panel || !panel.innerHTML) return
+        const isOpen = panel.classList.toggle('pp-open')
+        localStorage.setItem('pp-open', isOpen ? '1' : '0')
+        const chevron = document.getElementById('pos-chevron')
+        if (chevron) chevron.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(-90deg)'
       }
     }
   }
@@ -587,6 +661,10 @@ export async function loadLiveBets(date) {
     section.hidden = true
     return
   }
+
+  // Update shared live bets so game card best-case reflects newly placed live orders
+  shared.liveBetsPitchers = data.pitchers || []
+  renderGameCards(shared.dailyPitchers, shared.liveBetsPitchers)
 
   const t = data.totals
   const pnlSign = t.pnl >= 0 ? '+' : ''
@@ -734,15 +812,13 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     return { p, sd: calcPitcherStatus(p, live) }
   })
 
-  // Sort: games currently in progress first (has live data AND not final), then by game_time.
-  // Use liveOverlay directly — is_final is the ground truth for "game over", not our bet status.
-  // This keeps pulled-pitcher games and fully-settled games at the top if their game is still running.
+  // Sort: active (non-locked) games first by start time, locked/final games last.
+  const _isLockedStatus = sd => sd && (sd.status === 'locked_win' || sd.status === 'locked_loss' || sd.status === 'locked_even')
+
   cards.sort((a, b) => {
-    const aOvl = shared.liveOverlay[String(a.p.pitcher_id)] || null
-    const bOvl = shared.liveOverlay[String(b.p.pitcher_id)] || null
-    const aInProgress = aOvl != null && aOvl.is_final !== true
-    const bInProgress = bOvl != null && bOvl.is_final !== true
-    if (aInProgress !== bInProgress) return aInProgress ? -1 : 1
+    const aLocked = _isLockedStatus(a.sd) ? 1 : 0
+    const bLocked = _isLockedStatus(b.sd) ? 1 : 0
+    if (aLocked !== bLocked) return aLocked - bLocked
     return (a.p.game_time || '').localeCompare(b.p.game_time || '')
   })
 
@@ -750,23 +826,15 @@ export function renderGameCards(dailyPitchers, liveBetsPitchers) {
     [...container.querySelectorAll('.game-card.gc-expanded')].map(el => el.id)
   )
 
-  // Update header best case to match sum of all cards (includes live bets)
-  const totalBestCase = cards.reduce((s, { sd }) => s + (sd.totalBestCase ?? 0), 0)
-  const maxEl = document.getElementById('day-max-val')
-  if (maxEl) maxEl.textContent = `${totalBestCase >= 0 ? '+' : ''}${fmt$(totalBestCase)}`
-
-  // Merge bet-cards and schedule-cards into one unified list sorted by in-progress, then game_time.
-  // This prevents live schedule-cards from appearing after non-live bet-cards.
+  // Merge bet-cards and schedule-cards: active/non-locked first by start time, locked last.
   const allItems = [
     ...cards.map(c => ({ type: 'bet', gameTime: c.p.game_time || '', pitcherId: String(c.p.pitcher_id), card: c })),
     ...schedItems.map(s => ({ type: 'sched', gameTime: s.game_time || '', pitcherId: String(s.pitcher_id), sched: s })),
   ]
   allItems.sort((a, b) => {
-    const aOvl = shared.liveOverlay[a.pitcherId] || null
-    const bOvl = shared.liveOverlay[b.pitcherId] || null
-    const aInProgress = aOvl != null && aOvl.is_final !== true
-    const bInProgress = bOvl != null && bOvl.is_final !== true
-    if (aInProgress !== bInProgress) return aInProgress ? -1 : 1
+    const aLocked = (a.type === 'bet' ? _isLockedStatus(a.card.sd) : false) ? 1 : 0
+    const bLocked = (b.type === 'bet' ? _isLockedStatus(b.card.sd) : false) ? 1 : 0
+    if (aLocked !== bLocked) return aLocked - bLocked
     return a.gameTime.localeCompare(b.gameTime)
   })
 
@@ -807,8 +875,52 @@ function renderGameCard(p, sd) {
   const liveStrikes   = live?.strikes ?? null
   const liveOuts      = live?.outs    ?? null
 
-  let pitchingStatusHtml = ''
+  // Delay / warmup banner
+  let gameStatusBannerHtml = ''
   if (live && !live.is_final) {
+    if (live.is_delayed && live.delay_reason) {
+      gameStatusBannerHtml = `<div class="gc-delay-banner">⛈ Delayed: ${esc(live.delay_reason)} — start time TBD</div>`
+    } else if (live.is_warmup) {
+      gameStatusBannerHtml = `<div class="gc-warmup-banner">⚾ Warming up — first pitch imminent</div>`
+    }
+  }
+
+  // Score row with team logos (ESPN CDN). Pitcher's team is highlighted.
+  let scoreRowHtml = ''
+  if (live && (live.home_score != null || live.away_score != null) && p.game) {
+    const m = String(p.game).match(/^([A-Z]{2,3})@([A-Z]{2,3})$/)
+    if (m) {
+      const [, away, home] = m
+      const espnAbbr = ab => {
+        const k = (ab || '').toUpperCase()
+        const map = { CWS: 'chw', WSH: 'wsh', AZ: 'ari', SF: 'sf', SD: 'sd', KC: 'kc', TB: 'tb', ATH: 'oak' }
+        return map[k] || k.toLowerCase()
+      }
+      const logoUrl = ab => `https://a.espncdn.com/i/teamlogos/mlb/500/${espnAbbr(ab)}.png`
+      const pitcherTeam = (p.team || '').toUpperCase()
+      const awayPitcher = pitcherTeam === away
+      const homePitcher = pitcherTeam === home
+      const aS = live.away_score ?? 0
+      const hS = live.home_score ?? 0
+      const aWin = aS > hS, hWin = hS > aS
+      scoreRowHtml = `<div class="gc-score-row">
+        <div class="gc-team-block ${awayPitcher ? 'is-pitcher' : ''} ${aWin ? 'is-leading' : ''}">
+          <img class="gc-team-logo" src="${logoUrl(away)}" alt="${esc(away)}" onerror="this.style.display='none'">
+          <span class="gc-team-abbr">${esc(away)}</span>
+          <span class="gc-team-score">${aS}</span>
+        </div>
+        <span class="gc-score-sep">·</span>
+        <div class="gc-team-block ${homePitcher ? 'is-pitcher' : ''} ${hWin ? 'is-leading' : ''}">
+          <span class="gc-team-score">${hS}</span>
+          <span class="gc-team-abbr">${esc(home)}</span>
+          <img class="gc-team-logo" src="${logoUrl(home)}" alt="${esc(home)}" onerror="this.style.display='none'">
+        </div>
+      </div>`
+    }
+  }
+
+  let pitchingStatusHtml = ''
+  if (live && !live.is_final && (live.pitches ?? 0) > 0) {
     // ▲ = top half (away team batting), ▼ = bottom half (home team batting)
     const halfSym    = inningState === 'Top' ? '▲' : inningState === 'Bottom' ? '▼' : null
     const inningLabel = halfSym && currentInning ? `${halfSym} ${currentInning}` : currentInning
@@ -875,8 +987,7 @@ function renderGameCard(p, sd) {
   if (live && !live.is_final) {
     const ks  = live.ks ?? 0
     const maxStrike = allYesBets.length > 0 ? Math.max(...allYesBets.map(b => b.strike)) : null
-    const nextStrike = allYesBets.find(b => !b.result && ks < b.strike)?.strike ?? null
-    const target = nextStrike ?? maxStrike
+    const target = maxStrike
 
     if (target !== null) {
       const pct = Math.min(100, Math.round(ks / target * 100))
@@ -942,6 +1053,8 @@ function renderGameCard(p, sd) {
     <div class="gc-body">
       <div class="gc-pitcher">${esc(p.pitcher_name)}</div>
       ${matchupMeta ? `<div class="gc-meta">${esc(matchupMeta)}</div>` : ''}
+      ${gameStatusBannerHtml}
+      ${scoreRowHtml}
       ${pitchingStatusHtml}
       ${milestonePillsHtml}
       <div class="gc-story">${sd.storySentence}</div>
@@ -1184,7 +1297,9 @@ export function buildPitcherCard(p) {
         price != null ? `@ ${price}¢ each` : null,
         cost ? `= ${cost}` : null,
       ].filter(Boolean).join(' ')
+      const paperChip = b.paper ? `<span class="pc-order-chip" style="background:#3b3b3b;color:#aaa">📝 Paper</span>` : ''
       orderConfirm = `<div class="pc-order-confirm">
+        ${paperChip}
         <span class="pc-order-chip ${statusCls}">${statusLabel}</span>
         <span class="pc-order-detail">${detail}</span>
         ${timeDisp ? `<span class="pc-order-time">${timeDisp}</span>` : ''}
@@ -1332,11 +1447,13 @@ export async function buildBettorDrawer(drawer, b) {
 
   let atRisk = 0, bestCase = 0
   for (const bet of allBets.filter(x => !x.result)) {
-    const mid  = Number(bet.market_mid ?? 50)
-    const face = Number(bet.bet_size   ?? 0)
-    const hs   = (bet.spread ?? 4) / 2
-    const fill = bet.side === 'YES' ? mid + hs : (100 - mid) + hs
-    const win  = bet.side === 'YES' ? (100 - mid) - hs : mid - hs
+    const mid     = Number(bet.market_mid ?? 50)
+    const face    = Number((bet.filled_contracts > 0 ? bet.filled_contracts : bet.bet_size) ?? 0)
+    const hs      = (bet.spread ?? 4) / 2
+    // For resting unfilled orders use the limit price (fill_price) as entry; for filled, use actual fill_price if known
+    const entryKnown = bet.fill_price != null && (bet.filled_contracts > 0 || bet.order_status === 'resting')
+    const fill    = entryKnown ? Number(bet.fill_price) : (bet.side === 'YES' ? mid + hs : (100 - mid) + hs)
+    const win     = bet.side === 'YES' ? (100 - fill) : fill
     atRisk   += face * fill / 100
     bestCase += face * win / 100 * (1 - KALSHI_FEE * fill / 100)
   }
@@ -1370,7 +1487,55 @@ export async function buildBettorDrawer(drawer, b) {
   const balance = b.kalshi_balance != null ? fmt$(b.kalshi_balance) : 'Paper'
   const modeCls = b.paper ? 'muted' : 'good'
 
+  // ── Bankroll breakdown (data already in b from /api/ks/bettors) ──
+  const pgBudget = b.pregame_budget ?? 0
+  const igBudget = b.ingame_budget  ?? 0
+  const pgUsed   = b.pregame_used   ?? 0
+  const igUsed   = b.ingame_used    ?? 0
+  const fmUsed   = b.freemoney_used ?? 0
+  const pgPct    = pgBudget > 0 ? Math.min(999, Math.round(pgUsed / pgBudget * 100)) : 0
+  const igPct    = igBudget > 0 ? Math.min(999, Math.round(igUsed / igBudget * 100)) : 0
+  const pgFill   = Math.min(100, pgPct)
+  const igFill   = Math.min(100, igPct)
+  const fmFill   = Math.min(100, fmUsed > 0 ? Math.round(fmUsed / 30 * 100) : 0)
+
   drawer.innerHTML = `
+    <div class="sc-bd sc-bd-drawer">
+      <div class="sc-bd-title">BANKROLL BREAKDOWN</div>
+      <div class="sc-bd-starting">
+        <span>Starting balance</span>
+        <span>${fmt$(b.start_bankroll)}</span>
+      </div>
+      <div class="sc-bd-row">
+        <div class="sc-bd-row-header">
+          <span class="sc-bd-row-label">Pre-game <span class="sc-bd-alloc">70% budget</span></span>
+          <span class="sc-bd-row-nums">
+            <span class="sc-bd-pct ${pgPct >= 100 ? 'sc-bd-over' : ''}">${pgPct}%</span>
+            <span class="sc-bd-slash">${fmt$(pgUsed)} / ${fmt$(pgBudget)}</span>
+          </span>
+        </div>
+        <div class="sc-bd-bar-track"><div class="sc-bd-bar-fill ${pgPct >= 100 ? 'sc-bd-bar-over' : 'sc-bd-bar-pre'}" style="width:${pgFill}%"></div></div>
+      </div>
+      <div class="sc-bd-row">
+        <div class="sc-bd-row-header">
+          <span class="sc-bd-row-label">In-game <span class="sc-bd-alloc">20% budget</span></span>
+          <span class="sc-bd-row-nums">
+            <span class="sc-bd-pct ${igPct >= 100 ? 'sc-bd-over' : ''}">${igPct}%</span>
+            <span class="sc-bd-slash">${fmt$(igUsed)} / ${fmt$(igBudget)}</span>
+          </span>
+        </div>
+        <div class="sc-bd-bar-track"><div class="sc-bd-bar-fill ${igPct >= 100 ? 'sc-bd-bar-over' : 'sc-bd-bar-live'}" style="width:${igFill}%"></div></div>
+      </div>
+      <div class="sc-bd-row">
+        <div class="sc-bd-row-header">
+          <span class="sc-bd-row-label">Free money <span class="sc-bd-alloc">pulled / blowout</span></span>
+          <span class="sc-bd-row-nums">
+            <span class="sc-bd-fm-amt">${fmt$(fmUsed)}</span>
+          </span>
+        </div>
+        <div class="sc-bd-bar-track"><div class="sc-bd-bar-fill sc-bd-bar-fm" style="width:${fmFill}%"></div></div>
+      </div>
+    </div>
     <div class="dr-inner">
       <div class="dr-summary">
         <div class="dr-sum-cell">
@@ -1408,7 +1573,206 @@ export async function buildBettorDrawer(drawer, b) {
           <div class="dr-sum-sub">${(b.daily_risk_pct * 100).toFixed(0)}% of bankroll</div>
         </div>
       </div>
+    </div>
+  </div>`
+}
+
+// ── Positions Panel ──────────────────────────────────────────────────────────
+
+export async function loadPositions(date) {
+  const panel = document.getElementById('positions-panel')
+  if (!panel) return
+  const uidParam = state.liveBettorId ? `&user_id=${state.liveBettorId}` : ''
+  const data = await fetchJson(`/api/ks/positions?date=${date}${uidParam}`).catch(() => null)
+  if (!data || !data.pitchers?.length) {
+    panel.innerHTML = ''
+    panel.classList.remove('pp-open')
+    return
+  }
+  const wasOpen = panel.classList.contains('pp-open')
+  panel.innerHTML = _renderPositionsPanel(data)
+  // Restore or default to open
+  const savedState = localStorage.getItem('pp-open')
+  const shouldOpen = savedState !== '0'
+  if (shouldOpen || wasOpen) panel.classList.add('pp-open')
+  // Sync chevron
+  const chevron = document.getElementById('pos-chevron')
+  if (chevron) chevron.style.transform = panel.classList.contains('pp-open') ? 'rotate(0deg)' : 'rotate(-90deg)'
+}
+
+export function updatePositionsPanelKs(livePitchers) {
+  // Update K count badges, inning, and pitching dot in-place from live_update
+  for (const p of livePitchers) {
+    const badge = document.querySelector(`.pp-ks-badge[data-pid="${p.pitcher_id}"]`)
+    if (!badge) continue
+    badge.textContent = `${p.ks}K`
+    badge.className = `pp-ks-badge ${p.is_final ? 'final' : p.still_in ? 'live' : 'pulled'}` +
+      ` pp-ks-badge--base`
+    badge.dataset.pid = p.pitcher_id
+
+    // Live dot
+    const dot = document.querySelector(`.pp-live-dot[data-pid="${p.pitcher_id}"]`)
+    if (dot) dot.className = p.is_pitching ? 'pp-live-dot active' : 'pp-live-dot'
+
+    // Inning text
+    const inningEl = document.querySelector(`.pp-inning[data-pid="${p.pitcher_id}"]`)
+    if (inningEl) {
+      inningEl.textContent = p.is_final ? 'Final'
+        : p.inning ? `${p.inning_state === 'Top' ? '▲' : p.inning_state === 'Bottom' ? '▼' : ''}${p.inning}`
+        : ''
+    }
+    // Update row states
+    const rows = document.querySelectorAll(`.pp-row[data-pid="${p.pitcher_id}"]`)
+    for (const row of rows) {
+      const strike    = Number(row.dataset.strike)
+      const side      = row.dataset.side
+      const needed    = Math.max(0, strike - p.ks)
+      const statusEl  = row.querySelector('.pp-status')
+      if (!statusEl || row.dataset.result) continue
+
+      const newState = side === 'YES'
+        ? p.ks >= strike ? 'covered' : needed === 1 ? 'hot' : 'pending'
+        : p.ks >= strike ? 'no-hit' : 'no-safe'
+
+      // Flash on first clear/hit
+      const prev = row.dataset.liveState
+      if (newState !== prev && (newState === 'covered' || newState === 'no-safe')) {
+        row.classList.add('pp-flash')
+        setTimeout(() => row.classList.remove('pp-flash'), 1400)
+      }
+      row.dataset.liveState = newState
+
+      // Row border/bg state
+      row.classList.remove('pp-row-covered', 'pp-row-hot', 'pp-row-no-hit')
+      if      (newState === 'covered') row.classList.add('pp-row-covered')
+      else if (newState === 'hot')     row.classList.add('pp-row-hot')
+      else if (newState === 'no-hit')  row.classList.add('pp-row-no-hit')
+
+      // Status text
+      if (side === 'YES') {
+        if (newState === 'covered') { statusEl.className = 'pp-status pp-won';     statusEl.textContent = '✓ covered' }
+        else if (newState === 'hot'){ statusEl.className = 'pp-status pp-hot';     statusEl.textContent = '1 more!' }
+        else                        { statusEl.className = 'pp-status pp-pending'; statusEl.textContent = `${needed} more` }
+      } else {
+        if (newState === 'no-hit')  { statusEl.className = 'pp-status pp-lost'; statusEl.textContent = '✗ hit' }
+        else                        { statusEl.className = 'pp-status pp-won';  statusEl.textContent = `✓ safe (${p.ks}K)` }
+      }
+    }
+  }
+}
+
+function _renderPositionsPanel(data) {
+  const { pitchers, total_risk, total_contracts, total_win_potential } = data
+  const totalPending = pitchers.flatMap(p => p.positions).filter(pos => !pos.result).length
+  const totalWins    = pitchers.flatMap(p => p.positions).filter(pos => pos.result === 'win').length
+  const totalLosses  = pitchers.flatMap(p => p.positions).filter(pos => pos.result === 'loss').length
+
+  const pitcherBlocks = pitchers.map(p => {
+    const live    = shared.liveOverlay?.[String(p.pitcher_id)]
+    const ks      = live?.ks ?? null
+    const dailyP  = shared.dailyPitchers?.find(dp => String(dp.pitcher_id) === String(p.pitcher_id))
+    const gameTimeFmt = dailyP?.game_time
+      ? new Date(dailyP.game_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+      : null
+    const ksBadge = ks != null
+      ? `<span class="pp-ks-badge pp-ks-badge--base ${live?.is_final ? 'final' : live?.still_in ? 'live' : 'pulled'}" data-pid="${p.pitcher_id}">${ks}K</span>`
+      : `<span class="pp-ks-badge pp-ks-badge--base waiting" data-pid="${p.pitcher_id}">–K</span>`
+
+    const dotCls  = live?.is_pitching ? 'pp-live-dot active' : 'pp-live-dot'
+    const inningTxt = live
+      ? live.is_final ? 'Final'
+        : live.inning  ? `${live.inning_state === 'Top' ? '▲' : live.inning_state === 'Bottom' ? '▼' : ''}${live.inning}`
+        : ''
+      : ''
+
+    const rows = p.positions.map(pos => {
+      const liveKs  = ks ?? 0
+      const needed  = Math.max(0, pos.strike - liveKs)
+      const fillPct = pos.fill_price
+      const isWon   = pos.result === 'win'
+      const isLost  = pos.result === 'loss'
+      let statusHtml
+      if (isWon)        statusHtml = `<span class="pp-status pp-won">✓ won  +${fmt$(pos.pnl)}</span>`
+      else if (isLost)  statusHtml = `<span class="pp-status pp-lost">✗ lost  ${fmt$(pos.pnl)}</span>`
+      else if (pos.side === 'YES') {
+        if (ks != null && ks >= pos.strike) statusHtml = `<span class="pp-status pp-won">✓ covered</span>`
+        else if (ks != null && needed === 1) statusHtml = `<span class="pp-status pp-hot">1 more!</span>`
+        else statusHtml = `<span class="pp-status pp-pending">${ks != null ? `${needed} more` : 'waiting'}</span>`
+      } else {
+        if (ks != null && ks >= pos.strike) statusHtml = `<span class="pp-status pp-lost">✗ hit</span>`
+        else statusHtml = `<span class="pp-status pp-won">✓ safe${ks != null ? ` (${ks}K)` : ''}</span>`
+      }
+
+      // Live state for initial render
+      const liveState = !isWon && !isLost && ks != null
+        ? pos.side === 'YES'
+          ? ks >= pos.strike ? 'covered' : needed === 1 ? 'hot' : 'pending'
+          : ks >= pos.strike ? 'no-hit' : 'no-safe'
+        : null
+      const rowCls = isWon ? 'pp-row pp-row-won'
+        : isLost ? 'pp-row pp-row-lost'
+        : liveState === 'covered' ? 'pp-row pp-row-covered'
+        : liveState === 'hot'     ? 'pp-row pp-row-hot'
+        : liveState === 'no-hit'  ? 'pp-row pp-row-no-hit'
+        : 'pp-row'
+      const probPct = pos.model_prob != null ? Math.round(pos.model_prob * 100) : null
+      const probCls = probPct == null ? '' : probPct >= 65 ? 'pp-prob good' : probPct >= 45 ? 'pp-prob warn' : 'pp-prob bad'
+
+      return `<div class="${rowCls}" data-pid="${p.pitcher_id}" data-strike="${pos.strike}" data-side="${pos.side}" ${pos.result ? `data-result="${pos.result}"` : ''} ${liveState ? `data-live-state="${liveState}"` : ''}>
+        <span class="pp-side ${pos.side === 'YES' ? 'pp-yes' : 'pp-no'}">${pos.side}</span>
+        <span class="pp-strike">${pos.strike}+</span>
+        <span class="pp-contracts">${pos.contracts}<small>c</small></span>
+        <span class="pp-fill">@${fillPct}¢</span>
+        <span class="pp-cost">${fmt$(pos.cost)}</span>
+        ${probPct != null ? `<span class="${probCls} pp-hide-mobile">${probPct}%</span>` : '<span class="pp-hide-mobile"></span>'}
+        <span class="pp-upside">${!pos.result && pos.win_potential > 0 ? `+${fmt$(pos.win_potential)}` : pos.result === 'win' ? `+${fmt$(pos.pnl)}` : ''}</span>
+        ${statusHtml}
+      </div>`
+    }).join('')
+
+    const groupWon   = p.positions.some(pos => pos.result === 'win')
+    const groupLost  = p.positions.every(pos => pos.result === 'loss')
+    const groupCls   = groupWon ? 'pp-group pp-group-won' : groupLost ? 'pp-group pp-group-lost' : 'pp-group'
+
+    return `<div class="${groupCls}">
+      <div class="pp-pitcher-head">
+        <span class="${dotCls}" data-pid="${p.pitcher_id}"></span>
+        <span class="pp-pitcher-name">${esc(p.pitcher_name)}</span>
+        <span class="pp-pitcher-game">${esc(p.game || '')}${gameTimeFmt ? `<span class="pp-game-time"> · ${gameTimeFmt}</span>` : ''}</span>
+        ${inningTxt ? `<span class="pp-inning" data-pid="${p.pitcher_id}">${inningTxt}</span>` : `<span class="pp-inning" data-pid="${p.pitcher_id}"></span>`}
+        ${ksBadge}
+      </div>
+      ${rows}
     </div>`
+  }).join('')
+
+  const winBadge  = totalWins   ? `<span class="pp-badge pp-badge-win">${totalWins}W</span>` : ''
+  const lossBadge = totalLosses ? `<span class="pp-badge pp-badge-loss">${totalLosses}L</span>` : ''
+  const pendBadge = totalPending ? `<span class="pp-badge pp-badge-pend">${totalPending} open</span>` : ''
+
+  return `<div class="pp-wrap">
+    <div class="pp-header">
+      <span class="pp-header-title">OPEN POSITIONS</span>
+      <span class="pp-header-badges">${winBadge}${lossBadge}${pendBadge}</span>
+      <span class="pp-header-total">${fmt$(total_risk)} deployed</span>
+    </div>
+    <div class="pp-col-head">
+      <span>Side</span><span>Strike</span><span>Contracts</span><span>Fill</span><span>Cost</span><span class="pp-hide-mobile">Model</span><span>Profit</span><span>Status</span>
+    </div>
+    ${pitcherBlocks}
+    <div class="pp-footer">
+      <div class="pp-footer-cell">
+        <div class="pp-footer-label">TOTAL INVESTED</div>
+        <div class="pp-footer-val">${fmt$(total_risk)}</div>
+        <div class="pp-footer-sub">${total_contracts} contracts · ${pitchers.length} pitchers</div>
+      </div>
+      <div class="pp-footer-cell pp-footer-right">
+        <div class="pp-footer-label">BEST CASE</div>
+        <div class="pp-footer-val good">+${fmt$(total_win_potential)}</div>
+        <div class="pp-footer-sub">if all pending win</div>
+      </div>
+    </div>
+  </div>`
 }
 
 export async function loadSparkline(el) {

@@ -22,7 +22,7 @@ async function main() {
   const bettors = await db.all(
     `SELECT id, name, kalshi_key_id, kalshi_private_key
      FROM users
-     WHERE active_bettor = 1 AND kalshi_key_id IS NOT NULL AND id != 1
+     WHERE active_bettor = 1 AND kalshi_key_id IS NOT NULL AND is_system_admin = 0
      ORDER BY id`,
   )
 

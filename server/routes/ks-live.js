@@ -33,8 +33,7 @@ router.get('/ks/live', wrap(async (req, res) => {
             filled_contracts, fill_price, order_status, result
        FROM ks_bets
        WHERE bet_date = ? AND live_bet = 0
-         AND (order_id IS NOT NULL OR filled_contracts > 0 OR result IS NOT NULL)
-         AND (paper = 0 OR filled_contracts > 0)
+         AND filled_contracts > 0
          ${uf.clause}`,
     [date, ...uf.args],
   )
@@ -86,21 +85,41 @@ router.get('/ks/live', wrap(async (req, res) => {
       const myBets    = pending.filter(b => String(b.pitcher_id) === starter.id)
       const allMyBets = allBets.filter(b => String(b.pitcher_id) === starter.id)
 
-      if (!isFinal) {
-        const wrongLosses = allMyBets.filter(b =>
-          b.result === 'loss' && b.side === 'YES' && starter.ks >= b.strike
+      // Correct wrong settlements caused by MLB API brief-Final blips (game appears done
+      // momentarily with low Ks, bets settle incorrectly, then game continues/re-finalizes).
+      // Run unconditionally — both mid-game and at actual game-final.
+      const now_corr = new Date().toISOString()
+      // YES bet wrongly settled as LOSS (pitcher actually has enough Ks)
+      const wrongLosses = allMyBets.filter(b =>
+        b.result === 'loss' && b.side === 'YES' && starter.ks >= b.strike
+      )
+      for (const b of wrongLosses) {
+        const contracts = b.filled_contracts
+        const fillFrac  = contracts ? (b.fill_price ?? (b.market_mid ?? 50)) / 100 : (b.market_mid ?? 50) / 100
+        const size      = contracts ?? (b.bet_size ?? 100)
+        // Fee paid at fill; locked-in win = contracts × (1 - fill)
+        const pnl       = Math.round(size * (1 - fillFrac) * 100) / 100
+        await db.run(
+          `UPDATE ks_bets SET result='win', actual_ks=?, pnl=?, settled_at=? WHERE id=?`,
+          [starter.ks, pnl, now_corr, b.id],
         )
-        for (const b of wrongLosses) {
-          const FEE       = 0.07
+        console.log(`[live] corrected wrong loss → WIN: ${b.pitcher_name} YES ${b.strike}+ (${starter.ks}K)  +$${pnl}`)
+      }
+      // NO bet wrongly settled as WIN (pitcher actually reached/exceeded the strike threshold)
+      if (isFinal) {
+        const wrongWins = allMyBets.filter(b =>
+          b.result === 'win' && b.side === 'NO' && starter.ks >= b.strike
+        )
+        for (const b of wrongWins) {
           const contracts = b.filled_contracts
           const fillFrac  = contracts ? (b.fill_price ?? (b.market_mid ?? 50)) / 100 : (b.market_mid ?? 50) / 100
           const size      = contracts ?? (b.bet_size ?? 100)
-          const pnl       = Math.round(size * (1 - fillFrac) * (1 - FEE) * 100) / 100
+          const pnl       = -(size * fillFrac)
           await db.run(
-            `UPDATE ks_bets SET result='win', actual_ks=?, pnl=?, settled_at=? WHERE id=?`,
-            [starter.ks, pnl, new Date().toISOString(), b.id],
+            `UPDATE ks_bets SET result='loss', actual_ks=?, pnl=?, settled_at=? WHERE id=?`,
+            [starter.ks, roundTo(pnl, 2), now_corr, b.id],
           )
-          console.log(`[live] corrected wrong loss → WIN: ${b.pitcher_name} YES ${b.strike}+ (${starter.ks}K)  +$${pnl}`)
+          console.log(`[live] corrected wrong win → LOSS: ${b.pitcher_name} NO ${b.strike}+ (${starter.ks}K)  ${pnl.toFixed(2)}`)
         }
       }
 
@@ -150,7 +169,7 @@ router.get('/ks/live', wrap(async (req, res) => {
         balls:        ls?.balls   ?? null,
         strikes:      ls?.strikes ?? null,
         outs:         ls?.outs    ?? null,
-        is_pitching:  isLive && !isFinal && !!starter.still_in && (side === 'home' ? ls?.inningState === 'Top' : ls?.inningState === 'Bottom'),
+        is_pitching:  isLive && !isFinal && !!starter.still_in && (starter.pitches ?? 0) > 0 && (side === 'home' ? ls?.inningState === 'Top' : ls?.inningState === 'Bottom'),
         bet_statuses: allMyBets.map(b => ({
           id:     b.id,
           strike: b.strike,
@@ -170,13 +189,19 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
   const date = req.query.date && req.query.date !== 'today' ? req.query.date : todayISO()
   const uf   = userFilter(req)
 
+  // Apr 28 — filter out unfilled resting orders. Adam's instruction: a bet with
+  // 0 fills is an order intent, not a position. Showing it as "locked in" or in
+  // best-case totals overstates real exposure. Include only bets with at least
+  // 1 filled contract OR a final result (win/loss/void).
   const bets = await db.all(`
     SELECT id, pitcher_id, pitcher_name, strike, side, bet_size, market_mid, spread,
-           model_prob, edge, bet_mode,
+           model_prob, edge, bet_mode, fill_price, filled_contracts, order_status,
            result, pnl, logged_at,
            live_ks_at_bet, live_ip_at_bet, live_inning, live_score
     FROM ks_bets
-    WHERE bet_date = ? AND live_bet = 1 AND paper = 0 ${uf.clause}
+    WHERE bet_date = ? AND live_bet = 1 AND paper = 0
+      AND filled_contracts > 0
+      ${uf.clause}
     ORDER BY pitcher_name ASC, strike ASC, logged_at DESC
   `, [date, ...uf.args])
 
@@ -213,6 +238,60 @@ router.get('/ks/live-bets', wrap(async (req, res) => {
   }
 
   res.json({ date, pitchers, totals })
+}))
+
+router.get('/ks/positions', wrap(async (req, res) => {
+  const date = req.query.date || todayISO()
+  const uf   = userFilter(req)
+
+  const bets = await db.all(`
+    SELECT id, pitcher_id, pitcher_name, game, strike, side,
+           filled_contracts, fill_price, capital_at_risk,
+           bet_size, market_mid, model_prob, result, pnl,
+           order_status, live_bet, bet_mode
+    FROM ks_bets
+    WHERE bet_date = ? AND paper = 0
+      AND filled_contracts > 0
+    ${uf.clause}
+    ORDER BY pitcher_name ASC, strike ASC
+  `, [date, ...uf.args])
+
+  const pitcherMap = new Map()
+  let totalRisk = 0, totalContracts = 0, totalWinPotential = 0
+
+  for (const b of bets) {
+    const key = String(b.pitcher_id || b.pitcher_name)
+    if (!pitcherMap.has(key)) {
+      pitcherMap.set(key, { pitcher_id: b.pitcher_id, pitcher_name: b.pitcher_name, game: b.game, positions: [] })
+    }
+    const contracts  = b.filled_contracts || 0
+    const fillFrac   = (b.fill_price ?? b.market_mid ?? 50) / 100
+    const cost       = b.capital_at_risk != null ? b.capital_at_risk : roundTo(contracts * fillFrac, 2)
+    // Apr 28 — match the formula used by /ks/daily UPSIDE card (ks-analytics.js:176).
+    // Kalshi taker fee is 0.07 × C × (1-C) per contract, capped at $0.0175 per contract.
+    // Old `× 0.93` formula overstates the fee on cheap-side bets, understating profit by
+    // ~$10 on a typical slate. Now picks max of (gross × 0.93, gross − 0.0175) per contract.
+    const winPot     = b.result === 'win'  ? (b.pnl || 0)
+                     : b.result           ? 0
+                     : roundTo(contracts * Math.max((1 - fillFrac) * 0.93, (1 - fillFrac) - 0.0175), 2)
+    if (!b.result) { totalRisk += cost; totalContracts += contracts; totalWinPotential += winPot }
+    pitcherMap.get(key).positions.push({
+      id: b.id, strike: b.strike, side: b.side,
+      contracts, fill_price: b.fill_price ?? b.market_mid ?? 50,
+      cost: roundTo(cost, 2), model_prob: b.model_prob,
+      result: b.result, pnl: b.pnl,
+      win_potential: winPot,
+      order_status: b.order_status, live_bet: b.live_bet, bet_mode: b.bet_mode,
+    })
+  }
+
+  res.json({
+    date,
+    pitchers: [...pitcherMap.values()],
+    total_risk:          roundTo(totalRisk, 2),
+    total_contracts:     totalContracts,
+    total_win_potential: roundTo(totalWinPotential, 2),
+  })
 }))
 
 router.get('/ks/schedule', wrap(async (req, res) => {

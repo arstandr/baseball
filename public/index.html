@@ -4,7 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Money Tree 2.0</title>
-  <link rel="stylesheet" href="/style.css?v=12"/>
+  <link rel="stylesheet" href="/style.css?v=13"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
   <script type="module" src="/app.js?v=10" defer></script>
 </head>
@@ -21,13 +21,14 @@
       <button class="mode"        data-view="log"      role="tab">History</button>
       <button class="mode"        data-view="pipeline" role="tab">Pipeline</button>
       <button class="mode"        data-view="settings" role="tab">Settings</button>
-      <button class="mode"        data-view="testing"  role="tab">Advanced</button>
+      <button class="mode"        data-view="testing"      role="tab">Advanced</button>
+      <button class="mode"        data-view="calibration"  role="tab">Calibration</button>
     </nav>
-    <div class="closer-status" id="closer-status" title="The Closer — live monitor agent">
-      <span class="closer-dot" id="closer-dot"></span>
+    <div class="closer-status" id="cage-status" title="Railway Production — operational layer health">
+      <span class="closer-dot" id="cage-dot"></span>
       <div class="closer-info">
-        <span class="closer-label">THE CLOSER</span>
-        <span class="closer-meta" id="closer-meta">—</span>
+        <span class="closer-label" id="cage-label">RAILWAY</span>
+        <span class="closer-meta" id="cage-meta">—</span>
       </div>
     </div>
     <div class="user" id="user-chip">
@@ -71,9 +72,12 @@
         <select class="user-select" id="user-select" title="Filter by user"></select>
       </div>
 
-      <!-- Simple day summary (new) -->
+      <!-- Unified day summary card -->
       <div class="sc-summary" id="sc-summary" hidden>
-        <div class="sc-summary-date" id="sc-summary-date"></div>
+        <div class="sc-top-row">
+          <span class="sc-summary-date" id="sc-summary-date"></span>
+          <span class="sc-meta-counts" id="sc-meta-counts"></span>
+        </div>
         <div class="sc-scoreboxes" id="sc-scoreboxes">
           <div class="sc-scorebox sc-scorebox-won" data-filter="win">
             <div class="sc-score-num" id="sc-won-count">0</div>
@@ -88,14 +92,27 @@
             <div class="sc-score-label">⏳ WAITING</div>
           </div>
         </div>
-        <button id="sc-filter-reset" class="sc-filter-reset-btn" hidden>✕ Show All</button>
-        <div class="sc-day-total" id="sc-day-total"></div>
+        <div class="sc-util-row">
+          <div class="sc-pos-btn" id="sc-pos-btn">
+            POSITIONS <span class="sc-pos-chevron" id="pos-chevron">▾</span>
+          </div>
+          <button id="sc-filter-reset" class="sc-filter-reset-btn" hidden>✕ Show All</button>
+        </div>
       </div>
 
-      <!-- Keep existing elements that app.js writes to -->
+      <!-- Positions panel — immediately under unified card -->
+      <div id="positions-panel"></div>
+
+      <!-- Keep existing elements that app.js writes to (day-header stays hidden) -->
       <div id="day-summary" class="day-summary" hidden></div>
       <div class="day-header" id="day-header" hidden></div>
       <div class="live-banner" id="live-banner" hidden></div>
+
+      <!-- NO contra-test experiment status (Apr 29 → 2026-05-20) -->
+      <div id="contra-test-panel" class="contra-test-panel" hidden></div>
+
+      <!-- Fade Model Paper Test (started 2026-05-07) -->
+      <div id="fade-test-panel" class="contra-test-panel" hidden></div>
 
       <!-- Morning Picks section -->
       <div class="sc-section-head" id="sc-picks-head" hidden>☀️ MORNING PICKS</div>
@@ -277,6 +294,23 @@
 
     <!-- ══════════════ PIPELINE VIEW ══════════════ -->
     <section class="view" id="view-pipeline" hidden>
+
+      <!-- ── System Feed ── -->
+      <div id="feed-card" class="feed-card">
+        <div class="feed-card-head" id="feed-head">
+          <span class="feed-live-dot" id="feed-live-dot"></span>
+          <span class="feed-title-text">System Feed</span>
+          <span class="feed-date-label" id="feed-date-label"></span>
+          <span class="feed-event-count" id="feed-event-count"></span>
+          <button class="feed-toggle-btn" id="feed-toggle-btn" aria-label="Collapse feed">▼</button>
+        </div>
+        <div class="feed-body" id="feed-body">
+          <div class="feed-list" id="feed-list">
+            <div class="feed-loading">Loading system events…</div>
+          </div>
+        </div>
+      </div>
+
       <div class="pipe-toolbar">
         <div class="pipe-date-bar" id="pipe-date-bar"></div>
         <div class="pipe-legend">
@@ -301,6 +335,53 @@
         <section class="pipe-detail" id="pipe-detail">
           <div class="pipe-detail-empty">Pick a pitcher on the left to see the full decision pipeline.</div>
         </section>
+      </div>
+
+      <!-- ── Calibration History ── -->
+      <div class="panel" style="margin-top:24px">
+        <div class="panel-head">
+          <h2>Model Calibration</h2>
+          <span class="panel-sub">Runs every Monday 3am ET · shows what changed each week</span>
+        </div>
+        <div id="pipeline-calib-history">
+          <div class="skel-row"></div>
+        </div>
+      </div>
+
+      <!-- ── P&L by Source ── -->
+      <div class="panel" style="margin-top:24px">
+        <div class="panel-head">
+          <h2>P&amp;L by Bet Source</h2>
+          <span class="panel-sub">Pre-game vs structural live vs probabilistic live</span>
+        </div>
+        <div id="pipeline-pnl-source">
+          <div class="skel-row"></div>
+        </div>
+      </div>
+
+      <!-- ── CLV (Closing Line Value) ── -->
+      <div class="panel" style="margin-top:24px">
+        <div class="panel-head">
+          <h2>Closing Line Value</h2>
+          <span class="panel-sub">Did we beat the closing market price? Positive CLV = good execution</span>
+        </div>
+        <div id="pipeline-clv-summary" style="padding:12px 0 4px">
+          <div class="skel-row"></div>
+        </div>
+        <div id="pipeline-clv-table">
+          <div class="skel-row"></div>
+        </div>
+      </div>
+
+      <!-- ── System Controls ── -->
+      <div class="panel" style="margin-top:24px">
+        <div class="panel-head">
+          <h2>System Controls</h2>
+          <span class="panel-sub">Kill switch and operational flags (admin only)</span>
+        </div>
+        <div id="pipeline-admin-controls" style="padding:16px">
+          <div class="skel-row"></div>
+        </div>
       </div>
     </section>
 
@@ -421,14 +502,21 @@
             <span class="sched-time rule-badge rule-gate" style="background:#1a3d6b;color:#70b8ff;font-size:10px;line-height:1.3">Crossed<br>YES</span>
             <div class="sched-body">
               <b>Threshold already hit — buy YES if market is lagged</b>
-              <p>The opposite of a pulled pitcher: if a starter <em>already has</em> enough strikeouts to cover a threshold (e.g. he has 8 Ks and the market is 8+), that YES contract is worth 100¢ — guaranteed. If Kalshi is still showing YES available at ≤20¢, we buy it immediately. The outcome is certain; we're just collecting what the market hasn't priced in yet. Capped at $10 per threshold, same $30 pitcher cap as above.</p>
+              <p>The opposite of a pulled pitcher: if a starter <em>already has</em> enough strikeouts to cover a threshold (e.g. he has 8 Ks and the market is 8+), that YES contract is worth 100¢ — guaranteed. If Kalshi is still showing YES available at ≤35¢, we buy it immediately. Buying at 35¢ still yields ~60¢ net per contract after the 7% fee — a certainty. Capped at $10 per threshold, same $30 pitcher cap as above.</p>
             </div>
           </div>
           <div class="sys-row sched-row">
             <span class="sched-time rule-badge rule-gate" style="background:#5a3d00;color:#ffc966;font-size:10px;line-height:1.3">Blowout<br>NO</span>
             <div class="sched-body">
               <b>Team losing big in late innings — pitcher pull is likely, buy NO</b>
-              <p>When a pitcher's team is losing by 5 or more runs starting in the 6th inning (or later), managers almost always pull their starter early. There's no reason to keep the ace in when the game is out of reach. If the pitcher still needs 3+ Ks to cover a threshold, that gap is structurally very hard to close before the hook. We buy NO taker orders in this situation — not as a certainty, but as a high-probability structural bet that the market usually underprices. Edge threshold: 10¢ or better after fees.</p>
+              <p>When a pitcher's team is losing by 5 or more runs starting in the 6th inning (or later), managers almost always pull their starter early. There's no reason to keep the ace in when the game is out of reach. If the pitcher still needs 3+ Ks to cover a threshold, that gap is structurally very hard to close before the hook. We buy NO taker orders in this situation — not as a certainty, but as a high-probability structural bet (~85%) that the market usually underprices. Edge threshold: 10¢ or better after fees.</p>
+            </div>
+          </div>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge rule-gate" style="background:#6b1a1a;color:#ffb0b0;font-size:10px;line-height:1.3">Early<br>Blowout</span>
+            <div class="sched-body">
+              <b>Blowout begins earlier — deficit ≥7 from inning 5+, buy NO</b>
+              <p>An aggressive variant of the blowout mode: when the team is down 7+ runs as early as the 5th inning with the pitcher at 65+ pitches and 2+ Ks still needed, the pull probability is extremely high (~88%). Managers rarely keep a starter in a 7-run hole — the game is effectively over. We fire NO taker orders immediately rather than waiting for the more conservative blowout gate. Same edge threshold (10¢) and per-threshold cap apply.</p>
             </div>
           </div>
           <div class="sys-row sched-row">
@@ -436,6 +524,20 @@
             <div class="sched-body">
               <b>High pitch count + too big a gap — physically can't get there, buy NO</b>
               <p>Even if the pitcher is still in the game, some situations are structurally dead: if he's thrown 85+ pitches in 4+ innings and needs 3+ more strikeouts to cover a threshold, there just isn't enough gas left to do it. Starters rarely survive past 100–105 pitches, and each inning is only 3 outs — strikeouts aren't guaranteed. When pitch count and the K gap both say "not happening," we use a Kelly-sized NO taker rather than waiting. Capped at $10 per threshold via game reserves.</p>
+            </div>
+          </div>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge rule-cap" style="font-size:10px;line-height:1.3">Late-Inning<br>NO</span>
+            <div class="sched-body">
+              <b>9th inning+, still needs 2+ Ks, model says it won't happen — buy NO</b>
+              <p>When a pitcher reaches the 9th inning or later with 70+ pitches thrown, still needs 2+ more strikeouts to hit a threshold, and our model gives him less than 20% probability of reaching it — we buy NO takers immediately. The combination of late inning + high pitch count + K gap + low model probability creates a near-certain structural dead end (~90% confidence). Speed matters here since pitching changes in the 9th happen quickly. Edge threshold: 10¢ or better after fees.</p>
+            </div>
+          </div>
+          <div class="sys-row sched-row">
+            <span class="sched-time rule-badge" style="background:#2d1a5a;color:#c8a0ff;font-size:10px;line-height:1.3">Pull<br>Hedge</span>
+            <div class="sched-body">
+              <b>Pitcher likely leaving soon — pre-position NO before the pull happens</b>
+              <p>When conditions strongly suggest a pull is imminent (high pitch count, late inning, struggling in the game) but it hasn't happened yet, we take a NO position at current market prices as a pre-emptive hedge. If the pull happens, we capture the free-money window at a better price. If the pitcher stays in, the bet is evaluated on normal model edge — the pre-positioning must clear the 10¢ edge threshold regardless.</p>
             </div>
           </div>
           <div class="sys-row sched-row">
@@ -550,6 +652,27 @@
               </div>
             </div>
             <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-block">Rule G</span>
+              <div class="sched-body">
+                <b>Block YES bets at 8+ or 9+ strikeouts</b>
+                <p>YES 8+ went 0-for-12 (-$122) in Apr 2026. The model's K distribution has a right-tail calibration problem — it significantly overestimates the probability of very high strikeout games. The probability of getting zero wins in 12 tries at the model's own 38% estimate is less than 0.3%, so this isn't bad luck. YES 8+ and 9+ are banned until the model is recalibrated at the high end.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-block">Rule H</span>
+              <div class="sched-body">
+                <b>YES 7+ requires 25¢ edge minimum (up from 12¢)</b>
+                <p>The model overestimates YES 7+ probability by roughly 4× — 47% average model prediction vs 13% actual win rate in Apr 2026. The model isn't useless here, but it requires a much larger edge buffer to stay profitable. A 25¢ edge means the market would need to be seriously mispricing the 7+ threshold before we take the bet.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
+              <span class="sched-time rule-badge rule-block">Rule I</span>
+              <div class="sched-body">
+                <b>NO 7+ requires all three: YES mid ≤35¢, model &lt;18%, edge ≥20¢</b>
+                <p>NO 7+ went 50% win rate but lost $309 in Apr 2026. The problem was fill price — when the YES market is near 42¢, you pay ~53¢ for the NO, and 50% wins at 53¢ fill is a guaranteed loser. The fix: only bet NO 7+ when the market prices YES 7+ at 35¢ or below (so the NO stays under 50¢), our model gives the pitcher less than 18% chance of hitting 7, AND the edge is at least 20¢. All three must hold simultaneously.</p>
+              </div>
+            </div>
+            <div class="sys-row sched-row">
               <span class="sched-time rule-badge rule-gate">Lineup<br>Gate</span>
               <div class="sched-body">
                 <b>No bets until BOTH teams' lineups are confirmed</b>
@@ -572,6 +695,65 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <h2>Betting Rules</h2>
+          <span class="panel-sub">Tunable thresholds — calibration engine updates these weekly</span>
+        </div>
+        <div id="rules-container">
+          <div class="skel-row"></div><div class="skel-row"></div><div class="skel-row"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ CALIBRATION VIEW ══════════════ -->
+    <section class="view" id="view-calibration" hidden>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Calibration Curve</h2><span class="panel-sub">Predicted probability vs actual win rate</span></div>
+          <canvas id="calib-curve-chart" style="max-height:260px"></canvas>
+          <div id="calib-curve-empty" class="muted" style="display:none;padding:16px">Not enough data yet — needs 30+ resolved bets per bucket.</div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Edge Quality</h2><span class="panel-sub">Edge bucket vs actual ROI</span></div>
+          <canvas id="edge-quality-chart" style="max-height:260px"></canvas>
+          <div id="edge-quality-empty" class="muted" style="display:none;padding:16px">Not enough data yet.</div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Pitcher Reliability</h2><span class="panel-sub">Actual ROI ÷ expected ROI (10+ bets required)</span></div>
+          <div id="pitcher-reliability-table"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Last Calibration Run</h2><span class="panel-sub"></span></div>
+          <div id="calib-last-run" style="padding:8px 0"></div>
+          <button id="btn-run-calib" class="btn-sm" style="margin-top:12px">Run calibration now</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Data Collection</h2><span class="panel-sub">Market snapshots captured every 10 min</span></div>
+        <div id="snapshot-stats" style="display:flex;gap:32px;padding:8px 0;flex-wrap:wrap"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Backtest</h2><span class="panel-sub">Replay market snapshots through any strategy</span></div>
+        <form id="backtest-form" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:16px">
+          <label class="field-label">Start date<input type="date" name="dateStart" class="field-input"></label>
+          <label class="field-label">End date<input type="date" name="dateEnd" class="field-input"></label>
+          <label class="field-label">Min edge %<input type="number" name="minEdge" value="5" step="0.5" min="0" max="50" class="field-input"></label>
+          <label class="field-label">Kelly fraction<input type="number" name="kellyFraction" value="0.25" step="0.05" min="0.05" max="1" class="field-input"></label>
+          <label class="field-label">Max % bankroll<input type="number" name="maxPctBankroll" value="5" step="0.5" min="1" max="20" class="field-input"></label>
+          <label class="field-label">Starting bankroll $<input type="number" name="startingBankroll" value="5000" step="100" class="field-input"></label>
+          <label class="field-label">Side<select name="sidesAllowed" class="field-input"><option value="both">Both</option><option value="YES">YES only</option><option value="NO">NO only</option></select></label>
+          <label class="field-label">Game status<select name="gameStatusFilter" class="field-input"><option value="both">Both</option><option value="Preview">Pre-game</option><option value="Live">Live only</option></select></label>
+          <label class="field-label">Use calibration<select name="useCalibration" class="field-input"><option value="true">Yes</option><option value="false">No (raw model)</option></select></label>
+          <label class="field-label">Label (optional)<input type="text" name="label" class="field-input" placeholder="e.g. baseline"></label>
+        </form>
+        <button id="btn-run-backtest" class="btn-sm">Run backtest</button>
+        <div id="backtest-status" style="margin:8px 0;color:var(--muted);font-size:13px"></div>
+        <div id="backtest-results" style="margin-top:16px"></div>
       </div>
     </section>
 

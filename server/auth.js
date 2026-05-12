@@ -78,6 +78,15 @@ export async function seedUsersFromEnv() {
       )
     } catch { /* ignore */ }
   }
+  // Mark the first user (Adam / USER1) as system admin so id != 1 filters
+  // can be replaced with is_system_admin = 0 in a multi-user safe way.
+  try {
+    const adminName = (process.env.USER1_NAME || DEFAULT_USERS[0].name).trim()
+    await db.run(
+      `UPDATE users SET is_system_admin = 1 WHERE name = ? COLLATE NOCASE`,
+      [adminName],
+    )
+  } catch { /* column may not exist on old schema — migrate() handles it */ }
 }
 
 // ── Middleware ───────────────────────────────────────────────────────────────
