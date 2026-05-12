@@ -1088,6 +1088,29 @@ CREATE INDEX IF NOT EXISTS idx_msnap_pitcher  ON market_snapshots(pitcher_id, ga
 CREATE INDEX IF NOT EXISTS idx_msnap_resolved ON market_snapshots(resolved_at);
 CREATE INDEX IF NOT EXISTS idx_msnap_bet      ON market_snapshots(bet_id);
 
+-- fade_fire_snapshots: the fade model's fire-time ladder for every starter it evaluates —
+-- every strike's live ask + the model λ/prob/edge + H-I confidence + which FADE_VARIANT was
+-- live, captured BEFORE any selection. No-lookahead replay fuel: re-run any variant's
+-- selection logic on these rows, join actual_ks after settlement. Written by fireFadeModel.mjs.
+CREATE TABLE IF NOT EXISTS fade_fire_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  captured_at TEXT NOT NULL,
+  bet_date TEXT NOT NULL,
+  pitcher_id TEXT NOT NULL,
+  pitcher_name TEXT,
+  ticker TEXT NOT NULL,
+  strike INTEGER NOT NULL,
+  yes_bid INTEGER, yes_ask INTEGER,
+  lambda REAL, model_prob REAL, edge REAL,
+  k9_l5 REAL, avg_ip_l5 REAL,
+  lineup_adjusted INTEGER DEFAULT 0,
+  confidence REAL,
+  fade_variant TEXT,
+  actual_ks INTEGER,
+  UNIQUE(bet_date, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_ffs_date ON fade_fire_snapshots(bet_date);
+
 -- ========================================================================
 -- f5_market_snapshots: Kalshi KXMLBF5TOTAL quotes, one row per (ticker × poll)
 -- Written every ~5 min by scripts/captureF5Snapshots.mjs during game windows.

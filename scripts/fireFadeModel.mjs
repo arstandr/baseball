@@ -194,11 +194,51 @@ async function getPaperBankroll() {
   return PAPER_BANKROLL_DEFAULT + Number(r.rows[0].total ?? 0)
 }
 
+// Fire-time ladder log — every strike's live ask + the model's λ/prob/edge at the
+// moment the fade model evaluated this pitcher, plus the variant + H-I confidence.
+// This is the no-lookahead replay fuel: any future variant's selection logic can be
+// re-run against these rows (join actual_ks afterward). Independent of what fired.
+async function ensureFireSnapshotTable() {
+  await db.execute(`CREATE TABLE IF NOT EXISTS fade_fire_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at TEXT NOT NULL,
+    bet_date TEXT NOT NULL,
+    pitcher_id TEXT NOT NULL,
+    pitcher_name TEXT,
+    ticker TEXT NOT NULL,
+    strike INTEGER NOT NULL,
+    yes_bid INTEGER, yes_ask INTEGER,
+    lambda REAL, model_prob REAL, edge REAL,
+    k9_l5 REAL, avg_ip_l5 REAL,
+    lineup_adjusted INTEGER DEFAULT 0,
+    confidence REAL,
+    fade_variant TEXT,
+    actual_ks INTEGER,
+    UNIQUE(bet_date, ticker)
+  )`).catch(() => {})
+}
+async function logFireSnapshot({ today, p, chain, lam, lineupAdjusted, confidence }) {
+  const now = new Date().toISOString()
+  for (const c of chain) {
+    const modelProb = nbGEqN(lam.lambda, NB_DISPERSION, c.strike)
+    await db.execute({
+      sql: `INSERT OR REPLACE INTO fade_fire_snapshots
+        (captured_at, bet_date, pitcher_id, pitcher_name, ticker, strike, yes_bid, yes_ask,
+         lambda, model_prob, edge, k9_l5, avg_ip_l5, lineup_adjusted, confidence, fade_variant, actual_ks)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, NULL)`,
+      args: [now, today, String(p.pitcher_id), p.pitcher_name, c.ticker, Number(c.strike),
+        c.yes_bid ?? null, c.yes_ask, lam.lambda, modelProb, modelProb - c.yes_ask / 100,
+        lam.k9 ?? null, lam.avgIp ?? null, lineupAdjusted ? 1 : 0, confidence ?? null, FADE_VARIANT],
+    }).catch(() => {})
+  }
+}
+
 async function main() {
   const { today, starters } = await loadEligibleStarters()
   console.log(`[fade-model] ${today}: ${starters.length} starter(s) eligible`)
   if (starters.length === 0) return
 
+  await ensureFireSnapshotTable()
   const bankroll = await getPaperBankroll()
   console.log(`[fade-model] paper bankroll = $${bankroll.toFixed(0)}`)
 
@@ -312,6 +352,13 @@ async function main() {
       console.log(`  [skip] ${p.pitcher_name} — chain too thin (${chain.length} strikes)`)
       continue
     }
+
+    // No-lookahead replay log: dump the full fire-time ladder (every strike's ask +
+    // model λ/prob/edge + confidence + variant) before any selection happens.
+    await logFireSnapshot({
+      today, p, chain, lam, lineupAdjusted,
+      confidence: sig?.confidence != null ? Number(sig.confidence) : null,
+    })
 
     // Candidate selection. Edge band: 5¢ ≤ edge ≤ 20¢ (skip suspicious huge edges).
     //   v3:  best K=6 and best K≥10 separately (per-pitcher cap 2) — strike filter FAILED OOS.
