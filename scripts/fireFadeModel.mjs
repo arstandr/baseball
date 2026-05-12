@@ -41,6 +41,21 @@ const MAX_PCT_OF_VOLUME = 0.10
 const MIN_FILLABLE_CONTRACTS = 50  // skip if even this much would exceed liquidity
 const DISCORD_WEBHOOK = process.env.FADE_DISCORD_WEBHOOK || process.env.DISCORD_PERSONAL_WEBHOOK
 
+// ─── Strategy variant ───────────────────────────────────────────────────────
+// 2026-05-12 out-of-sample test (scripts/v3HistoricalTest.mjs, Mar 31–May 6, the
+// 858-record window v3's filters were NOT designed on):
+//   v1 (best-edge strike ≥6, no v3 filters)  baseline
+//   v1 + H-H (avg_innings_l5 ≥ 5)             −$42k vs v1   ← FAILED
+//   v1 + skip K=7-9 (K=6 / K≥10 only)         −$57k vs v1   ← FAILED
+//   v1 + H-I (confidence > 0.3)               +$1.2k vs v1  ← neutral/positive, KEEP
+//   v3 (all of the above)                     −$68k vs v1   ← the May 7-10 +59% lift was overfit
+// → default reverted to 'v1h' = v1 + H-I (+ news-check + the 5-20¢ edge band, both
+//   kept since neither was in the OOS comparison and both are sound). News-check and
+//   H-I are unconditional. Set FADE_VARIANT=v3 to restore the full promoted-v3 filter
+//   set (H-H skip + K=6/K≥10-only candidate selection + per-pitcher cap 2).
+const FADE_VARIANT = (process.env.FADE_VARIANT || 'v1h').toLowerCase()
+const V3 = FADE_VARIANT === 'v3'
+
 const db = createClient({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN })
 
 // ─── Probability functions ──────────────────────────────────────────────────
@@ -188,30 +203,34 @@ async function main() {
   console.log(`[fade-model] paper bankroll = $${bankroll.toFixed(0)}`)
 
   for (const p of starters) {
-    // Per-pitcher cap = 2: allow ONE K=6 fire AND ONE K≥10 fire per pitcher per day.
-    // Skip pre-flight only if BOTH have already fired.
+    // Per-pitcher cap. v3: 2 (one K=6 + one K≥10) — skip only if BOTH already fired.
+    // v1h: 1 (best-edge strike ≥6) — skip if any fade row already exists today.
     const existing = await db.execute({
       sql: `SELECT strike FROM ks_bets WHERE pitcher_id = ? AND bet_date = ? AND strategy_mode = 'pregame_fade_yes'`,
       args: [p.pitcher_id, today],
     })
     const firedFavorite = existing.rows.some(r => Number(r.strike) === 6)
     const firedTail = existing.rows.some(r => Number(r.strike) >= 10)
-    if (firedFavorite && firedTail) {
-      console.log(`  [skip] ${p.pitcher_name} — already fired both K=6 and K≥10 today`)
+    if (V3) {
+      if (firedFavorite && firedTail) {
+        console.log(`  [skip] ${p.pitcher_name} — already fired both K=6 and K≥10 today`)
+        continue
+      }
+    } else if (existing.rows.length > 0) {
+      console.log(`  [skip] ${p.pitcher_name} — fade bet already fired today`)
       continue
     }
 
-    // ── v3 PROMOTED FILTERS ──────────────────────────────────────
-    // H-H: skip if avg_innings_l5 < 5.0
-    // H-I: skip if confidence ≤ 0.3
-    // H-N strike filter applied later in the candidate-search loop
-    // News-check: skip if latest pitcher_news_log row says action='skip'
+    // ── Filters ──────────────────────────────────────────────────
+    // H-I (confidence > 0.3) and the news-check are UNCONDITIONAL (both variants).
+    // H-H (avg_innings_l5 ≥ 5) and the K=6/K≥10-only strike filter are v3-only —
+    // both failed the 2026-05-12 OOS test (see FADE_VARIANT note at top).
     const sigRow = await db.execute({
       sql: `SELECT avg_innings_l5, confidence FROM pitcher_signals WHERE pitcher_id = ? AND signal_date = ? LIMIT 1`,
       args: [p.pitcher_id, today],
     })
     const sig = sigRow.rows[0]
-    if (sig?.avg_innings_l5 != null && Number(sig.avg_innings_l5) < 5.0) {
+    if (V3 && sig?.avg_innings_l5 != null && Number(sig.avg_innings_l5) < 5.0) {
       console.log(`  [skip-H-H] ${p.pitcher_name} — avg_innings_l5=${Number(sig.avg_innings_l5).toFixed(1)} < 5.0`)
       continue
     }
@@ -294,34 +313,48 @@ async function main() {
       continue
     }
 
-    // v3 candidate selection — find BEST K=6 and BEST K≥10 separately.
-    // Per-pitcher cap = 2 (one each from favorite-zone and tail-zone if both qualify).
-    // Edge band: 5¢ ≤ edge ≤ 20¢ (skip suspicious huge edges).
-    let bestFavorite = null   // best K=6
-    let bestTail = null        // best K≥10
-    for (const c of chain) {
-      if (c.yes_ask > MAX_ASK || c.yes_ask < 3) continue
-      const modelProb = nbGEqN(lam.lambda, NB_DISPERSION, c.strike)
-      const edge = modelProb - c.yes_ask / 100
-      if (edge < MIN_EDGE || edge > MAX_EDGE) continue
-      if (Number(c.strike) === 6) {
-        if (!bestFavorite || edge > bestFavorite.edge) bestFavorite = { ...c, model_prob: modelProb, edge }
-      } else if (Number(c.strike) >= 10) {
-        if (!bestTail || edge > bestTail.edge) bestTail = { ...c, model_prob: modelProb, edge }
+    // Candidate selection. Edge band: 5¢ ≤ edge ≤ 20¢ (skip suspicious huge edges).
+    //   v3:  best K=6 and best K≥10 separately (per-pitcher cap 2) — strike filter FAILED OOS.
+    //   v1h: single best-edge candidate across all strikes ≥ MIN_STRIKE (per-pitcher cap 1).
+    let candidates = []
+    if (V3) {
+      let bestFavorite = null   // best K=6
+      let bestTail = null        // best K≥10
+      for (const c of chain) {
+        if (c.yes_ask > MAX_ASK || c.yes_ask < 3) continue
+        const modelProb = nbGEqN(lam.lambda, NB_DISPERSION, c.strike)
+        const edge = modelProb - c.yes_ask / 100
+        if (edge < MIN_EDGE || edge > MAX_EDGE) continue
+        if (Number(c.strike) === 6) {
+          if (!bestFavorite || edge > bestFavorite.edge) bestFavorite = { ...c, model_prob: modelProb, edge }
+        } else if (Number(c.strike) >= 10) {
+          if (!bestTail || edge > bestTail.edge) bestTail = { ...c, model_prob: modelProb, edge }
+        }
       }
+      candidates = [bestFavorite, bestTail].filter(Boolean)
+    } else {
+      let best = null
+      for (const c of chain) {
+        if (c.yes_ask > MAX_ASK || c.yes_ask < 3) continue
+        if (Number(c.strike) < MIN_STRIKE) continue
+        const modelProb = nbGEqN(lam.lambda, NB_DISPERSION, c.strike)
+        const edge = modelProb - c.yes_ask / 100
+        if (edge < MIN_EDGE || edge > MAX_EDGE) continue
+        if (!best || edge > best.edge) best = { ...c, model_prob: modelProb, edge }
+      }
+      candidates = best ? [best] : []
     }
-    const candidates = [bestFavorite, bestTail].filter(Boolean)
     if (candidates.length === 0) {
       console.log(`  [skip] ${p.pitcher_name} — no qualifying strike (λ=${lam.lambda.toFixed(2)}, k9=${lam.k9.toFixed(1)})`)
       continue
     }
 
-    // Fire each qualifying candidate (K=6 favorite + K≥10 tail), respecting per-class cap
+    // Fire each qualifying candidate, respecting per-class cap (v3) / single cap (v1h)
     for (const best of candidates) {
       const isFavorite = Number(best.strike) === 6
       const isTail = Number(best.strike) >= 10
-      if (isFavorite && firedFavorite) { console.log(`  [skip] ${p.pitcher_name} K≥6 already fired today`); continue }
-      if (isTail && firedTail)         { console.log(`  [skip] ${p.pitcher_name} K≥${best.strike} (tail) already fired today`); continue }
+      if (V3 && isFavorite && firedFavorite) { console.log(`  [skip] ${p.pitcher_name} K=6 already fired today`); continue }
+      if (V3 && isTail && firedTail)         { console.log(`  [skip] ${p.pitcher_name} K≥${best.strike} (tail) already fired today`); continue }
 
     // Sizing variants
     const sizings = sizingVariants(best.yes_ask, best.edge, bankroll)

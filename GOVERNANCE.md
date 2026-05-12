@@ -1,6 +1,6 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
-**Last updated: 2026-05-11 (Day 5 — v3.1 active; settlement-frontrun strategy investigated + killed; F5 adjacent market data collection started).**
+**Last updated: 2026-05-12 — fade model v3 promotion REVERTED to v1+H-I after the true out-of-sample test (every v3 filter except H-I destroyed EV vs v1; May 7-10 +59% lift was overfit). Added per-strike / per-ask P&L buckets to the daily fade report. Bankroll now compounds day-to-day (initBankrollState rollover). Fixed postGameAttribution `mode`-column crash and the scheduler postponement-cancel column-name bug. Base bankroll reset to $5,000 + prior-day P&L.**
 
 ## System Overview
 
@@ -825,8 +825,29 @@ status, and decision history. Updated 2026-05-07.
 - **Decision**: Keep running, collect data via `shadow_cross_strike` table.
   No filter changes during paper test (preserve full candidate distribution).
 
-### `pregame_fade_yes` v3 — fade with H-H/H-I + middle-strike skip (PROMOTED 2026-05-10 evening)
-- **Status**: Active paper test Day 5+. **THE PRIMARY VALIDATION TARGET.**
+### `pregame_fade_yes` — fade model  (⚠️ v3 REVERTED to v1+H-I on 2026-05-12 after OOS test)
+
+> **2026-05-12 — v3 promotion reverted.** The true out-of-sample test
+> (`scripts/v3HistoricalTest.mjs`, Mar 31–May 6, the 858-record window v3's filters
+> were *not* designed on) showed every v3 filter except H-I **destroys** EV vs v1:
+> H-H cost ~$42k, the K=6/K≥10-only strike filter ~$57k, v3 overall ~$68k vs v1.
+> Only H-I (confidence > 0.3) was OOS-neutral/positive. **Conclusion: the May 7-10
+> +59% lift was overfit to a 4-day sample.** `scripts/fireFadeModel.mjs` now defaults
+> to `FADE_VARIANT='v1h'` = v1 (best-edge strike ≥6, per-pitcher cap 1) + H-I +
+> news-check + the 5-20¢ edge band. Set `FADE_VARIANT=v3` (env var, no deploy needed)
+> to restore the full promoted-v3 filter set — the v3 code path is preserved, just
+> not the default.
+>
+> Also added 2026-05-12 to `scripts/fadeTestProgress.mjs`: per-strike-bucket breakdown
+> (K=6 favorite-fade / K=7-9 mid / K≥10 tail) and per-ask-price breakdown — because
+> K=6 and K≥10 are different products and the real edge may just be cheap tails.
+> First read of those buckets on the May 7-11 paper sample: **K=6 +$642 (+58% ROI),
+> K=7-9 −$2,279 (−91% ROI, the bulk of fires), K≥10 +$2,313 (+361% ROI).** Net +$676
+> is K=6 + tail convexity *minus* a bleeding mid-strike bucket — watch K=7-9 under v1h.
+>
+> Everything below describes the v3 config as it stood when promoted; kept for history.
+
+- **Status (pre-2026-05-12)**: Active paper test Day 5+. **THE PRIMARY VALIDATION TARGET.**
 - **v3 cutover**: 2026-05-11 first fire (next morning).
 - **Version history**:
   - v1 (5/7-5/10 morning): no filter, edge≥5c, ask≤50c, strike≥6

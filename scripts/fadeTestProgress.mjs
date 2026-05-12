@@ -54,6 +54,41 @@ async function main() {
     args: [TEST_START_DATE],
   })
 
+  // Strike-bucket breakdown — K=6 (favorite fade), K=7-9 (mid), K≥10 (long-tail convexity).
+  // Per ChatGPT 2026-05-12: K=6 and K≥10 are different products — separate hit-rate
+  // expectations and promotion criteria. Track them apart.
+  const byStrike = await db.execute({
+    sql: `SELECT
+      CASE WHEN strike = 6 THEN 'K=6 (favorite fade)'
+           WHEN strike BETWEEN 7 AND 9 THEN 'K=7-9 (mid)'
+           ELSE 'K≥10 (tail convexity)' END AS bucket,
+      COUNT(*) AS n,
+      SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS w,
+      SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS l,
+      ROUND(SUM(CASE WHEN result IN ('win','loss') THEN pnl ELSE 0 END), 2) AS pnl,
+      ROUND(SUM(CASE WHEN result IN ('win','loss') THEN filled_contracts * fill_price / 100 ELSE 0 END), 2) AS stake
+      FROM ks_bets WHERE strategy_mode='pregame_fade_yes' AND bet_date >= ?
+      GROUP BY bucket ORDER BY MIN(strike)`,
+    args: [TEST_START_DATE],
+  })
+
+  // Ask-bucket breakdown — P&L by entry price. Per ChatGPT 2026-05-12: the real edge
+  // may be "cheap tails only" (ask ≤ 25¢) rather than the model. Surface it.
+  const byAsk = await db.execute({
+    sql: `SELECT
+      CASE WHEN fill_price <= 10 THEN 'ask ≤ 10¢'
+           WHEN fill_price <= 25 THEN 'ask 11-25¢'
+           ELSE 'ask 26-50¢' END AS bucket,
+      COUNT(*) AS n,
+      SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS w,
+      SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS l,
+      ROUND(SUM(CASE WHEN result IN ('win','loss') THEN pnl ELSE 0 END), 2) AS pnl,
+      ROUND(SUM(CASE WHEN result IN ('win','loss') THEN filled_contracts * fill_price / 100 ELSE 0 END), 2) AS stake
+      FROM ks_bets WHERE strategy_mode='pregame_fade_yes' AND bet_date >= ?
+      GROUP BY bucket ORDER BY MIN(fill_price)`,
+    args: [TEST_START_DATE],
+  })
+
   const daysIn = Math.floor((Date.parse(today) - Date.parse(TEST_START_DATE)) / 86400000) + 1
   const milestone = daysIn < 7 ? 'pre-Day-7' :
                     daysIn < 14 ? 'Day-7 → Day-14' :
@@ -88,6 +123,27 @@ async function main() {
       const pnl = Number(r.pnl ?? 0)
       lines.push(`  ${r.bet_date}: ${r.n} fires (${r.w}W) — ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`)
     }
+  }
+
+  // Helper to render a bucket row: name — n fires, win%, P&L, per-bet ROI
+  const bucketLine = (b) => {
+    const n = Number(b.n), w = Number(b.w), l = Number(b.l)
+    const s = w + l
+    const wp = s > 0 ? (w / s * 100).toFixed(0) + '%' : '—'
+    const pnl = Number(b.pnl ?? 0), stake = Number(b.stake ?? 0)
+    const r = stake > 0 ? (pnl / stake * 100) : 0
+    return `  ${String(b.bucket).padEnd(22)} ${String(n).padStart(3)} fires · ${s}W/L · ${wp.padStart(4)} win · ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${r >= 0 ? '+' : ''}${r.toFixed(0)}% ROI)`
+  }
+
+  if (byStrike.rows.length > 0) {
+    lines.push('')
+    lines.push(`**By strike bucket** (K=6 favorite-fade vs K≥10 tail are different trades):`)
+    for (const b of byStrike.rows) lines.push(bucketLine(b))
+  }
+  if (byAsk.rows.length > 0) {
+    lines.push('')
+    lines.push(`**By ask price** (is the edge just cheap tails?):`)
+    for (const b of byAsk.rows) lines.push(bucketLine(b))
   }
 
   // Milestone gate hints
