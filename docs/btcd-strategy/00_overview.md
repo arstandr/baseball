@@ -78,6 +78,8 @@ Status check anytime: `python3 /tmp/btcd_paper_status.py`
 
 **2026-05-13 ~14:30 UTC (Day 2.4):** 55 BTC decision points → 11 trades (20% trigger), 5W/6L (45.5% win, CI 21-72%), avg cost $0.585, P&L −$1.43 on $6.43 deployed (−$0.13/contract). Breakeven win rate at avg cost = 58.5%; lower CI bound (21%) is below breakeven — can't yet distinguish "edge eroded" from "small-sample noise". ETH: 55 decisions, 0 trades — filter still rejecting every signal (ask consistently 0.91-1.00). Update this section by running `python3 /tmp/btcd_paper_status.py`.
 
+**2026-05-13 15:12 UTC — trader restarted with depth logging:** The dual-paper trader (`/tmp/dual_paper_v2.py`) was patched to capture and log `yes_ask_size`, `yes_bid_size`, and `vol_24h` on **every signal** (taken or skipped). Old instance (PID 76909, ran 2 days 12h) killed gracefully; new instance running. Reason: we cannot answer "how many contracts could I actually fill" from a snapshot-and-estimate process — the orderbook moves. Now we'll have ground-truth depth at every decision point inside `/tmp/dual_paper_log.jsonl`, and the shadow log carries it through. After ~1 week of accumulated rows we can answer "if I sized to $5K, what would have actually filled" from measured data, not from a single live-snapshot estimate of the next-hour event. Fields added to log: `yes_ask_size`, `yes_bid_size`, `vol_24h`. Existing rows pre-15:12 UTC don't have these — null is fine.
+
 ## Shadow tracker (added 2026-05-13)
 
 The shadow tracker is observational: for every signal the live filter SKIPS, it fetches the actual Kalshi settlement and computes the counterfactual P&L "had we taken it." Lets us see whether the filter is rejecting winners — without falling into the trap of retuning on a tiny sample.
@@ -198,6 +200,7 @@ launchctl unload ~/Library/LaunchAgents/com.btcd.shadow.plist              # sha
 | 2026-05-13 | Build shadow tracker for filter-rejected signals | n=11 live trades is meaningless; need to also observe rejected signals so we can see if the filter's leaving money on the table without retuning on tiny samples (v3-fade trap). Hourly launchd job. |
 | 2026-05-13 | Flag BTC mid > 0.65 and ETH ask 0.85-0.95 as patterns to track | Both above breakeven on the 99-skip backfill (BTC mid>0.65: 88% / +$1.84; ETH 0.85-0.95: 100% / +$1.08). DO NOT act yet — pre-committed bar: n≥30 + above breakeven + persists across ≥2 weekly windows + validate on 23k backtest before flipping. |
 | 2026-05-13 | Confirm ETH ask ≥ 0.95 stays rejected | Shadow tracker shows 31W of 32 (97%) but P&L −$0.95 — breakeven at 99% impossible to clear at any sustainable rate. Filter cap is correct at this band. |
+| 2026-05-13 | Patch trader to log yes_ask_size / yes_bid_size / vol_24h on every signal | Could not answer "what could I have actually filled at $5K size" from a single live-snapshot — needed measured depth at the moment of each decision. Trader restarted 15:12 UTC; ~1 week of rows needed before depth-aware sizing analysis is meaningful. |
 
 ## Pre-deploy checklist
 
