@@ -119,6 +119,20 @@ All four must be true before flipping a filter:
 3. **Pattern persists across ≥2 separate weekly windows** (not concentrated in one streak — guards against the v3-fade "lucky 4 days" trap)
 4. **Even then**: validate the proposed change on the proper 23k-snapshot backtest (`/tmp/kxbtc_backtest_data.json`), not the shadow log alone
 
+### 2026-05-13 backtest result — BOTH PATTERNS KILLED
+
+Ran step 4 of the bar against both patterns on the existing 23k BTC / 1.4k ETH backtest datasets (these were collected *before* the live paper trader started, so they're truly independent of the patterns' discovery in the 2.4-day live shadow). Both patterns **collapsed**:
+
+| Pattern | Live shadow (2.4d) | Full backtest | OOS test half |
+|---|---|---:|---|
+| BTC mid > 0.65 (closest-bucket, T-5min) | n=24, +21pp, ROI~10% | n=241, **+2.3pp, ROI+1%** | n=93, **+0.6pp, ROI-1%** |
+| BTC mid 0.65-0.85 (subset) | — | n=176, +1.6pp, ROI 0% | n=61, **−2.2pp, ROI−5%** |
+| ETH ask 0.85-0.95 (closest-bucket) | n=18, 100% win, +8pp | n=323, **+0.1pp, ROI−1%** | n=133, **−2.9pp, ROI−4%** |
+
+The 88% / 100% live-shadow win rates were variance, not signal. The shadow tracker observed two patterns in a 2.4-day window that don't replicate on independent historical data.
+
+**Decision: do not flip the filter.** Continue shadow-tracking the patterns (zero cost) so we have ongoing data; do not act on them unless they keep printing edge across many more weeks AND clear all four bar criteria again. This is the third "found edge" in this session (after v3-strikeout-fade and KXBTCD-directional) to die under disciplined OOS testing — the structural lesson is that 2-4 week in-sample patterns on Kalshi crypto markets reliably *find* artifacts and reliably *fail* on independent data. Pattern-matching is not a viable edge source here.
+
 ### Hypothetical v3 filter (if both patterns clear the bar)
 
 ```python
@@ -201,6 +215,8 @@ launchctl unload ~/Library/LaunchAgents/com.btcd.shadow.plist              # sha
 | 2026-05-13 | Flag BTC mid > 0.65 and ETH ask 0.85-0.95 as patterns to track | Both above breakeven on the 99-skip backfill (BTC mid>0.65: 88% / +$1.84; ETH 0.85-0.95: 100% / +$1.08). DO NOT act yet — pre-committed bar: n≥30 + above breakeven + persists across ≥2 weekly windows + validate on 23k backtest before flipping. |
 | 2026-05-13 | Confirm ETH ask ≥ 0.95 stays rejected | Shadow tracker shows 31W of 32 (97%) but P&L −$0.95 — breakeven at 99% impossible to clear at any sustainable rate. Filter cap is correct at this band. |
 | 2026-05-13 | Patch trader to log yes_ask_size / yes_bid_size / vol_24h on every signal | Could not answer "what could I have actually filled at $5K size" from a single live-snapshot — needed measured depth at the moment of each decision. Trader restarted 15:12 UTC; ~1 week of rows needed before depth-aware sizing analysis is meaningful. |
+| 2026-05-13 | KXBTCD directional fade (BUY NO [0.55-0.70]) — investigated and KILLED | 33-day in-sample backtest showed +21pp edge, ROI +49%. 33-day chronological OOS confirmed at +23pp. But truly-OOS forward slice (May 11-13, n=50 trades, real bid/ask from candle API) collapsed to +0.8pp / ROI -3%. The control bands REVERSED sign. Same v3-fade pattern: in-sample finding doesn't generalize forward. Strategy dead, no paper trader built. |
+| 2026-05-13 | Backtest the BTC mid>0.65 and ETH ask 0.85-0.95 shadow-tracker patterns — BOTH KILLED | Live shadow (2.4d) showed BTC +21pp / ETH 100% win. Proper 23k-BTC / 1.4k-ETH backtest: BTC +2.3pp (basically zero), ETH +0.1pp (zero); OOS test halves both slightly negative. Patterns are noise from a low-vol 2.4-day window. Filter NOT changed. Shadow tracker keeps logging (free). Third "found edge" this session to die on proper OOS — the structural lesson sticks: pattern-matching on small Kalshi crypto windows finds artifacts. |
 
 ## Pre-deploy checklist
 
