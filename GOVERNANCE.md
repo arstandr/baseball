@@ -80,6 +80,54 @@ Before any of B/C/D ship to prod:
 - Snapshot table: `fade_fire_snapshots` (every strike's ladder at fire time — replay fuel)
 - Killed-then-revived commit chain: `e28ce861` (revert to v1h) → `cb1477e4` (re-set v3 in prod)
 
+### Step E — Replay backtest result (2026-05-15)
+
+Replayed 465 fade_fire_snapshots rows × 61 pitcher-days across May 12-14 under 3 variants. Outcomes from `ks_bets.actual_ks` (44 settled pitcher-days). $100 stake per fire.
+
+| Variant | Fires | W-L | Win% | P&L | K=6 W-L | K≥10 W-L |
+|---|---|---|---|---|---|---|
+| **v3 (baseline)** | 14 | 3-11 | 21.4% | **−$716.58** | 3-3 | 0-8 |
+| **v1h** | 18 | 2-15 | 11.8% | **−$1,181.73** | 2-12 | 0-3 |
+| **v1h + pkLight** | 17 | 0-11 | 0.0% | **−$1,100.00** | 0-10 | 0-1 |
+
+**All three variants lose money on this week's data.** None pass the validation invariants:
+- Invariant 1 (beat v3 by ≥+$800): v1h Δ=**−$465 ⚠**, pkLight Δ=**−$383 ⚠**. Both **fail**.
+- Invariant 2 (K≥10 ≥1 win or skip-entirely): v1h 0-3, pkLight 0-1. Both **fail**.
+
+(`calibration_params` table has 0 rows despite `calibration_runs` reporting "promoted" buckets — separate plumbing bug. Variant 4 "v1h+pkModel+calibration" therefore collapses to v1h+pkLight and was not separately scored.)
+
+**Critical re-read of the diagnostic.** The original hypothesis was "K≥10 tail is the bleed; fix it and the strategy survives." The replay rejects this. v1h reduces K≥10 fires from 8→3 but **also picks DIFFERENT K=6 bets that lose worse than v3's K=6 bets** (2-12 vs 3-3). The K=6 bucket itself is wrong this week, not just the tail. Switching variants doesn't fix a model that's broken on its primary strike too.
+
+**Replay vs reality discrepancy.** The actual ks_bets P&L for May 12-14 was −$1,618 (77 bets), while v3 replay shows −$716 (14 fires) over the same window. Difference is due to (a) actual_ks coverage only spans 44 of 61 pitcher-days, (b) actual sizing varied while replay uses flat $100, (c) some pitchers had bets that fired outside the fade_fire_snapshots ladder. Direction is consistent (v3 loses); absolute magnitude differs.
+
+### Step E → Decision
+
+**B (wire pkModel) and C (wire calibration) are NOT shipped to prod.** Per the validation invariants I baked into this section, the gate did not clear. Shipping anyway would repeat the May 12 mistake of overriding a failed test with "we'll see in paper."
+
+Three deeper conclusions:
+
+1. **One week is not the full picture.** 3-day replay = ~14-18 fires per variant, way under any statistical bar. We need to extend the replay to all of May (or April + May) to get a defensible read on which variant is actually best. Step E should be re-run on a 4-week window before any prod change.
+
+2. **The model is broken on K=6 too, not just K≥10.** The "save the strategy by fixing the tail" thesis is partially wrong. The 3-day v3 K=6 line (3-3) looks fine, but v1h's K=6 (2-12) suggests K=6 fires v3 didn't make are also losers. The fade model has structural issues across the strike range, not isolated to the tail.
+
+3. **A is still the right move regardless.** FADE_VARIANT=v1h prevents the forced K≥10 fires. Even if v1h has its own problems, those problems can be capped at one bet per pitcher, while v3's per-pitcher cap of 2 with forced tail compounds losses by ~2×. The flip is defensive damage control, not a save — the actual save needs a longer replay window + the pkModel/calibration plumbing properly wired and tested on month-scale data.
+
+### Step E → Updated action plan
+
+| # | Fix | Status | Note |
+|---|---|---|---|
+| A | `FADE_VARIANT=v1h` | ✅ DONE | Stops the forced K≥10 tail. Still bleeds on K=6, but caps damage. |
+| B | Wire pkModel into fireFadeModel | **HOLD** | Replay failed validation gate. Re-run on 4-week window before re-considering. |
+| C | Wire calibration at fire | **BLOCKED** | `calibration_params` is empty — calibrationEngine has a write-path bug to fix first. |
+| D | Populate enrichment columns on INSERT | **STILL VALUABLE** | Unblocks future post-hoc audits. 30 min. Do regardless. |
+| **E2** | **Re-run replay on April + May window** (~4 weeks, hundreds of fires) | **NEW** | Statistical bar before any model change. Should write `scripts/replayFadeMultiVariant.mjs` as a permanent backtest tool. |
+| **F** | **Pause fade firing entirely until E2 completes** | **DECISION POINT** | v1h still losing this week (−$1,182 in replay). May not be worth running even v1h until the model is fundamentally upgraded. Bankroll already −31% drawdown; one more bad week and the paper experiment becomes unrepresentative of any future-real-bankroll behavior. |
+
+### Files referenced (Step E)
+- `/tmp/replay_week.py` — the 3-variant replay tool (reusable; param the date window for E2)
+- `/tmp/replay_week_results.json` — raw fire-by-fire output from this run
+- `/tmp/replay_week_run.log` — formatted summary
+
 ---
 
 ## System Overview
