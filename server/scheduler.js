@@ -1670,6 +1670,18 @@ export async function startScheduler({ gateway = null } = {}) {
     run('fade-progress', 'node scripts/fadeTestProgress.mjs')
   }, { timezone: 'America/New_York' })
 
+  // ── Weekly fade variant replay (Sundays 6:00 AM ET, rolling 28-day window) ──
+  // Replays v3 / v1h / pkLight on the last 28 days using fade-pipeline-correct
+  // math (NB r=8, lambda from last 5 starts, 09:00-11:00 ET snapshots,
+  // 10%-of-depth liquidity cap). Posts summary to Discord.
+  //
+  // Rationale (audit/v3-postmortem-may15): any FADE_VARIANT change must be
+  // backed by ≥14 days of ladder replay showing the new variant beats the
+  // active one by ≥+$800. This cron keeps that data fresh before any decision.
+  cron.schedule('0 6 * * 0', () => {
+    run('fade-multivariant-replay', 'node scripts/replayFadeMultiVariant.mjs --discord')
+  }, { timezone: 'America/New_York' })
+
   // ── F5 Kalshi snapshot capture (every 10 min, 10 AM – 11 PM ET) ──
   // Paper-test data collection only. Polls Kalshi for all open + recently-closed
   // KXMLBF5TOTAL markets; writes to f5_market_snapshots. Goal: collect 14+ days

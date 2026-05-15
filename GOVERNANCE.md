@@ -1,6 +1,8 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
-**Last updated: 2026-05-15 — FADE_VARIANT flipped back to v1h on Railway after 3 days of v3 paper losses (Tue −$310, Wed −$724, Thu −$584 = −$1,618 / −31% drawdown on $5,198 starting paper bankroll). Diagnostic confirmed v3 implementation matches its spec — the strategy itself is failing, not the code. Root cause is structural: the fade model fires on a single feature (k9_l5 × innings) while ignoring the entire Statcast / park / weather / umpire / velo signal stack that the codebase already collects. K≥10 tail bucket is the disaster zone (0W/15L Wed+Thu combined, CI rejects 22% model claim). See "2026-05-15 v3 Post-Mortem & Save Plan" section below.**
+**Last updated: 2026-05-15 (evening) — FINAL VARIANT DECISION: `FADE_VARIANT=v1h` set on Railway, backed by the corrected 19-day ladder replay (M+K+L fixes). The strategy is being run as paper-only primary test going forward; if it stabilizes positive over a 28-day window the question of going live re-opens. Permanent backtest tool committed at `scripts/replayFadeMultiVariant.mjs`; weekly Sunday 6am ET cron auto-replays the rolling 28-day window and posts to Discord. Validation invariant ratified: NO variant change without ≥14 days of ladder-replay evidence showing ≥+$800 P&L advantage. See "Step G v2 — FADE-CORRECT REPLAY" subsection.**
+
+**Last updated: 2026-05-15 (morning) — FADE_VARIANT flipped back to v1h on Railway after 3 days of v3 paper losses (Tue −$310, Wed −$724, Thu −$584 = −$1,618 / −31% drawdown on $5,198 starting paper bankroll). Diagnostic confirmed v3 implementation matches its spec — the strategy itself is failing, not the code. Root cause is structural: the fade model fires on a single feature (k9_l5 × innings) while ignoring the entire Statcast / park / weather / umpire / velo signal stack that the codebase already collects. K≥10 tail bucket is the disaster zone (0W/15L Wed+Thu combined, CI rejects 22% model claim). See "2026-05-15 v3 Post-Mortem & Save Plan" section below.**
 
 **Last updated: 2026-05-12 — fade model v3 promotion REVERTED to v1+H-I after the true out-of-sample test (every v3 filter except H-I destroyed EV vs v1; May 7-10 +59% lift was overfit). Added per-strike / per-ask P&L buckets to the daily fade report. Bankroll now compounds day-to-day (initBankrollState rollover). Fixed postGameAttribution `mode`-column crash and the scheduler postponement-cancel column-name bug. Base bankroll reset to $5,000 + prior-day P&L.**
 
@@ -410,6 +412,105 @@ v3 K≥10 was 4-73 (5% win rate). v1h K≥10 was 1-21 (5%) — identical rate, j
 ### Files referenced (Step G evaluation)
 - `/tmp/stress_test_g.py` — six-test stress evaluation
 - `/tmp/stress_test_g_run.log` — bootstrap, concentration, and worst-day output
+
+---
+
+### Step G v2 — FADE-CORRECT REPLAY (M+K+L fixes, 2026-05-15 evening)
+
+The original Step G replay was approximate. The max-think evaluation flagged 3 specific concerns; all 3 are now fixed and the replay re-run. **The directional verdict holds — v1h still beats v3 — but the magnitude is smaller and more honest.**
+
+#### Fixes applied
+
+**M-fix: model_prob source mismatch.**
+The replay was using `market_snapshots.model_prob`, which is computed by `scripts/live/strikeoutEdge.js` using `archetypeR(savant)` — a pitcher-specific NB dispersion of **20-50** (closer to Poisson, thinner tails). The actual fade pipeline (`scripts/fireFadeModel.mjs`) uses a hardcoded **NB_R = 8** (much fatter tails). This means market_snapshots' model_probs UNDERSTATE the fade model's bullishness on K≥10 strikes.
+
+The v2 replay recomputes model_prob from scratch using fade's exact math: `lambda = k9_l5 × avg_ip_l5 / 9` from the last 5 starts in `pitcher_recent_starts`, then `nbGeq(lambda, 8, strike)`. This is identically what `fireFadeModel.mjs` would have computed at fire time.
+
+**K-fix: snapshot timing.**
+Original replay used `MIN(captured_at)` per (pitcher, day, strike) = earliest snapshot, which could be hours before the fade cron fires. v2 restricts to snapshots captured in **09:00-11:00 ET** (= 13:00-15:00 UTC), matching the actual fade-cron fire window.
+
+**L-fix: liquidity cap.**
+Production has `MAX_PCT_OF_VOLUME = 10%` — bets can't exceed 10% of the market's 24h volume in contracts. v2 caps each fire's stake at `min($100, 0.10 × volume × ask_dec)`. This compresses the upside of low-ask wins (where 4¢ asks pay 24× but may only have $50-200 of size).
+
+#### Step G v2 results (April 27 - May 15, 19 days)
+
+| Variant | Fires | W-L | Win% | P&L | Total stake | Liq-capped | K=6 W-L | K=7-9 W-L | K≥10 W-L |
+|---|---|---|---|---|---|---|---|---|---|
+| v3 | 102 | 18-84 | 17.6% | **−$1,212** | $4,927 | 57/102 (56%) | 14-31 | 0-0 (skipped) | 4-53 |
+| **v1h** | **163** | **21-127** | 14.2% | **+$1,279** | $7,450 | 91/163 (56%) | 5-16 | 13-88 | 3-23 |
+| pkLight | 156 | 28-125 | 18.3% | **−$19** | $9,936 | 62/156 (40%) | 9-25 | 18-88 | 1-12 |
+
+**Validation invariants (must beat v3 by ≥+$800):**
+- **v1h Δ = +$2,492 ✓** (still passes the gate by 3.1×, vs Step G v1's 7.7×)
+- **pkLight Δ = +$1,193 ✓** (now near break-even; the hand-coded coefficients aren't adding clear value)
+
+#### What the M-fix changed
+
+The model_prob correction shrunk EVERY variant's win rate (Step G v1 v1h was 24%; v2 v1h is 14%). That's because:
+- Fade's r=8 produces FATTER TAILS than market_snapshots' r=20-50
+- model_prob for K=8-10 strikes is meaningfully HIGHER under r=8
+- Bigger model_probs → bigger edges → more fires → many of those new fires are losers because the realized K rates aren't actually as fat-tailed as r=8 implies
+
+**This says fade's r=8 may itself be too generous to the tail.** NB_R=8 was calibrated on older data; current pitcher distributions may have thinner tails. A future improvement (separate from the variant question) is to re-calibrate NB_R against the 2026 season data — there's a comment in `lib/strikeout-model.js` that says NB_R should be recalibrated yearly.
+
+#### What survived the corrections
+
+- **Directional verdict**: v1h > v3 still holds with corrected math.
+- **K≥10 still bad for everyone**: v3 = 4-53 (7%), v1h = 3-23 (12%), pkLight = 1-12 (8%). All three variants would prefer to fire LESS in the tail. v3's force-fire of K≥10 is still the largest single drag.
+- **Week-by-week shape preserved**: Wk-19 was the best week for all variants, Wk-20 was bad for all. v1h's Wk-19 P&L = +$2,137, v1h's Wk-20 = −$802. Still net positive across 19 days.
+
+#### What got worse than I thought
+
+- **Original "K=7-9 is the silent winner" finding was overstated.** With fade's correct r=8 math, K=7-9 wins drop from 31-105 (23%) to 13-88 (13%) — closer to K≥10's hit rate. The bucket is still less bad than the tail (because asks are lower so liquidity caps bite less) but it's not the +$4,595 cash cow I claimed.
+- **pkLight is now nearly break-even** (−$19 over 19 days). The +$4,027 from Step G v1 was an artifact of using inflated model_probs from a different model. With fade-correct math, pkLight is competitive with v3 but not v1h.
+
+### Step G v2 → Permanent infrastructure
+
+**`scripts/replayFadeMultiVariant.mjs` committed** to the repo. CLI:
+```
+node scripts/replayFadeMultiVariant.mjs                          # rolling 28-day window
+node scripts/replayFadeMultiVariant.mjs --from YYYY-MM-DD --to YYYY-MM-DD
+node scripts/replayFadeMultiVariant.mjs --discord                # post summary
+node scripts/replayFadeMultiVariant.mjs --json /tmp/out.json     # dump full results
+```
+
+**Cron added to `server/scheduler.js`**:
+```
+0 6 * * 0  (Sundays 6:00 AM ET)  → replayFadeMultiVariant.mjs --discord
+```
+Every Sunday morning we get an automated 28-day rolling backtest of all 3 variants posted to Discord. If a variant change is on the table, we have ladder data ready.
+
+### Step G v2 → Validation invariants (ratified)
+
+**Before any FADE_VARIANT change in production**:
+1. Replay window ≥ 14 days
+2. Candidate variant must beat the active variant by ≥+$800 P&L
+3. Bootstrap on daily P&L delta must show P(positive) ≥ 95%
+4. K≥10 bucket: either ≥1 win OR completely skipped in the candidate variant
+5. Replay must use the M+K+L corrected methodology (fade's NB(8) math, 09:00-11:00 ET snapshots, 10% liquidity cap)
+
+**The −$1,618 paper loss this week was the direct consequence of overriding these invariants** (specifically, flipping FADE_VARIANT=v3 on May 12 against an OOS test that said v3 loses). Going forward, no overrides.
+
+### Final action plan status
+
+| # | Action | Status |
+|---|---|---|
+| A | `FADE_VARIANT=v1h` | ✅ DONE |
+| B | Wire `pkModel.predictPk` | DEFER (pkLight beat v3 but not v1h with corrected math) |
+| C | Wire calibration at fire | BLOCKED — `calibration_params` table is empty (separate bug to fix) |
+| D | Populate enrichment columns on `ks_bets` INSERT | OPEN — 30 min, valuable for future audits |
+| **K** | Re-run Step G with 09:00-11:00 ET window | ✅ DONE |
+| **L** | Liquidity-cap proxy | ✅ DONE |
+| **M** | Verify model_prob source | ✅ DONE — was using wrong NB dispersion; replay now corrects this |
+| **N** | Move replay to repo | ✅ DONE — `scripts/replayFadeMultiVariant.mjs` |
+| **O** | Weekly Sunday 6am cron | ✅ DONE — added to `server/scheduler.js` |
+
+### Files referenced (Step G v2)
+- `/tmp/replay_19day_v2.py` — corrected Python replay (canonical reference)
+- `/tmp/replay_19day_v2_results.json` — raw fire-by-fire output
+- `/tmp/replay_19day_v2_run.log` — formatted summary
+- `scripts/replayFadeMultiVariant.mjs` — production .mjs version, committed to repo
+- `server/scheduler.js` — weekly Sunday 6am ET cron entry
 
 ### Bottom-line learning from this entire 2026-05-15 investigation
 
