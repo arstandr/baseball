@@ -1,5 +1,7 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
+**Last updated: 2026-05-15 (late) — v1h PRIMARY TEST PHASE Day 1 LIVE: 10 fade bets fired this morning at 11am ET with the clean v1h profile (1 K=6 + 9 K=7-9 + ZERO K≥10 — the structural difference from v3). Bankroll opens phase at ≈$3,580 ($5,198 starting − $1,618 v3 week). 28-day phase = 5/15 → 6/12; pre-committed pause triggers + promotion criteria written into governance below. Daily Discord post via `fadeTestProgress.mjs` at 11:55 PM ET; weekly multi-variant replay via `replayFadeMultiVariant.mjs --discord` on Sundays 6:00 AM ET. Audit branch merged to main (commit `3bf4a146`). See "v1h Primary Test Phase — Day 1" section.**
+
 **Last updated: 2026-05-15 (evening) — FINAL VARIANT DECISION: `FADE_VARIANT=v1h` set on Railway, backed by the corrected 19-day ladder replay (M+K+L fixes). The strategy is being run as paper-only primary test going forward; if it stabilizes positive over a 28-day window the question of going live re-opens. Permanent backtest tool committed at `scripts/replayFadeMultiVariant.mjs`; weekly Sunday 6am ET cron auto-replays the rolling 28-day window and posts to Discord. Validation invariant ratified: NO variant change without ≥14 days of ladder-replay evidence showing ≥+$800 P&L advantage. See "Step G v2 — FADE-CORRECT REPLAY" subsection.**
 
 **Last updated: 2026-05-15 (morning) — FADE_VARIANT flipped back to v1h on Railway after 3 days of v3 paper losses (Tue −$310, Wed −$724, Thu −$584 = −$1,618 / −31% drawdown on $5,198 starting paper bankroll). Diagnostic confirmed v3 implementation matches its spec — the strategy itself is failing, not the code. Root cause is structural: the fade model fires on a single feature (k9_l5 × innings) while ignoring the entire Statcast / park / weather / umpire / velo signal stack that the codebase already collects. K≥10 tail bucket is the disaster zone (0W/15L Wed+Thu combined, CI rejects 22% model claim). See "2026-05-15 v3 Post-Mortem & Save Plan" section below.**
@@ -522,6 +524,65 @@ The variant decision flipped THREE times in one day (v3 → v1h → v3 → v1h) 
 The lesson: **filter-on-actual-fires creates structural bias** because actual fires were chosen by whatever variant was active. The 8-day result that fooled us came from re-applying v3's filter to v1h's choices, which cherry-picked v1h's K=6 fires that happened to do well. The market_snapshots ladder replay gives each variant access to its own full candidate set, which is the only fair comparison.
 
 **Going forward**: any variant decision must run on the market_snapshots ladder over ≥14 days, with bootstrap CI on the delta, before changing FADE_VARIANT in production. The cost of policy decisions made on biased samples is exactly the −$1,618 we burned this week.
+
+---
+
+### v1h Primary Test Phase — Day 1 (2026-05-15)
+
+**Phase definition.** Starting 2026-05-15, `FADE_VARIANT=v1h` is the paper-only primary fade strategy. The 28-day window (5/15 → 6/12) is the validation period. If v1h trends positive with stable bucket performance and clears the validation invariants, the question of going live re-opens. If it bleeds like v3 did, the strategy gets paused entirely (not flipped to another variant — that's the lesson from this week).
+
+**Phase rationale.** Step G v2's 19-day ladder replay said v1h beats v3 by +$2,492 (Δ = +203% vs the validation invariant of +$800). Bootstrap P(positive) = 99.1% in the original Step G evaluation. The directional verdict is robust; the magnitude is uncertain (90% CI ≈ +$1.4k to +$11.9k). The forward test will produce the next clean data point.
+
+**Day-1 fire profile (5/15 morning fade-cron):** 10 v1h fires logged in `ks_bets` with `strategy_mode='pregame_fade_yes'` and `fade_variant='v1h'`:
+
+| Strike bucket | Count | Pitchers |
+|---|---|---|
+| K=6 | 1 | Janson Junk |
+| K=7 | 4 | Wacha, Civale, Ashcraft, Vasquez, Early |
+| K=8 | 3 | Mahle, Hancock |
+| K=9 | 2 | Strider, Arrighetti |
+| **K≥10** | **0** | — (the structural difference from v3) |
+
+**Bankroll position.** Starting paper bankroll $5,198.67. After the v3 week (−$1,618), opening v1h-phase bankroll ≈ $3,580. Day-1 max exposure tonight: $1,000 (10 × $100 stake). Realistic outcome range −$1,000 to +$1,500. The bankroll is now low enough that another full-loss day would force a methodology pause regardless of variant.
+
+**Monitoring infrastructure (all active as of merge to main):**
+
+| Cadence | Job | Triggers |
+|---|---|---|
+| Every 30 min, 11am-11pm ET | `fireFadeModel.mjs` | Fires v1h fades on eligible starters with `bet_size` cap + per-pitcher cap 1 |
+| 11:55 PM ET daily | `fadeTestProgress.mjs` | Daily P&L + bucket breakdown → Discord (existing) |
+| **Sundays 6:00 AM ET** | `replayFadeMultiVariant.mjs --discord` | Rolling 28-day multi-variant replay → Discord (NEW, this commit) |
+| At any time | `node scripts/replayFadeMultiVariant.mjs --from … --to …` | Manual replay |
+
+**Pre-committed failure modes** (any one of these triggers a strategy pause, not a variant flip):
+1. **3-day P&L ≤ −$500 cumulative** at any point during the 28-day phase
+2. **K=7-9 bucket goes 0-15** consecutive losses (would refute the bucket's edge claim)
+3. **Weekly Sunday replay** shows v1h flipping negative vs v3 with statistical significance
+4. **Bankroll falls below $2,500** (~50% drawdown from original $5,198)
+5. **Two consecutive losing weeks** with P&L ≤ −$500 each
+
+**Pre-committed promotion criteria** (only after all of these are met simultaneously):
+1. ≥28 days of v1h primary data
+2. Cumulative P&L positive (≥+$500)
+3. K≥10 bucket either ≥10% win rate or skipped entirely
+4. K=7-9 bucket ≥20% win rate
+5. No weekly Sunday replay finds another variant beating v1h by ≥+$800
+
+If those hit, the conversation about going live (real money) re-opens. Until then, paper only.
+
+**What I will NOT do during this phase** (pre-committed):
+- Flip FADE_VARIANT mid-phase based on 3-day data
+- Override validation invariants because "the recent regime feels different"
+- Add new filters (B, C, D action items) without running them through the same multi-variant replay first
+- Lower per-pitcher cap or expand strike range without ≥14 days of ladder evidence
+
+The reason these are pre-committed: the May 12 FADE_VARIANT=v3 decision was based on exactly the kind of vibes-driven override these rules prevent.
+
+### Files referenced (v1h phase)
+- `scripts/replayFadeMultiVariant.mjs` — multi-variant replay, run weekly + on-demand
+- `scripts/fadeTestProgress.mjs` — daily P&L tracker (existing, already wired)
+- `scripts/fireFadeModel.mjs` — production fade fire pipeline (FADE_VARIANT env reads v1h)
+- `server/scheduler.js` — cron schedule
 
 ---
 
