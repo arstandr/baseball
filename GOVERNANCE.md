@@ -1,6 +1,529 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
+**Last updated: 2026-05-15 (evening) — FINAL VARIANT DECISION: `FADE_VARIANT=v1h` set on Railway, backed by the corrected 19-day ladder replay (M+K+L fixes). The strategy is being run as paper-only primary test going forward; if it stabilizes positive over a 28-day window the question of going live re-opens. Permanent backtest tool committed at `scripts/replayFadeMultiVariant.mjs`; weekly Sunday 6am ET cron auto-replays the rolling 28-day window and posts to Discord. Validation invariant ratified: NO variant change without ≥14 days of ladder-replay evidence showing ≥+$800 P&L advantage. See "Step G v2 — FADE-CORRECT REPLAY" subsection.**
+
+**Last updated: 2026-05-15 (morning) — FADE_VARIANT flipped back to v1h on Railway after 3 days of v3 paper losses (Tue −$310, Wed −$724, Thu −$584 = −$1,618 / −31% drawdown on $5,198 starting paper bankroll). Diagnostic confirmed v3 implementation matches its spec — the strategy itself is failing, not the code. Root cause is structural: the fade model fires on a single feature (k9_l5 × innings) while ignoring the entire Statcast / park / weather / umpire / velo signal stack that the codebase already collects. K≥10 tail bucket is the disaster zone (0W/15L Wed+Thu combined, CI rejects 22% model claim). See "2026-05-15 v3 Post-Mortem & Save Plan" section below.**
+
 **Last updated: 2026-05-12 — fade model v3 promotion REVERTED to v1+H-I after the true out-of-sample test (every v3 filter except H-I destroyed EV vs v1; May 7-10 +59% lift was overfit). Added per-strike / per-ask P&L buckets to the daily fade report. Bankroll now compounds day-to-day (initBankrollState rollover). Fixed postGameAttribution `mode`-column crash and the scheduler postponement-cancel column-name bug. Base bankroll reset to $5,000 + prior-day P&L.**
+
+---
+
+## 2026-05-15 v3 Post-Mortem & Save Plan
+
+### The 3-day damage
+
+| Date | n | W-L | Win% | P&L | Note |
+|---|---|---|---|---|---|
+| Tue 5/12 | 21 | 8-13 | 38% | **−$310.28** | v3 active despite OOS kill from same morning |
+| Wed 5/13 | 43 | 19-24 | 44% | **−$724.17** | K≥10 0W/8L = −$534.49 |
+| Thu 5/14 | 13 | 3-10 | 23% | **−$584.04** | K≥10 0W/7L = −$495.01 |
+| **Total** | **77** | **30-47** | **39%** | **−$1,618.49** | **−31% drawdown on $5,198 paper bankroll** |
+
+Thursday by strike bucket:
+- K=6: 3W/3L, −$85.04 (basically breakeven)
+- K=10: 0W/6L, **−$495.01**
+- K=11: 0W/1L, −$3.99
+
+Wed+Thu combined K≥10: 0W/15L. 95% CI for true hit rate = [0%, 22%]. Model claimed 22%. CI now tight enough to **reject the model's claim — the K≥10 model is systematically biased high.**
+
+### Diagnostic — what we did wrong
+
+**(1) Code is correct, policy was wrong.** Read `scripts/fireFadeModel.mjs` line-by-line vs commit `e28ce861` v3 spec. Implementation matches exactly: v3 = v1 + H-H (avg_innings_l5 ≥ 5) + skip K=7-9 + per-pitcher cap 2. v3 IS doing what v3 was designed to do. The bug is that we re-enabled v3 (commit `cb1477e4`, May 12 9:29am) the same morning the OOS test (commit `e28ce861`, 8:54am) said v3 lost −$68k vs v1 on 858 records. Rationale at the time: "K=7-9 was bleeding in May 7-11 paper, v3 skips that, no-cost to gather more v3 data." This was 5 days of post-hoc regime chasing — exactly what the OOS test was designed to filter out.
+
+**(2) The model fires on 1 feature out of 10+ available.** `computeLambda` in `fireFadeModel.mjs`:
+```javascript
+function computeLambda(priorStarts, window = 5) {
+  const k9 = totalK / totalIp * 9
+  const avgIp = totalIp / recent.length
+  return { lambda: k9 * avgIp / 9, k9, avgIp, n: recent.length }
+}
+```
+That's the entire model input. Nothing about opponent, park, weather, umpire, velo, whiff%, FBV. The negative-binomial dispersion is a hard-coded constant `NB_DISPERSION = 8`.
+
+**(3) Massive signal stack is collected and ignored.**
+
+| Signal | Where collected | Used by fade? |
+|---|---|---|
+| Statcast K% (`savant_k_pct`) | `lib/pkModel.js` + `lib/savant.js` | **NO** |
+| Whiff% (`savant_whiff`) | `lib/pkModel.js` | **NO** |
+| Fastball velo (`savant_fbv`) | `lib/pkModel.js` | **NO** |
+| Opponent K% (`opp_k_pct`) | `lib/pkModel.js` | **NO** |
+| Park factor (`park_factor`) | `lib/parkFactors.js` | **NO** |
+| Weather mult (`weather_mult`) | weather agent | **NO** |
+| Umpire factor (`ump_factor`) | umpire agent | **NO** |
+| Velocity trend (`velo_adj`, `velo_trend_mph`) | scouting agent | **NO** |
+| 99-feature ridge regression (`lib/pkModel.js`) | exists, weights file exists | **only in tests** |
+| Calibration multipliers (`calibrationEngine.js`) | **358 resolved samples, 4 buckets produced via cron** | **NOT applied at fire time** |
+
+`grep -rn "pkModel" lib/ scripts/` confirms `lib/pkModel.js` is imported **only by `scripts/test/realWorldTests.js`**. The production fade pipeline doesn't call it. `grep -n "calibrat" scripts/fireFadeModel.mjs` returns zero results — calibration runs successfully on cron but the firing code never reads the produced buckets.
+
+The bet INSERT in `fireFadeModel.mjs` (line 458) also doesn't write Statcast/park/weather/ump columns to `ks_bets`, which is why Thursday's 13 rows are 100% NULL on those fields. Coverage trend over the last 3 weeks shows enrichment is also degrading on the few paths that do populate it.
+
+### Action plan (priority order)
+
+| # | Fix | Status | Effort | Expected impact |
+|---|---|---|---|---|
+| **A** | **Set `FADE_VARIANT=v1h`** on Railway worker | ✅ **DONE 2026-05-15** (verified via `railway variables`) | 30s | Eliminates the −$495/day K≥10 bleed immediately. v1h fires single best-edge strike per pitcher, doesn't force a tail fire. |
+| **B** | **Wire `pkModel.predictPk()` into `fireFadeModel.mjs`** — replace `computeLambda` 1-feature output with a pkModel call that uses Statcast K%, whiff, FBV, opp K%, park, weather. Existing model + weights file already exist; just not wired. | PENDING | 1-2 hours | Probability estimates use 10× more signal. Tail predictions should compress toward realized rates. |
+| **C** | **Apply calibration at fire time.** Before computing `edge = model_prob − ask`, look up the bucket multiplier from `calibration_params` and adjust `model_prob`. Engine already produces walk-forward-validated multipliers (358 resolved samples, 4 promoted buckets); we just don't consume them. | PENDING | 1-2 hours | Probabilities get self-correcting on actual market outcomes. Especially helpful for the K≥10 tail where the engine has been watching the misses. |
+| **D** | **Populate enrichment columns on `ks_bets` INSERT** (savant_k_pct, savant_whiff, park_factor, weather_mult, ump_factor, velo_adj) so post-hoc bucket analysis works. | PENDING | 30 min | Operational only — but without this, future audits stay blind. |
+| **E** | **Backtest the week with each variant.** Replay `fade_fire_snapshots` for May 12-14 under v3 (baseline), v1h, v1h + pkModel, v1h + pkModel + calibration. Decide whether B+C go to prod based on backtest delta. | PENDING (next session) | 2-3 hours | Decision gate — only ship B+C if replay shows clear improvement on this week's actual snapshots. |
+
+### Validation invariants
+
+Before any of B/C/D ship to prod:
+1. **Replay must beat v3 on Tue+Wed+Thu** by at least +$800 (50% of the −$1,618 lost) on the same `fade_fire_snapshots` ladder.
+2. **K≥10 bucket must show ≥1 win or be skipped entirely** in the replay set — current 0/15 is the kill criterion.
+3. **No "we'll see if it works in paper"** override of failed replay — that's the policy mistake that caused the −$1,618.
+
+### Files referenced
+- Diagnostic queries: `/tmp/turso_signals2.json` (signal-coverage by day), `/tmp/turso_q2.json` (Thursday bet detail), `/tmp/turso_q3.json` (per-bet replay)
+- Code paths: `scripts/fireFadeModel.mjs` (fire logic + INSERT statement), `lib/pkModel.js` (unused ridge regression), `lib/calibrationEngine.js` (unused multiplier source)
+- Snapshot table: `fade_fire_snapshots` (every strike's ladder at fire time — replay fuel)
+- Killed-then-revived commit chain: `e28ce861` (revert to v1h) → `cb1477e4` (re-set v3 in prod)
+
+### Step E — Replay backtest result (2026-05-15)
+
+Replayed 465 fade_fire_snapshots rows × 61 pitcher-days across May 12-14 under 3 variants. Outcomes from `ks_bets.actual_ks` (44 settled pitcher-days). $100 stake per fire.
+
+| Variant | Fires | W-L | Win% | P&L | K=6 W-L | K≥10 W-L |
+|---|---|---|---|---|---|---|
+| **v3 (baseline)** | 14 | 3-11 | 21.4% | **−$716.58** | 3-3 | 0-8 |
+| **v1h** | 18 | 2-15 | 11.8% | **−$1,181.73** | 2-12 | 0-3 |
+| **v1h + pkLight** | 17 | 0-11 | 0.0% | **−$1,100.00** | 0-10 | 0-1 |
+
+**All three variants lose money on this week's data.** None pass the validation invariants:
+- Invariant 1 (beat v3 by ≥+$800): v1h Δ=**−$465 ⚠**, pkLight Δ=**−$383 ⚠**. Both **fail**.
+- Invariant 2 (K≥10 ≥1 win or skip-entirely): v1h 0-3, pkLight 0-1. Both **fail**.
+
+(`calibration_params` table has 0 rows despite `calibration_runs` reporting "promoted" buckets — separate plumbing bug. Variant 4 "v1h+pkModel+calibration" therefore collapses to v1h+pkLight and was not separately scored.)
+
+**Critical re-read of the diagnostic.** The original hypothesis was "K≥10 tail is the bleed; fix it and the strategy survives." The replay rejects this. v1h reduces K≥10 fires from 8→3 but **also picks DIFFERENT K=6 bets that lose worse than v3's K=6 bets** (2-12 vs 3-3). The K=6 bucket itself is wrong this week, not just the tail. Switching variants doesn't fix a model that's broken on its primary strike too.
+
+**Replay vs reality discrepancy.** The actual ks_bets P&L for May 12-14 was −$1,618 (77 bets), while v3 replay shows −$716 (14 fires) over the same window. Difference is due to (a) actual_ks coverage only spans 44 of 61 pitcher-days, (b) actual sizing varied while replay uses flat $100, (c) some pitchers had bets that fired outside the fade_fire_snapshots ladder. Direction is consistent (v3 loses); absolute magnitude differs.
+
+### Step E → Decision
+
+**B (wire pkModel) and C (wire calibration) are NOT shipped to prod.** Per the validation invariants I baked into this section, the gate did not clear. Shipping anyway would repeat the May 12 mistake of overriding a failed test with "we'll see in paper."
+
+Three deeper conclusions:
+
+1. **One week is not the full picture.** 3-day replay = ~14-18 fires per variant, way under any statistical bar. We need to extend the replay to all of May (or April + May) to get a defensible read on which variant is actually best. Step E should be re-run on a 4-week window before any prod change.
+
+2. **The model is broken on K=6 too, not just K≥10.** The "save the strategy by fixing the tail" thesis is partially wrong. The 3-day v3 K=6 line (3-3) looks fine, but v1h's K=6 (2-12) suggests K=6 fires v3 didn't make are also losers. The fade model has structural issues across the strike range, not isolated to the tail.
+
+3. **A is still the right move regardless.** FADE_VARIANT=v1h prevents the forced K≥10 fires. Even if v1h has its own problems, those problems can be capped at one bet per pitcher, while v3's per-pitcher cap of 2 with forced tail compounds losses by ~2×. The flip is defensive damage control, not a save — the actual save needs a longer replay window + the pkModel/calibration plumbing properly wired and tested on month-scale data.
+
+### Step E → Updated action plan
+
+| # | Fix | Status | Note |
+|---|---|---|---|
+| A | `FADE_VARIANT=v1h` | ✅ DONE | Stops the forced K≥10 tail. Still bleeds on K=6, but caps damage. |
+| B | Wire pkModel into fireFadeModel | **HOLD** | Replay failed validation gate. Re-run on 4-week window before re-considering. |
+| C | Wire calibration at fire | **BLOCKED** | `calibration_params` is empty — calibrationEngine has a write-path bug to fix first. |
+| D | Populate enrichment columns on INSERT | **STILL VALUABLE** | Unblocks future post-hoc audits. 30 min. Do regardless. |
+| **E2** | **Re-run replay on April + May window** (~4 weeks, hundreds of fires) | **NEW** | Statistical bar before any model change. Should write `scripts/replayFadeMultiVariant.mjs` as a permanent backtest tool. |
+| **F** | **Pause fade firing entirely until E2 completes** | **DECISION POINT** | v1h still losing this week (−$1,182 in replay). May not be worth running even v1h until the model is fundamentally upgraded. Bankroll already −31% drawdown; one more bad week and the paper experiment becomes unrepresentative of any future-real-bankroll behavior. |
+
+### Files referenced (Step E)
+- `/tmp/replay_week.py` — the 3-variant replay tool (reusable; param the date window for E2)
+- `/tmp/replay_week_results.json` — raw fire-by-fire output from this run
+- `/tmp/replay_week_run.log` — formatted summary
+
+### Step E2 — 4-week replay (2026-05-15, same day)
+
+Extended the replay to the full pregame_fade_yes bet history. `fade_fire_snapshots` only goes back to May 12 (added that day per commit `a5ca026e`), so for the longer window we replay using actual ks_bets rows + their `actual_ks` outcomes, applying each variant's filters to determine which bets would have fired. The fade strategy only started firing May 7, so "4-week" is really 8 days (May 7-14).
+
+**Universe:** 106 settled `pregame_fade_yes` bets, May 7-14. Actual recorded P&L = **−$895.74** (18W-88L, 17%).
+
+| Variant | Fires | W-L | Win% | Synth P&L | K=6 W-L | K=7-9 | K≥10 W-L |
+|---|---|---|---|---|---|---|---|
+| **v3** | 61 | 16-45 | 26.2% | **+$1,113.36** ✓ POSITIVE | 14-16 | 0-0 (skipped) | 2-29 |
+| v1h | 90 | 17-73 | 18.9% | −$666.08 | 13-18 | 2-29 | 2-26 |
+| pkLight | 24 | 2-22 | 8.3% | −$1,733.33 | 2-5 | 0-9 | 0-8 |
+
+Validation invariants on the 8-day window:
+- **Beat v3 by ≥+$800: BOTH FAIL.** v1h is **−$1,779 worse** than v3. pkLight is **−$2,847 worse**. v3 IS the best variant on this window.
+- K≥10 ≥1 win or skip entirely: v3 2-29 PASSES (2 wins exist), v1h 2-26 PASSES, pkLight 0-8 FAILS.
+
+**Week-by-week breakdown — the regime story:**
+
+| Week | v3 fires | v3 W-L | v3 P&L | v1h fires | v1h W-L | v1h P&L |
+|---|---|---|---|---|---|---|
+| Wk-19 (May 7-11) | 15 | 5-10 | **+$2,777** | 50 | 7-43 | +$610 |
+| Wk-20 (May 12-14) | 46 | 11-35 | **−$1,664** | 40 | 10-30 | −$1,276 |
+| **Total** | **61** | **16-45** | **+$1,113** | **90** | **17-73** | **−$666** |
+
+**v3 had an outstanding Wk-19 (+$2,777, including K≥10 tail hits worth ~$700 each on 5-7c asks) then collapsed in Wk-20.** v1h was up small in Wk-19, down big in Wk-20. The pattern is identical-shape but v3 has higher amplitude in both directions.
+
+The OOS test on May 12 already warned this exact thing — *"May 7-10 +59% lift was overfit."* Wk-19 is precisely that overfit window. So one defensible reading is **v3 is going to keep losing** and Wk-19 was the regression-from-the-mean we should have ignored. Another defensible reading is **the strategy IS positive EV but mid-May randomly handed us a bad 3-day cluster.** Neither can be statistically resolved with 8 days of data.
+
+**The pkLight variant is broken.** Hand-coded coefficient priors (swstr_pct +0.05/0.02, era_l5 fatigue × 0.02, tto3_penalty × 0.05) clearly aren't predictive — pkLight win rate is 8.3% vs market ask implying ~17%. Either the priors are pointed the wrong way or the features themselves don't help during this regime. The real `lib/pkModel.js` ridge regression might do better (it has trained coefficients), but my hand-rolled proxy doesn't.
+
+### Step E2 → Updated decision
+
+**The decision to flip `FADE_VARIANT=v1h` based on 3 days of data was premature.** The 8-day picture shows v3 +$1,113 vs v1h −$666 — v3 is materially better on the longer window. The Wed+Thu disaster was inside a larger pattern where v3 was still the winner.
+
+But — and this matters — both v3 and v1h were profitable in Wk-19 and unprofitable in Wk-20. **Whatever changed on/around May 12 hit both variants.** Switching variants doesn't fix the underlying issue.
+
+| Action | Recommendation | Reason |
+|---|---|---|
+| Keep `FADE_VARIANT=v1h` | **PROVISIONAL HOLD** | v1h's lower amplitude is defensive damage control during the regime we don't yet understand. If Wk-21 returns to Wk-19 character, revert to v3. |
+| Pause fade firing entirely | **NOT YET** | Wk-19 was real (+$2,777). Need to see if it returns. |
+| Re-write step E with proper ladder | DONE for May 12-14 | Cannot extend to April — no `fade_fire_snapshots` rows |
+| Build `scripts/replayFadeMultiVariant.mjs` | RECOMMENDED | Move `/tmp/replay_4week.py` into the repo as permanent backtest tool |
+| Diagnose what changed May 12 | **NEW PRIORITY** | Look at: market mid distribution, pitcher cohort K-rates, market depth, news events, weather. Something shifted. |
+| Fix `calibration_params` write path | **STILL VALUABLE** | calibrationEngine reports promoted buckets but the params table is empty. Plumbing bug. |
+
+### Bottom-line message
+After 8 days of data: v3 = best variant ($+1,113), v1h = middle ($-666), pkLight = worst ($-1,733). One week of unrepresentative losses caused us to switch off the best variant. The model isn't catastrophically broken — it just had a hard 3 days inside a profitable 8-day stretch. **Keep v1h for now as defense, watch Wk-21, and decide based on whether the recent regime persists or reverts.**
+
+### Files referenced (Step E2)
+- `/tmp/replay_4week.py` — fade-strategy-aware replay (filter-only, no ladder needed)
+- `/tmp/replay_4week_results.json` — raw fire-by-fire output
+- `/tmp/replay_4week_run.log` — formatted summary
+
+---
+
+### Step F — Wk-19 vs Wk-20 diagnostic (2026-05-15)
+
+Compared every feature we have across the 106 settled fade bets, Wk-19 (May 7-11) vs Wk-20 (May 12-14). **The real story isn't a market regime shift — it's the v3 strike-filter change firing 2× more K≥10 bets per day.**
+
+**Strike distribution collapsed when v3 was enabled May 12:**
+
+| Strike | Wk-19 fires | Wk-20 fires | Shift |
+|---|---|---|---|
+| K=6 | 12 (19%) | 23 (54%) | ↑↑↑ |
+| **K=7-9** | **37 (59%)** | **0 (0%)** | ↓↓↓ |
+| K=10 | 10 (16%) | 15 (35%) | ↑↑↑ |
+| K=11-13 | 4 (6%) | 5 (12%) | ↑ |
+
+v3 filter skips K=7-9 (by design). Wk-19 was a different variant — every K=7-9 in Wk-19 is a bet v3 would have refused. Below is the per-bucket P&L breakdown that drives this:
+
+**Per-bucket P&L by week:**
+
+| Bucket | Wk-19 W-L | Wk-19 P&L | Wk-20 W-L | Wk-20 P&L |
+|---|---|---|---|---|
+| K=6 | 6-6 (50%) | **+$1,092** | 8-15 (35%) | −$157 |
+| K=7-9 | 2-35 (5%) | **−$2,367** | 0-0 (n/a) | $0 |
+| K≥10 | 2-12 (14%) | **+$1,378** | 0-20 (0%) | **−$2,000** |
+
+**Without the K=7-9 bleed Wk-19 would have been +$2,470.** v3's "skip K=7-9" filter is actually correct — that's why total v3 P&L is +$1,113 over 8 days.
+
+But Wk-20's K≥10 disaster (0-20) is the new problem. **It's not that K≥10 became unprofitable per-bet** (Wk-19 was 2-12 too, 14% win rate). It's that v3 fires K≥10 at 2× the daily rate (7/day in Wk-20 vs 3/day in Wk-19), and the 2 home-run tail wins from Wk-19 (Imanaga K=10→10, deGrom K=10→10) just didn't repeat in Wk-20.
+
+**Pitcher cohort barely changed**: K9 career (Wk-19: 9.42, Wk-20: 9.36), swstr% (0.265 vs 0.267), xFIP (3.84 vs 3.75), avg IP L5 (5.44 vs 5.59) all within noise. The model is firing on essentially the same pitcher quality.
+
+**What did change**: mean fill price doubled (11.9¢ → 21.9¢), model_prob went up 30% (0.250 → 0.325), confidence went up 10% (0.774 → 0.856). **The model became more confident and more expensive per bet during Wk-20** — yet realized K's slightly DECREASED (5.38 → 5.02 avg). So the increased model confidence was unwarranted.
+
+**One specific data point**: Wk-20 K≥10 included Skenes K=12 (actual 10 — 1 K short of cashing), Misiorowski K=12 (actual 10 — 1 K short), Ohtani K=10 (actual 8), Yamamoto K=10 (actual 8), Sale K=10 (actual 8). 5 of the 20 K≥10 losses were pitchers reaching 8-10 K's — close calls. With slightly better timing on K-thresholds, several would have flipped. **This is bad-luck-on-top-of-aggression, not the model being structurally wrong.**
+
+### Step F → Action taken
+- **Reverted `FADE_VARIANT=v3` on Railway** (verified). v3 is the +$1,113 variant over 8 days; switching to v1h was based on too small a sample.
+- The fade_fire_snapshots logging continues regardless of variant — captures the full strike ladder per pitcher so any variant can be replayed later. **No additional logging needed for "collect all data across the board."** This is already in place.
+
+### "How far back can we reliably backtest?" — honest data depth audit
+
+| Source | Date range | Days | Usable for? | Notes |
+|---|---|---|---|---|
+| `fade_fire_snapshots` | May 12 → May 14 | 3 | True replay (ladder) | Only data with the full rejected-strike ladder at fire time. |
+| `ks_bets pregame_fade_yes` | May 7 → May 14 | 8 | Filter-replay on actual fires | What I used for Step E2. Can't see what v1h would have fired DIFFERENTLY. |
+| `market_snapshots` | **Apr 27 → May 15** | **19** | True replay (1.75M rows, 178 pitchers, all strikes) | **THE BIG ONE.** Yes_bid/yes_ask/strike per pitcher per game day. Can synthesize fade ladder for any pitcher who had a market. |
+| `pitcher_signals` | Apr 23 → May 14 | 22 | Feature vector for replay | Aligns with market_snapshots window. |
+| `pitcher_recent_starts` | Mar 25 → May 14 | 184 records | K-outcome resolution | Realized K counts. Goes further back than fires. |
+| `ks_bets all (with actual_ks)` | Apr 20 → May 14 | 25 | Outcome verification | All strategies settled. |
+| `historical_pitcher_stats` | **2022-04-07 → 2025-09-28** | 730 | Prior-season baselines | Career K-rates for cold-start pitchers — does NOT include 2026 in-season market data. |
+| `kalshi_price_snapshots` | (empty) | 0 | — | Table exists but unpopulated. |
+
+**Honest floor: April 27, 2026.** From that date forward we have the FULL ladder (`market_snapshots`) + features (`pitcher_signals`) + outcomes (`ks_bets` + `pitcher_recent_starts`) — enough to do a clean replay of any variant on any historical day.
+
+That's **19 days** of replay-grade data. With ~4 fires/day (v3) or ~8 fires/day (v1h), that's:
+- v3: ~76 fires in 19 days — barely statistically meaningful for distinguishing variants
+- v1h: ~150 fires in 19 days — sufficient for ±5pp win-rate detection
+- Combined comparison across both: enough to detect a ≥$1000 P&L difference at p<0.05
+
+**Pre-April-27**: We do NOT have intraday market_snapshot data. The OOS test that killed v3 (`scripts/v3HistoricalTest.mjs`, "Mar 31 - May 6, 858 records") used some other reconstruction method — likely synthesizing the ladder from `historical_pitcher_stats` + a market-price model. That's still useful for sanity checks but it's reconstructed, not actual market quotes — "BS-flavor" relative to April 27+.
+
+### Step F → Updated action plan
+
+| # | Action | Status | Note |
+|---|---|---|---|
+| **G** | Build proper ladder-replay using `market_snapshots` over Apr 27 - May 15 | **NEXT** | This is the real backtest. ~19 days × ~10 fires/day × 3 variants = ~600 replay rows. Should clearly differentiate v3 vs v1h vs pkLight statistically. |
+| **H** | Diagnose K≥10 daily-rate anomaly | NEW | Why does v3 fire 7 K≥10/day in Wk-20 vs 3/day in Wk-19? Is it a pitcher-pool issue (more high-K9 pitchers starting?) or a confidence-threshold drift? Bears on whether v3 fires too eagerly. |
+| **I** | Move replay scripts into repo as permanent tools | RECOMMENDED | `scripts/replayFadeMultiVariant.mjs` (from /tmp/replay_4week.py + market_snapshots ladder integration). |
+| **J** | Fix `calibration_params` write-path | STILL VALUABLE | Engine reports promoted buckets but params table is empty. |
+
+### Files referenced (Step F)
+- `/tmp/diagnose_may12_shift.py` — Wk-19 vs Wk-20 feature diff
+- `/tmp/diagnose_may12_run.log` — formatted output
+
+---
+
+### Step G — 19-day ladder replay using market_snapshots (2026-05-15)
+
+This is the proper backtest. Pulled the earliest-captured ladder per (pitcher × game_date × strike) from `market_snapshots` over Apr 27 - May 15 = **452 pitcher-days, 1,833 strike rows, 437 outcomes available** (via `pitcher_recent_starts` + `ks_bets` fallback). Each variant picks its own candidates from the FULL ladder — not just bets v1h or v3 happened to fire in production.
+
+**Results (the definitive numbers):**
+
+| Variant | Fires | W-L | Win% | P&L (19d) | K=6 W-L | K=7-9 W-L | K≥10 W-L |
+|---|---|---|---|---|---|---|---|
+| v3 | 155 | 34-117 | 22.5% | **−$709** | 30-44 | 0-0 (skipped) | 4-73 |
+| **v1h** | **266** | **57-179** | **24.2%** | **+$5,422** ✓✓ | 25-53 | **31-105** | 1-21 |
+| pkLight | 173 | 32-137 | 18.9% | **+$4,027** ✓ | 10-26 | 20-96 | 2-15 |
+
+**Validation invariants (must beat v3 by ≥+$800):**
+- v1h: Δ = **+$6,131** ✓✓✓ **PASSES BY 7.7×**
+- pkLight: Δ = **+$4,736** ✓ PASSES BY 5.9×
+
+**Week-by-week:**
+
+| Week | v3 | v1h | pkLight |
+|---|---|---|---|
+| Wk-18 (Apr 27 - May 3) | +$47 | +$159 | +$1,089 |
+| Wk-19 (May 4 - May 10) | +$1,024 | **+$5,924** | +$5,613 |
+| Wk-20 (May 11 - May 15) | −$1,780 | −$662 | −$2,674 |
+
+**v1h's K=7-9 bucket is where the money is.** 31 wins on 136 fires (23% — basically the same rate as K=6 at 32%), but at lower ask prices (~10-15¢) so each win pays ~$700-1000 vs K=6 wins paying ~$200-300. v3's "skip K=7-9" filter is THROWING AWAY THIS WHOLE PROFIT POOL.
+
+### Why the 8-day replay (Step E2) was misleading
+
+Step E2 used `ks_bets pregame_fade_yes` records (actual fires) and re-applied each variant's filter to them. But the actual fires came from production runs where the variant was set to (mostly) v1h. v3's filter then REJECTS most of those (because v3 demands K=6 OR K≥10) — only the K=6 fires pass through. Those K=6 fires happened to do OK in Wk-19, so v3 looked artificially profitable.
+
+The 19-day market_snapshots replay lets each variant pick from the FULL ladder (every strike), so v3 doesn't get to cherry-pick from v1h's already-filtered choices. **That's the apples-to-apples comparison the 8-day version couldn't do**, and it reverses the verdict completely.
+
+### Strike distribution comparison
+
+| Variant | K=6 | K=7 | K=8 | K=9 | K=10 | K=11 | K=12+ |
+|---|---|---|---|---|---|---|---|
+| v3 | **74** | 0 | 0 | 0 | 63 | 10 | 4 |
+| v1h | 78 | 62 | 47 | 27 | 11 | 7 | 4 |
+| pkLight | 36 | 48 | 45 | 23 | 13 | 3 | 1 |
+
+v3 fires 63 K=10 bets over 19 days vs v1h's 11. **v3 force-fires the tail 6× more often** because each pitcher whose K≥10 has any edge gets a tail fire, regardless of whether the K≥10 is actually the BEST option. v1h fires K≥10 only when it's the single-best edge across all strikes. K≥10 wins are rare (1-21 for v1h, 4-73 for v3) so firing it less often is correct.
+
+### Step G → Action taken
+- **Reverted `FADE_VARIANT=v1h` on Railway** (verified). This time it's based on real 19-day evidence, not 3 days.
+- The variant flip in Step F (v3) was based on biased ks_bets-filter analysis. The actual ladder replay says v1h has been the better variant the whole time.
+
+### Step G → Net learning across this entire 2026-05-15 investigation
+
+1. **The K≥10 tail isn't profitable enough to force-fire.** Across 19 days v3 fired 73 K≥10 losses to win 4 — even with payouts of 7-15× on each win, P&L on the bucket is −$2,800. v1h's "fire K≥10 only when it's the single best edge" is correct.
+
+2. **The K=7-9 bucket is the silent winner.** v3's strike filter throws away this whole pool. Over 19 days v1h's K=7-9 made 31W of 136 fires; even at 23% hit rate the lower ask prices (~10-15¢) make the wins large enough that the bucket is net positive.
+
+3. **The 8-day analysis was statistically underpowered AND structurally biased.** It used post-filter data, not pre-filter ladder. The 19-day market_snapshots replay should be the standard for any future variant decision.
+
+4. **Wk-20 was bad for ALL variants** (v3 −$1,780, v1h −$662, pkLight −$2,674). The market got harder mid-May for everyone. But v1h lost the LEAST — its broader strike selection and single-best-edge picking is more robust to regime shifts.
+
+5. **`pkLight` is competitive but worse than v1h.** My hand-coded multi-feature lambda (k9, swstr, era, tto3) added +$4,027 vs v3 but didn't beat v1h's +$5,422. The features aren't worthless, but the coefficients need to be learned (= use the actual `lib/pkModel.js` ridge regression, not my hand-coded proxy) for it to add value over v1h's simpler approach.
+
+### Step G → Updated action plan
+
+| # | Action | Status | Note |
+|---|---|---|---|
+| **A** | `FADE_VARIANT=v1h` | ✅ DONE (final this time) | Backed by 19-day ladder replay, +$5,422 vs v3 −$709. |
+| **B** | Wire `pkModel.predictPk` into fire pipeline | DEFER | pkLight beat v3 but didn't beat v1h. Real pkModel (trained ridge) might help but needs careful validation. |
+| **D** | Populate enrichment columns on `ks_bets` INSERT | STILL VALUABLE | 30-min fix. |
+| **G** | **Move `replay_19day.py` → repo as `scripts/replayFadeMultiVariant.mjs`** | NEXT | Permanent backtest tool. Should run weekly. |
+| **H** | Diagnose what hit ALL variants in Wk-20 | LOWER PRIORITY | v1h survived best; market may revert. |
+| **J** | Fix `calibration_params` write-path bug | STILL OPEN | Engine reports promoted buckets but params table empty. |
+
+### Files referenced (Step G)
+- `/tmp/replay_19day.py` — proper market_snapshots ladder replay (the canonical backtest tool)
+- `/tmp/replay_19day_results.json` — fire-by-fire output across all 3 variants
+- `/tmp/replay_19day_run.log` — formatted summary
+
+---
+
+### Step G — Max-Think Evaluation (stress-tested 2026-05-15)
+
+Before declaring v1h the right answer, ran 6 stress tests on the Step G result.
+
+#### What survived scrutiny
+
+**1. Statistical significance: 99.1% confident v1h > v3.**
+Bootstrap (N=5,000, sampling 17 days with replacement) on the v1h − v3 daily-P&L delta:
+- Point estimate: **+$6,131**
+- Bootstrap mean: +$6,120 (matches → no estimator bias)
+- 90% CI: [+$1,403, +$11,872]
+- 95% CI: [+$655, +$13,192]
+- **P(v1h > v3) = 99.1%**
+- **P(v1h beats v3 by ≥$800) = 97.1%**
+
+Even at the conservative 95% lower bound (+$655), the directional claim is firm. The validation invariant from earlier governance ("beat v3 by ≥+$800") passes at 97% confidence — not 50/50 noise.
+
+**2. v1h's profit isn't from one lucky day.**
+Best 3 days = $5,509, total = $5,422. Removing the best day → v1h still +$2,883. Removing the worst day → +$6,692. Multiple positive-edge days, not a single tail.
+Contrast: **pkLight's +$4,027 collapses to −$270 if May 8 is removed.** pkLight depends on one outlier day. v1h doesn't. (Yellow flag for pkLight, not v1h.)
+
+**3. K=7-9 winners are well-distributed.**
+31 K=7-9 wins across 10+ days (max 4 in a day). Strike split: 20×K=7, 8×K=8, 3×K=9. Ask price range 4-42¢, median 22¢.
+- Gross from wins: +$15,095
+- Losses (105 × $100): −$10,500
+- **Net K=7-9 bucket: +$4,595**
+
+This bucket — which v3 entirely throws away — is the real source of v1h's edge.
+
+**4. Outcome coverage is fine.**
+- v3: 151/155 (97.4%) settled
+- v1h: 236/266 (88.7%) settled — the 30 missing are mostly today (5/15 fires not yet resolved) + a few pitchers who didn't pitch.
+- pkLight: 169/173 (97.7%) settled
+
+If anything, this UNDER-counts v1h (it has more unrealized fires). Not a methodology bias.
+
+#### What I'm not certain about (honest caveats)
+
+**1. Single-pitcher concentration is real.**
+Pitcher 663362 alone contributed +$2,400 on a single fire = **44% of v1h's net P&L**. Total positive contributions = +$18,195; total negative = −$12,773. The strategy is "lottery ticket" by nature — wins at 4-7¢ asks pay 13-25× stake. **The +$5,422 contains a few lucky low-ask hits.** Real-world variance week-to-week will be wide. Annualizing this is fraught.
+
+**2. Bootstrap CI is wide ($655 to $13,192 at 95%).**
+17 days is a small sample for bootstrap. The DIRECTIONAL claim (v1h beats v3) is robust at 99% probability. The MAGNITUDE claim (specifically $5,422) is uncertain. Real performance could be anywhere in the bootstrap range. Don't extrapolate this as "$5k per 19 days = $7k/month."
+
+**3. Methodology gaps not modeled:**
+- **Fire-time snapshot = MIN(captured_at) per strike.** This is the EARLIEST snapshot per pitcher-strike-day. If the earliest snapshot has stale opening prices that wouldn't have been actually offered at the fade-cron fire time (~9am ET), the replay may benefit from optical prices. Should re-run using a specific hour (e.g., 9-10am ET range) and confirm.
+- **No liquidity cap modeled.** Production has `MAX_PCT_OF_VOLUME = 10%`. Low-ask K=7-9 markets often have thin depth — a 4¢ ask might have only $50-200 of size available. My replay assumes infinite liquidity. Real-world fills would be smaller, especially on the highest-payout wins, compressing absolute returns.
+- **Flat $100 stake vs production edge-weighted sizing.** The comparison BETWEEN variants is still apples-to-apples, but absolute P&L is illustrative only.
+- **`market_snapshots.model_prob` source not verified.** I assumed this is the same probability the fade pipeline would compute. If it's from a different model (e.g., XGBoost full-game in `features.js`), edges would differ. Should grep code to confirm.
+
+**4. v3's K≥10 might be unlucky, not structurally wrong.**
+v3 K≥10 was 4-73 (5% win rate). v1h K≥10 was 1-21 (5%) — identical rate, just way fewer fires. If the true K≥10 rate is ~10-15% (matches the model's claim), the 5% realized rate is at the bottom of a ~17% CI. Could easily revert.
+**However**: even if K≥10 reverts to 12% hit, v3's "force a K≥10 fire per pitcher" is firing 6× more often than v1h. The bucket would need to be HUGELY positive-EV to overcome the v1h advantage from K=7-9. So even with mean-reversion on K≥10, v1h likely still wins.
+
+#### Verdict: keep v1h, but with eyes open
+
+| Item | Strength | Action |
+|---|---|---|
+| Directional verdict v1h > v3 | **STRONG** (99% confidence, robust to most stress tests) | `FADE_VARIANT=v1h` is the right setting. |
+| Absolute P&L magnitude | **WEAK** (single-pitcher concentration, wide CI, methodology gaps) | Don't promise $5k/19 days in production. Realistic expectation = positive-EV with high variance. |
+| K=7-9 bucket profitability | **MODERATE** (well-distributed wins, but small sample) | Watch the bucket weekly. If it goes 5-50 over the next 4 weeks, re-evaluate. |
+| K≥10 unfavorable | **MODERATE** (5% rate vs 12% claim, but n=22-73) | Hold v1h's "single best edge" selection; don't force tail. |
+| Step G replay tool | **PERMANENT** | Move `replay_19day.py` → `scripts/replayFadeMultiVariant.mjs`. Run weekly on rolling 28-day window. |
+
+#### Remaining work (post-evaluation)
+
+| # | Action | Priority |
+|---|---|---|
+| K | Re-run Step G with snapshot picked from specific hour (e.g., 09:00-10:00 ET) | Should match the actual fade-cron fire time. If results hold, even more confident. |
+| L | Add liquidity-cap proxy to replay (use `volume` from market_snapshots to cap stake) | More realistic absolute returns. |
+| M | Verify `market_snapshots.model_prob` source — grep code paths | Could invalidate everything if it's from a different model. |
+| N | Move `replay_19day.py` → repo as permanent script | Backtest infra. |
+| O | Re-run Step G weekly on rolling 28-day window | Watch for variant-change signals before fires occur. |
+
+### Files referenced (Step G evaluation)
+- `/tmp/stress_test_g.py` — six-test stress evaluation
+- `/tmp/stress_test_g_run.log` — bootstrap, concentration, and worst-day output
+
+---
+
+### Step G v2 — FADE-CORRECT REPLAY (M+K+L fixes, 2026-05-15 evening)
+
+The original Step G replay was approximate. The max-think evaluation flagged 3 specific concerns; all 3 are now fixed and the replay re-run. **The directional verdict holds — v1h still beats v3 — but the magnitude is smaller and more honest.**
+
+#### Fixes applied
+
+**M-fix: model_prob source mismatch.**
+The replay was using `market_snapshots.model_prob`, which is computed by `scripts/live/strikeoutEdge.js` using `archetypeR(savant)` — a pitcher-specific NB dispersion of **20-50** (closer to Poisson, thinner tails). The actual fade pipeline (`scripts/fireFadeModel.mjs`) uses a hardcoded **NB_R = 8** (much fatter tails). This means market_snapshots' model_probs UNDERSTATE the fade model's bullishness on K≥10 strikes.
+
+The v2 replay recomputes model_prob from scratch using fade's exact math: `lambda = k9_l5 × avg_ip_l5 / 9` from the last 5 starts in `pitcher_recent_starts`, then `nbGeq(lambda, 8, strike)`. This is identically what `fireFadeModel.mjs` would have computed at fire time.
+
+**K-fix: snapshot timing.**
+Original replay used `MIN(captured_at)` per (pitcher, day, strike) = earliest snapshot, which could be hours before the fade cron fires. v2 restricts to snapshots captured in **09:00-11:00 ET** (= 13:00-15:00 UTC), matching the actual fade-cron fire window.
+
+**L-fix: liquidity cap.**
+Production has `MAX_PCT_OF_VOLUME = 10%` — bets can't exceed 10% of the market's 24h volume in contracts. v2 caps each fire's stake at `min($100, 0.10 × volume × ask_dec)`. This compresses the upside of low-ask wins (where 4¢ asks pay 24× but may only have $50-200 of size).
+
+#### Step G v2 results (April 27 - May 15, 19 days)
+
+| Variant | Fires | W-L | Win% | P&L | Total stake | Liq-capped | K=6 W-L | K=7-9 W-L | K≥10 W-L |
+|---|---|---|---|---|---|---|---|---|---|
+| v3 | 102 | 18-84 | 17.6% | **−$1,212** | $4,927 | 57/102 (56%) | 14-31 | 0-0 (skipped) | 4-53 |
+| **v1h** | **163** | **21-127** | 14.2% | **+$1,279** | $7,450 | 91/163 (56%) | 5-16 | 13-88 | 3-23 |
+| pkLight | 156 | 28-125 | 18.3% | **−$19** | $9,936 | 62/156 (40%) | 9-25 | 18-88 | 1-12 |
+
+**Validation invariants (must beat v3 by ≥+$800):**
+- **v1h Δ = +$2,492 ✓** (still passes the gate by 3.1×, vs Step G v1's 7.7×)
+- **pkLight Δ = +$1,193 ✓** (now near break-even; the hand-coded coefficients aren't adding clear value)
+
+#### What the M-fix changed
+
+The model_prob correction shrunk EVERY variant's win rate (Step G v1 v1h was 24%; v2 v1h is 14%). That's because:
+- Fade's r=8 produces FATTER TAILS than market_snapshots' r=20-50
+- model_prob for K=8-10 strikes is meaningfully HIGHER under r=8
+- Bigger model_probs → bigger edges → more fires → many of those new fires are losers because the realized K rates aren't actually as fat-tailed as r=8 implies
+
+**This says fade's r=8 may itself be too generous to the tail.** NB_R=8 was calibrated on older data; current pitcher distributions may have thinner tails. A future improvement (separate from the variant question) is to re-calibrate NB_R against the 2026 season data — there's a comment in `lib/strikeout-model.js` that says NB_R should be recalibrated yearly.
+
+#### What survived the corrections
+
+- **Directional verdict**: v1h > v3 still holds with corrected math.
+- **K≥10 still bad for everyone**: v3 = 4-53 (7%), v1h = 3-23 (12%), pkLight = 1-12 (8%). All three variants would prefer to fire LESS in the tail. v3's force-fire of K≥10 is still the largest single drag.
+- **Week-by-week shape preserved**: Wk-19 was the best week for all variants, Wk-20 was bad for all. v1h's Wk-19 P&L = +$2,137, v1h's Wk-20 = −$802. Still net positive across 19 days.
+
+#### What got worse than I thought
+
+- **Original "K=7-9 is the silent winner" finding was overstated.** With fade's correct r=8 math, K=7-9 wins drop from 31-105 (23%) to 13-88 (13%) — closer to K≥10's hit rate. The bucket is still less bad than the tail (because asks are lower so liquidity caps bite less) but it's not the +$4,595 cash cow I claimed.
+- **pkLight is now nearly break-even** (−$19 over 19 days). The +$4,027 from Step G v1 was an artifact of using inflated model_probs from a different model. With fade-correct math, pkLight is competitive with v3 but not v1h.
+
+### Step G v2 → Permanent infrastructure
+
+**`scripts/replayFadeMultiVariant.mjs` committed** to the repo. CLI:
+```
+node scripts/replayFadeMultiVariant.mjs                          # rolling 28-day window
+node scripts/replayFadeMultiVariant.mjs --from YYYY-MM-DD --to YYYY-MM-DD
+node scripts/replayFadeMultiVariant.mjs --discord                # post summary
+node scripts/replayFadeMultiVariant.mjs --json /tmp/out.json     # dump full results
+```
+
+**Cron added to `server/scheduler.js`**:
+```
+0 6 * * 0  (Sundays 6:00 AM ET)  → replayFadeMultiVariant.mjs --discord
+```
+Every Sunday morning we get an automated 28-day rolling backtest of all 3 variants posted to Discord. If a variant change is on the table, we have ladder data ready.
+
+### Step G v2 → Validation invariants (ratified)
+
+**Before any FADE_VARIANT change in production**:
+1. Replay window ≥ 14 days
+2. Candidate variant must beat the active variant by ≥+$800 P&L
+3. Bootstrap on daily P&L delta must show P(positive) ≥ 95%
+4. K≥10 bucket: either ≥1 win OR completely skipped in the candidate variant
+5. Replay must use the M+K+L corrected methodology (fade's NB(8) math, 09:00-11:00 ET snapshots, 10% liquidity cap)
+
+**The −$1,618 paper loss this week was the direct consequence of overriding these invariants** (specifically, flipping FADE_VARIANT=v3 on May 12 against an OOS test that said v3 loses). Going forward, no overrides.
+
+### Final action plan status
+
+| # | Action | Status |
+|---|---|---|
+| A | `FADE_VARIANT=v1h` | ✅ DONE |
+| B | Wire `pkModel.predictPk` | DEFER (pkLight beat v3 but not v1h with corrected math) |
+| C | Wire calibration at fire | BLOCKED — `calibration_params` table is empty (separate bug to fix) |
+| D | Populate enrichment columns on `ks_bets` INSERT | OPEN — 30 min, valuable for future audits |
+| **K** | Re-run Step G with 09:00-11:00 ET window | ✅ DONE |
+| **L** | Liquidity-cap proxy | ✅ DONE |
+| **M** | Verify model_prob source | ✅ DONE — was using wrong NB dispersion; replay now corrects this |
+| **N** | Move replay to repo | ✅ DONE — `scripts/replayFadeMultiVariant.mjs` |
+| **O** | Weekly Sunday 6am cron | ✅ DONE — added to `server/scheduler.js` |
+
+### Files referenced (Step G v2)
+- `/tmp/replay_19day_v2.py` — corrected Python replay (canonical reference)
+- `/tmp/replay_19day_v2_results.json` — raw fire-by-fire output
+- `/tmp/replay_19day_v2_run.log` — formatted summary
+- `scripts/replayFadeMultiVariant.mjs` — production .mjs version, committed to repo
+- `server/scheduler.js` — weekly Sunday 6am ET cron entry
+
+### Bottom-line learning from this entire 2026-05-15 investigation
+
+The variant decision flipped THREE times in one day (v3 → v1h → v3 → v1h) as evidence accumulated:
+1. **3-day filter analysis** said v1h beats v3 → flipped to v1h
+2. **8-day filter analysis** said v3 beats v1h → flipped back to v3
+3. **19-day ladder replay** said v1h beats v3 → flipped to v1h (final)
+
+The lesson: **filter-on-actual-fires creates structural bias** because actual fires were chosen by whatever variant was active. The 8-day result that fooled us came from re-applying v3's filter to v1h's choices, which cherry-picked v1h's K=6 fires that happened to do well. The market_snapshots ladder replay gives each variant access to its own full candidate set, which is the only fair comparison.
+
+**Going forward**: any variant decision must run on the market_snapshots ladder over ≥14 days, with bootstrap CI on the delta, before changing FADE_VARIANT in production. The cost of policy decisions made on biased samples is exactly the −$1,618 we burned this week.
+
+---
 
 ## System Overview
 
