@@ -1,6 +1,86 @@
 # MLBIE — MLB Strikeout Edge Model Governance
 
+**Last updated: 2026-05-15 — FADE_VARIANT flipped back to v1h on Railway after 3 days of v3 paper losses (Tue −$310, Wed −$724, Thu −$584 = −$1,618 / −31% drawdown on $5,198 starting paper bankroll). Diagnostic confirmed v3 implementation matches its spec — the strategy itself is failing, not the code. Root cause is structural: the fade model fires on a single feature (k9_l5 × innings) while ignoring the entire Statcast / park / weather / umpire / velo signal stack that the codebase already collects. K≥10 tail bucket is the disaster zone (0W/15L Wed+Thu combined, CI rejects 22% model claim). See "2026-05-15 v3 Post-Mortem & Save Plan" section below.**
+
 **Last updated: 2026-05-12 — fade model v3 promotion REVERTED to v1+H-I after the true out-of-sample test (every v3 filter except H-I destroyed EV vs v1; May 7-10 +59% lift was overfit). Added per-strike / per-ask P&L buckets to the daily fade report. Bankroll now compounds day-to-day (initBankrollState rollover). Fixed postGameAttribution `mode`-column crash and the scheduler postponement-cancel column-name bug. Base bankroll reset to $5,000 + prior-day P&L.**
+
+---
+
+## 2026-05-15 v3 Post-Mortem & Save Plan
+
+### The 3-day damage
+
+| Date | n | W-L | Win% | P&L | Note |
+|---|---|---|---|---|---|
+| Tue 5/12 | 21 | 8-13 | 38% | **−$310.28** | v3 active despite OOS kill from same morning |
+| Wed 5/13 | 43 | 19-24 | 44% | **−$724.17** | K≥10 0W/8L = −$534.49 |
+| Thu 5/14 | 13 | 3-10 | 23% | **−$584.04** | K≥10 0W/7L = −$495.01 |
+| **Total** | **77** | **30-47** | **39%** | **−$1,618.49** | **−31% drawdown on $5,198 paper bankroll** |
+
+Thursday by strike bucket:
+- K=6: 3W/3L, −$85.04 (basically breakeven)
+- K=10: 0W/6L, **−$495.01**
+- K=11: 0W/1L, −$3.99
+
+Wed+Thu combined K≥10: 0W/15L. 95% CI for true hit rate = [0%, 22%]. Model claimed 22%. CI now tight enough to **reject the model's claim — the K≥10 model is systematically biased high.**
+
+### Diagnostic — what we did wrong
+
+**(1) Code is correct, policy was wrong.** Read `scripts/fireFadeModel.mjs` line-by-line vs commit `e28ce861` v3 spec. Implementation matches exactly: v3 = v1 + H-H (avg_innings_l5 ≥ 5) + skip K=7-9 + per-pitcher cap 2. v3 IS doing what v3 was designed to do. The bug is that we re-enabled v3 (commit `cb1477e4`, May 12 9:29am) the same morning the OOS test (commit `e28ce861`, 8:54am) said v3 lost −$68k vs v1 on 858 records. Rationale at the time: "K=7-9 was bleeding in May 7-11 paper, v3 skips that, no-cost to gather more v3 data." This was 5 days of post-hoc regime chasing — exactly what the OOS test was designed to filter out.
+
+**(2) The model fires on 1 feature out of 10+ available.** `computeLambda` in `fireFadeModel.mjs`:
+```javascript
+function computeLambda(priorStarts, window = 5) {
+  const k9 = totalK / totalIp * 9
+  const avgIp = totalIp / recent.length
+  return { lambda: k9 * avgIp / 9, k9, avgIp, n: recent.length }
+}
+```
+That's the entire model input. Nothing about opponent, park, weather, umpire, velo, whiff%, FBV. The negative-binomial dispersion is a hard-coded constant `NB_DISPERSION = 8`.
+
+**(3) Massive signal stack is collected and ignored.**
+
+| Signal | Where collected | Used by fade? |
+|---|---|---|
+| Statcast K% (`savant_k_pct`) | `lib/pkModel.js` + `lib/savant.js` | **NO** |
+| Whiff% (`savant_whiff`) | `lib/pkModel.js` | **NO** |
+| Fastball velo (`savant_fbv`) | `lib/pkModel.js` | **NO** |
+| Opponent K% (`opp_k_pct`) | `lib/pkModel.js` | **NO** |
+| Park factor (`park_factor`) | `lib/parkFactors.js` | **NO** |
+| Weather mult (`weather_mult`) | weather agent | **NO** |
+| Umpire factor (`ump_factor`) | umpire agent | **NO** |
+| Velocity trend (`velo_adj`, `velo_trend_mph`) | scouting agent | **NO** |
+| 99-feature ridge regression (`lib/pkModel.js`) | exists, weights file exists | **only in tests** |
+| Calibration multipliers (`calibrationEngine.js`) | **358 resolved samples, 4 buckets produced via cron** | **NOT applied at fire time** |
+
+`grep -rn "pkModel" lib/ scripts/` confirms `lib/pkModel.js` is imported **only by `scripts/test/realWorldTests.js`**. The production fade pipeline doesn't call it. `grep -n "calibrat" scripts/fireFadeModel.mjs` returns zero results — calibration runs successfully on cron but the firing code never reads the produced buckets.
+
+The bet INSERT in `fireFadeModel.mjs` (line 458) also doesn't write Statcast/park/weather/ump columns to `ks_bets`, which is why Thursday's 13 rows are 100% NULL on those fields. Coverage trend over the last 3 weeks shows enrichment is also degrading on the few paths that do populate it.
+
+### Action plan (priority order)
+
+| # | Fix | Status | Effort | Expected impact |
+|---|---|---|---|---|
+| **A** | **Set `FADE_VARIANT=v1h`** on Railway worker | ✅ **DONE 2026-05-15** (verified via `railway variables`) | 30s | Eliminates the −$495/day K≥10 bleed immediately. v1h fires single best-edge strike per pitcher, doesn't force a tail fire. |
+| **B** | **Wire `pkModel.predictPk()` into `fireFadeModel.mjs`** — replace `computeLambda` 1-feature output with a pkModel call that uses Statcast K%, whiff, FBV, opp K%, park, weather. Existing model + weights file already exist; just not wired. | PENDING | 1-2 hours | Probability estimates use 10× more signal. Tail predictions should compress toward realized rates. |
+| **C** | **Apply calibration at fire time.** Before computing `edge = model_prob − ask`, look up the bucket multiplier from `calibration_params` and adjust `model_prob`. Engine already produces walk-forward-validated multipliers (358 resolved samples, 4 promoted buckets); we just don't consume them. | PENDING | 1-2 hours | Probabilities get self-correcting on actual market outcomes. Especially helpful for the K≥10 tail where the engine has been watching the misses. |
+| **D** | **Populate enrichment columns on `ks_bets` INSERT** (savant_k_pct, savant_whiff, park_factor, weather_mult, ump_factor, velo_adj) so post-hoc bucket analysis works. | PENDING | 30 min | Operational only — but without this, future audits stay blind. |
+| **E** | **Backtest the week with each variant.** Replay `fade_fire_snapshots` for May 12-14 under v3 (baseline), v1h, v1h + pkModel, v1h + pkModel + calibration. Decide whether B+C go to prod based on backtest delta. | PENDING (next session) | 2-3 hours | Decision gate — only ship B+C if replay shows clear improvement on this week's actual snapshots. |
+
+### Validation invariants
+
+Before any of B/C/D ship to prod:
+1. **Replay must beat v3 on Tue+Wed+Thu** by at least +$800 (50% of the −$1,618 lost) on the same `fade_fire_snapshots` ladder.
+2. **K≥10 bucket must show ≥1 win or be skipped entirely** in the replay set — current 0/15 is the kill criterion.
+3. **No "we'll see if it works in paper"** override of failed replay — that's the policy mistake that caused the −$1,618.
+
+### Files referenced
+- Diagnostic queries: `/tmp/turso_signals2.json` (signal-coverage by day), `/tmp/turso_q2.json` (Thursday bet detail), `/tmp/turso_q3.json` (per-bet replay)
+- Code paths: `scripts/fireFadeModel.mjs` (fire logic + INSERT statement), `lib/pkModel.js` (unused ridge regression), `lib/calibrationEngine.js` (unused multiplier source)
+- Snapshot table: `fade_fire_snapshots` (every strike's ladder at fire time — replay fuel)
+- Killed-then-revived commit chain: `e28ce861` (revert to v1h) → `cb1477e4` (re-set v3 in prod)
+
+---
 
 ## System Overview
 
