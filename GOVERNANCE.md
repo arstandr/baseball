@@ -128,6 +128,59 @@ Three deeper conclusions:
 - `/tmp/replay_week_results.json` — raw fire-by-fire output from this run
 - `/tmp/replay_week_run.log` — formatted summary
 
+### Step E2 — 4-week replay (2026-05-15, same day)
+
+Extended the replay to the full pregame_fade_yes bet history. `fade_fire_snapshots` only goes back to May 12 (added that day per commit `a5ca026e`), so for the longer window we replay using actual ks_bets rows + their `actual_ks` outcomes, applying each variant's filters to determine which bets would have fired. The fade strategy only started firing May 7, so "4-week" is really 8 days (May 7-14).
+
+**Universe:** 106 settled `pregame_fade_yes` bets, May 7-14. Actual recorded P&L = **−$895.74** (18W-88L, 17%).
+
+| Variant | Fires | W-L | Win% | Synth P&L | K=6 W-L | K=7-9 | K≥10 W-L |
+|---|---|---|---|---|---|---|---|
+| **v3** | 61 | 16-45 | 26.2% | **+$1,113.36** ✓ POSITIVE | 14-16 | 0-0 (skipped) | 2-29 |
+| v1h | 90 | 17-73 | 18.9% | −$666.08 | 13-18 | 2-29 | 2-26 |
+| pkLight | 24 | 2-22 | 8.3% | −$1,733.33 | 2-5 | 0-9 | 0-8 |
+
+Validation invariants on the 8-day window:
+- **Beat v3 by ≥+$800: BOTH FAIL.** v1h is **−$1,779 worse** than v3. pkLight is **−$2,847 worse**. v3 IS the best variant on this window.
+- K≥10 ≥1 win or skip entirely: v3 2-29 PASSES (2 wins exist), v1h 2-26 PASSES, pkLight 0-8 FAILS.
+
+**Week-by-week breakdown — the regime story:**
+
+| Week | v3 fires | v3 W-L | v3 P&L | v1h fires | v1h W-L | v1h P&L |
+|---|---|---|---|---|---|---|
+| Wk-19 (May 7-11) | 15 | 5-10 | **+$2,777** | 50 | 7-43 | +$610 |
+| Wk-20 (May 12-14) | 46 | 11-35 | **−$1,664** | 40 | 10-30 | −$1,276 |
+| **Total** | **61** | **16-45** | **+$1,113** | **90** | **17-73** | **−$666** |
+
+**v3 had an outstanding Wk-19 (+$2,777, including K≥10 tail hits worth ~$700 each on 5-7c asks) then collapsed in Wk-20.** v1h was up small in Wk-19, down big in Wk-20. The pattern is identical-shape but v3 has higher amplitude in both directions.
+
+The OOS test on May 12 already warned this exact thing — *"May 7-10 +59% lift was overfit."* Wk-19 is precisely that overfit window. So one defensible reading is **v3 is going to keep losing** and Wk-19 was the regression-from-the-mean we should have ignored. Another defensible reading is **the strategy IS positive EV but mid-May randomly handed us a bad 3-day cluster.** Neither can be statistically resolved with 8 days of data.
+
+**The pkLight variant is broken.** Hand-coded coefficient priors (swstr_pct +0.05/0.02, era_l5 fatigue × 0.02, tto3_penalty × 0.05) clearly aren't predictive — pkLight win rate is 8.3% vs market ask implying ~17%. Either the priors are pointed the wrong way or the features themselves don't help during this regime. The real `lib/pkModel.js` ridge regression might do better (it has trained coefficients), but my hand-rolled proxy doesn't.
+
+### Step E2 → Updated decision
+
+**The decision to flip `FADE_VARIANT=v1h` based on 3 days of data was premature.** The 8-day picture shows v3 +$1,113 vs v1h −$666 — v3 is materially better on the longer window. The Wed+Thu disaster was inside a larger pattern where v3 was still the winner.
+
+But — and this matters — both v3 and v1h were profitable in Wk-19 and unprofitable in Wk-20. **Whatever changed on/around May 12 hit both variants.** Switching variants doesn't fix the underlying issue.
+
+| Action | Recommendation | Reason |
+|---|---|---|
+| Keep `FADE_VARIANT=v1h` | **PROVISIONAL HOLD** | v1h's lower amplitude is defensive damage control during the regime we don't yet understand. If Wk-21 returns to Wk-19 character, revert to v3. |
+| Pause fade firing entirely | **NOT YET** | Wk-19 was real (+$2,777). Need to see if it returns. |
+| Re-write step E with proper ladder | DONE for May 12-14 | Cannot extend to April — no `fade_fire_snapshots` rows |
+| Build `scripts/replayFadeMultiVariant.mjs` | RECOMMENDED | Move `/tmp/replay_4week.py` into the repo as permanent backtest tool |
+| Diagnose what changed May 12 | **NEW PRIORITY** | Look at: market mid distribution, pitcher cohort K-rates, market depth, news events, weather. Something shifted. |
+| Fix `calibration_params` write path | **STILL VALUABLE** | calibrationEngine reports promoted buckets but the params table is empty. Plumbing bug. |
+
+### Bottom-line message
+After 8 days of data: v3 = best variant ($+1,113), v1h = middle ($-666), pkLight = worst ($-1,733). One week of unrepresentative losses caused us to switch off the best variant. The model isn't catastrophically broken — it just had a hard 3 days inside a profitable 8-day stretch. **Keep v1h for now as defense, watch Wk-21, and decide based on whether the recent regime persists or reverts.**
+
+### Files referenced (Step E2)
+- `/tmp/replay_4week.py` — fade-strategy-aware replay (filter-only, no ladder needed)
+- `/tmp/replay_4week_results.json` — raw fire-by-fire output
+- `/tmp/replay_4week_run.log` — formatted summary
+
 ---
 
 ## System Overview
