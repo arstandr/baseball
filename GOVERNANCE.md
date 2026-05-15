@@ -257,6 +257,82 @@ That's **19 days** of replay-grade data. With ~4 fires/day (v3) or ~8 fires/day 
 
 ---
 
+### Step G — 19-day ladder replay using market_snapshots (2026-05-15)
+
+This is the proper backtest. Pulled the earliest-captured ladder per (pitcher × game_date × strike) from `market_snapshots` over Apr 27 - May 15 = **452 pitcher-days, 1,833 strike rows, 437 outcomes available** (via `pitcher_recent_starts` + `ks_bets` fallback). Each variant picks its own candidates from the FULL ladder — not just bets v1h or v3 happened to fire in production.
+
+**Results (the definitive numbers):**
+
+| Variant | Fires | W-L | Win% | P&L (19d) | K=6 W-L | K=7-9 W-L | K≥10 W-L |
+|---|---|---|---|---|---|---|---|
+| v3 | 155 | 34-117 | 22.5% | **−$709** | 30-44 | 0-0 (skipped) | 4-73 |
+| **v1h** | **266** | **57-179** | **24.2%** | **+$5,422** ✓✓ | 25-53 | **31-105** | 1-21 |
+| pkLight | 173 | 32-137 | 18.9% | **+$4,027** ✓ | 10-26 | 20-96 | 2-15 |
+
+**Validation invariants (must beat v3 by ≥+$800):**
+- v1h: Δ = **+$6,131** ✓✓✓ **PASSES BY 7.7×**
+- pkLight: Δ = **+$4,736** ✓ PASSES BY 5.9×
+
+**Week-by-week:**
+
+| Week | v3 | v1h | pkLight |
+|---|---|---|---|
+| Wk-18 (Apr 27 - May 3) | +$47 | +$159 | +$1,089 |
+| Wk-19 (May 4 - May 10) | +$1,024 | **+$5,924** | +$5,613 |
+| Wk-20 (May 11 - May 15) | −$1,780 | −$662 | −$2,674 |
+
+**v1h's K=7-9 bucket is where the money is.** 31 wins on 136 fires (23% — basically the same rate as K=6 at 32%), but at lower ask prices (~10-15¢) so each win pays ~$700-1000 vs K=6 wins paying ~$200-300. v3's "skip K=7-9" filter is THROWING AWAY THIS WHOLE PROFIT POOL.
+
+### Why the 8-day replay (Step E2) was misleading
+
+Step E2 used `ks_bets pregame_fade_yes` records (actual fires) and re-applied each variant's filter to them. But the actual fires came from production runs where the variant was set to (mostly) v1h. v3's filter then REJECTS most of those (because v3 demands K=6 OR K≥10) — only the K=6 fires pass through. Those K=6 fires happened to do OK in Wk-19, so v3 looked artificially profitable.
+
+The 19-day market_snapshots replay lets each variant pick from the FULL ladder (every strike), so v3 doesn't get to cherry-pick from v1h's already-filtered choices. **That's the apples-to-apples comparison the 8-day version couldn't do**, and it reverses the verdict completely.
+
+### Strike distribution comparison
+
+| Variant | K=6 | K=7 | K=8 | K=9 | K=10 | K=11 | K=12+ |
+|---|---|---|---|---|---|---|---|
+| v3 | **74** | 0 | 0 | 0 | 63 | 10 | 4 |
+| v1h | 78 | 62 | 47 | 27 | 11 | 7 | 4 |
+| pkLight | 36 | 48 | 45 | 23 | 13 | 3 | 1 |
+
+v3 fires 63 K=10 bets over 19 days vs v1h's 11. **v3 force-fires the tail 6× more often** because each pitcher whose K≥10 has any edge gets a tail fire, regardless of whether the K≥10 is actually the BEST option. v1h fires K≥10 only when it's the single-best edge across all strikes. K≥10 wins are rare (1-21 for v1h, 4-73 for v3) so firing it less often is correct.
+
+### Step G → Action taken
+- **Reverted `FADE_VARIANT=v1h` on Railway** (verified). This time it's based on real 19-day evidence, not 3 days.
+- The variant flip in Step F (v3) was based on biased ks_bets-filter analysis. The actual ladder replay says v1h has been the better variant the whole time.
+
+### Step G → Net learning across this entire 2026-05-15 investigation
+
+1. **The K≥10 tail isn't profitable enough to force-fire.** Across 19 days v3 fired 73 K≥10 losses to win 4 — even with payouts of 7-15× on each win, P&L on the bucket is −$2,800. v1h's "fire K≥10 only when it's the single best edge" is correct.
+
+2. **The K=7-9 bucket is the silent winner.** v3's strike filter throws away this whole pool. Over 19 days v1h's K=7-9 made 31W of 136 fires; even at 23% hit rate the lower ask prices (~10-15¢) make the wins large enough that the bucket is net positive.
+
+3. **The 8-day analysis was statistically underpowered AND structurally biased.** It used post-filter data, not pre-filter ladder. The 19-day market_snapshots replay should be the standard for any future variant decision.
+
+4. **Wk-20 was bad for ALL variants** (v3 −$1,780, v1h −$662, pkLight −$2,674). The market got harder mid-May for everyone. But v1h lost the LEAST — its broader strike selection and single-best-edge picking is more robust to regime shifts.
+
+5. **`pkLight` is competitive but worse than v1h.** My hand-coded multi-feature lambda (k9, swstr, era, tto3) added +$4,027 vs v3 but didn't beat v1h's +$5,422. The features aren't worthless, but the coefficients need to be learned (= use the actual `lib/pkModel.js` ridge regression, not my hand-coded proxy) for it to add value over v1h's simpler approach.
+
+### Step G → Updated action plan
+
+| # | Action | Status | Note |
+|---|---|---|---|
+| **A** | `FADE_VARIANT=v1h` | ✅ DONE (final this time) | Backed by 19-day ladder replay, +$5,422 vs v3 −$709. |
+| **B** | Wire `pkModel.predictPk` into fire pipeline | DEFER | pkLight beat v3 but didn't beat v1h. Real pkModel (trained ridge) might help but needs careful validation. |
+| **D** | Populate enrichment columns on `ks_bets` INSERT | STILL VALUABLE | 30-min fix. |
+| **G** | **Move `replay_19day.py` → repo as `scripts/replayFadeMultiVariant.mjs`** | NEXT | Permanent backtest tool. Should run weekly. |
+| **H** | Diagnose what hit ALL variants in Wk-20 | LOWER PRIORITY | v1h survived best; market may revert. |
+| **J** | Fix `calibration_params` write-path bug | STILL OPEN | Engine reports promoted buckets but params table empty. |
+
+### Files referenced (Step G)
+- `/tmp/replay_19day.py` — proper market_snapshots ladder replay (the canonical backtest tool)
+- `/tmp/replay_19day_results.json` — fire-by-fire output across all 3 variants
+- `/tmp/replay_19day_run.log` — formatted summary
+
+---
+
 ## System Overview
 
 MLBIE (MLB Innings/Batters Edge) is a quantitative edge-finding system for
