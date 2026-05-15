@@ -333,6 +333,97 @@ v3 fires 63 K=10 bets over 19 days vs v1h's 11. **v3 force-fires the tail 6× mo
 
 ---
 
+### Step G — Max-Think Evaluation (stress-tested 2026-05-15)
+
+Before declaring v1h the right answer, ran 6 stress tests on the Step G result.
+
+#### What survived scrutiny
+
+**1. Statistical significance: 99.1% confident v1h > v3.**
+Bootstrap (N=5,000, sampling 17 days with replacement) on the v1h − v3 daily-P&L delta:
+- Point estimate: **+$6,131**
+- Bootstrap mean: +$6,120 (matches → no estimator bias)
+- 90% CI: [+$1,403, +$11,872]
+- 95% CI: [+$655, +$13,192]
+- **P(v1h > v3) = 99.1%**
+- **P(v1h beats v3 by ≥$800) = 97.1%**
+
+Even at the conservative 95% lower bound (+$655), the directional claim is firm. The validation invariant from earlier governance ("beat v3 by ≥+$800") passes at 97% confidence — not 50/50 noise.
+
+**2. v1h's profit isn't from one lucky day.**
+Best 3 days = $5,509, total = $5,422. Removing the best day → v1h still +$2,883. Removing the worst day → +$6,692. Multiple positive-edge days, not a single tail.
+Contrast: **pkLight's +$4,027 collapses to −$270 if May 8 is removed.** pkLight depends on one outlier day. v1h doesn't. (Yellow flag for pkLight, not v1h.)
+
+**3. K=7-9 winners are well-distributed.**
+31 K=7-9 wins across 10+ days (max 4 in a day). Strike split: 20×K=7, 8×K=8, 3×K=9. Ask price range 4-42¢, median 22¢.
+- Gross from wins: +$15,095
+- Losses (105 × $100): −$10,500
+- **Net K=7-9 bucket: +$4,595**
+
+This bucket — which v3 entirely throws away — is the real source of v1h's edge.
+
+**4. Outcome coverage is fine.**
+- v3: 151/155 (97.4%) settled
+- v1h: 236/266 (88.7%) settled — the 30 missing are mostly today (5/15 fires not yet resolved) + a few pitchers who didn't pitch.
+- pkLight: 169/173 (97.7%) settled
+
+If anything, this UNDER-counts v1h (it has more unrealized fires). Not a methodology bias.
+
+#### What I'm not certain about (honest caveats)
+
+**1. Single-pitcher concentration is real.**
+Pitcher 663362 alone contributed +$2,400 on a single fire = **44% of v1h's net P&L**. Total positive contributions = +$18,195; total negative = −$12,773. The strategy is "lottery ticket" by nature — wins at 4-7¢ asks pay 13-25× stake. **The +$5,422 contains a few lucky low-ask hits.** Real-world variance week-to-week will be wide. Annualizing this is fraught.
+
+**2. Bootstrap CI is wide ($655 to $13,192 at 95%).**
+17 days is a small sample for bootstrap. The DIRECTIONAL claim (v1h beats v3) is robust at 99% probability. The MAGNITUDE claim (specifically $5,422) is uncertain. Real performance could be anywhere in the bootstrap range. Don't extrapolate this as "$5k per 19 days = $7k/month."
+
+**3. Methodology gaps not modeled:**
+- **Fire-time snapshot = MIN(captured_at) per strike.** This is the EARLIEST snapshot per pitcher-strike-day. If the earliest snapshot has stale opening prices that wouldn't have been actually offered at the fade-cron fire time (~9am ET), the replay may benefit from optical prices. Should re-run using a specific hour (e.g., 9-10am ET range) and confirm.
+- **No liquidity cap modeled.** Production has `MAX_PCT_OF_VOLUME = 10%`. Low-ask K=7-9 markets often have thin depth — a 4¢ ask might have only $50-200 of size available. My replay assumes infinite liquidity. Real-world fills would be smaller, especially on the highest-payout wins, compressing absolute returns.
+- **Flat $100 stake vs production edge-weighted sizing.** The comparison BETWEEN variants is still apples-to-apples, but absolute P&L is illustrative only.
+- **`market_snapshots.model_prob` source not verified.** I assumed this is the same probability the fade pipeline would compute. If it's from a different model (e.g., XGBoost full-game in `features.js`), edges would differ. Should grep code to confirm.
+
+**4. v3's K≥10 might be unlucky, not structurally wrong.**
+v3 K≥10 was 4-73 (5% win rate). v1h K≥10 was 1-21 (5%) — identical rate, just way fewer fires. If the true K≥10 rate is ~10-15% (matches the model's claim), the 5% realized rate is at the bottom of a ~17% CI. Could easily revert.
+**However**: even if K≥10 reverts to 12% hit, v3's "force a K≥10 fire per pitcher" is firing 6× more often than v1h. The bucket would need to be HUGELY positive-EV to overcome the v1h advantage from K=7-9. So even with mean-reversion on K≥10, v1h likely still wins.
+
+#### Verdict: keep v1h, but with eyes open
+
+| Item | Strength | Action |
+|---|---|---|
+| Directional verdict v1h > v3 | **STRONG** (99% confidence, robust to most stress tests) | `FADE_VARIANT=v1h` is the right setting. |
+| Absolute P&L magnitude | **WEAK** (single-pitcher concentration, wide CI, methodology gaps) | Don't promise $5k/19 days in production. Realistic expectation = positive-EV with high variance. |
+| K=7-9 bucket profitability | **MODERATE** (well-distributed wins, but small sample) | Watch the bucket weekly. If it goes 5-50 over the next 4 weeks, re-evaluate. |
+| K≥10 unfavorable | **MODERATE** (5% rate vs 12% claim, but n=22-73) | Hold v1h's "single best edge" selection; don't force tail. |
+| Step G replay tool | **PERMANENT** | Move `replay_19day.py` → `scripts/replayFadeMultiVariant.mjs`. Run weekly on rolling 28-day window. |
+
+#### Remaining work (post-evaluation)
+
+| # | Action | Priority |
+|---|---|---|
+| K | Re-run Step G with snapshot picked from specific hour (e.g., 09:00-10:00 ET) | Should match the actual fade-cron fire time. If results hold, even more confident. |
+| L | Add liquidity-cap proxy to replay (use `volume` from market_snapshots to cap stake) | More realistic absolute returns. |
+| M | Verify `market_snapshots.model_prob` source — grep code paths | Could invalidate everything if it's from a different model. |
+| N | Move `replay_19day.py` → repo as permanent script | Backtest infra. |
+| O | Re-run Step G weekly on rolling 28-day window | Watch for variant-change signals before fires occur. |
+
+### Files referenced (Step G evaluation)
+- `/tmp/stress_test_g.py` — six-test stress evaluation
+- `/tmp/stress_test_g_run.log` — bootstrap, concentration, and worst-day output
+
+### Bottom-line learning from this entire 2026-05-15 investigation
+
+The variant decision flipped THREE times in one day (v3 → v1h → v3 → v1h) as evidence accumulated:
+1. **3-day filter analysis** said v1h beats v3 → flipped to v1h
+2. **8-day filter analysis** said v3 beats v1h → flipped back to v3
+3. **19-day ladder replay** said v1h beats v3 → flipped to v1h (final)
+
+The lesson: **filter-on-actual-fires creates structural bias** because actual fires were chosen by whatever variant was active. The 8-day result that fooled us came from re-applying v3's filter to v1h's choices, which cherry-picked v1h's K=6 fires that happened to do well. The market_snapshots ladder replay gives each variant access to its own full candidate set, which is the only fair comparison.
+
+**Going forward**: any variant decision must run on the market_snapshots ladder over ≥14 days, with bootstrap CI on the delta, before changing FADE_VARIANT in production. The cost of policy decisions made on biased samples is exactly the −$1,618 we burned this week.
+
+---
+
 ## System Overview
 
 MLBIE (MLB Innings/Batters Edge) is a quantitative edge-finding system for
