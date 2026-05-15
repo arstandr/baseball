@@ -183,6 +183,80 @@ After 8 days of data: v3 = best variant ($+1,113), v1h = middle ($-666), pkLight
 
 ---
 
+### Step F — Wk-19 vs Wk-20 diagnostic (2026-05-15)
+
+Compared every feature we have across the 106 settled fade bets, Wk-19 (May 7-11) vs Wk-20 (May 12-14). **The real story isn't a market regime shift — it's the v3 strike-filter change firing 2× more K≥10 bets per day.**
+
+**Strike distribution collapsed when v3 was enabled May 12:**
+
+| Strike | Wk-19 fires | Wk-20 fires | Shift |
+|---|---|---|---|
+| K=6 | 12 (19%) | 23 (54%) | ↑↑↑ |
+| **K=7-9** | **37 (59%)** | **0 (0%)** | ↓↓↓ |
+| K=10 | 10 (16%) | 15 (35%) | ↑↑↑ |
+| K=11-13 | 4 (6%) | 5 (12%) | ↑ |
+
+v3 filter skips K=7-9 (by design). Wk-19 was a different variant — every K=7-9 in Wk-19 is a bet v3 would have refused. Below is the per-bucket P&L breakdown that drives this:
+
+**Per-bucket P&L by week:**
+
+| Bucket | Wk-19 W-L | Wk-19 P&L | Wk-20 W-L | Wk-20 P&L |
+|---|---|---|---|---|
+| K=6 | 6-6 (50%) | **+$1,092** | 8-15 (35%) | −$157 |
+| K=7-9 | 2-35 (5%) | **−$2,367** | 0-0 (n/a) | $0 |
+| K≥10 | 2-12 (14%) | **+$1,378** | 0-20 (0%) | **−$2,000** |
+
+**Without the K=7-9 bleed Wk-19 would have been +$2,470.** v3's "skip K=7-9" filter is actually correct — that's why total v3 P&L is +$1,113 over 8 days.
+
+But Wk-20's K≥10 disaster (0-20) is the new problem. **It's not that K≥10 became unprofitable per-bet** (Wk-19 was 2-12 too, 14% win rate). It's that v3 fires K≥10 at 2× the daily rate (7/day in Wk-20 vs 3/day in Wk-19), and the 2 home-run tail wins from Wk-19 (Imanaga K=10→10, deGrom K=10→10) just didn't repeat in Wk-20.
+
+**Pitcher cohort barely changed**: K9 career (Wk-19: 9.42, Wk-20: 9.36), swstr% (0.265 vs 0.267), xFIP (3.84 vs 3.75), avg IP L5 (5.44 vs 5.59) all within noise. The model is firing on essentially the same pitcher quality.
+
+**What did change**: mean fill price doubled (11.9¢ → 21.9¢), model_prob went up 30% (0.250 → 0.325), confidence went up 10% (0.774 → 0.856). **The model became more confident and more expensive per bet during Wk-20** — yet realized K's slightly DECREASED (5.38 → 5.02 avg). So the increased model confidence was unwarranted.
+
+**One specific data point**: Wk-20 K≥10 included Skenes K=12 (actual 10 — 1 K short of cashing), Misiorowski K=12 (actual 10 — 1 K short), Ohtani K=10 (actual 8), Yamamoto K=10 (actual 8), Sale K=10 (actual 8). 5 of the 20 K≥10 losses were pitchers reaching 8-10 K's — close calls. With slightly better timing on K-thresholds, several would have flipped. **This is bad-luck-on-top-of-aggression, not the model being structurally wrong.**
+
+### Step F → Action taken
+- **Reverted `FADE_VARIANT=v3` on Railway** (verified). v3 is the +$1,113 variant over 8 days; switching to v1h was based on too small a sample.
+- The fade_fire_snapshots logging continues regardless of variant — captures the full strike ladder per pitcher so any variant can be replayed later. **No additional logging needed for "collect all data across the board."** This is already in place.
+
+### "How far back can we reliably backtest?" — honest data depth audit
+
+| Source | Date range | Days | Usable for? | Notes |
+|---|---|---|---|---|
+| `fade_fire_snapshots` | May 12 → May 14 | 3 | True replay (ladder) | Only data with the full rejected-strike ladder at fire time. |
+| `ks_bets pregame_fade_yes` | May 7 → May 14 | 8 | Filter-replay on actual fires | What I used for Step E2. Can't see what v1h would have fired DIFFERENTLY. |
+| `market_snapshots` | **Apr 27 → May 15** | **19** | True replay (1.75M rows, 178 pitchers, all strikes) | **THE BIG ONE.** Yes_bid/yes_ask/strike per pitcher per game day. Can synthesize fade ladder for any pitcher who had a market. |
+| `pitcher_signals` | Apr 23 → May 14 | 22 | Feature vector for replay | Aligns with market_snapshots window. |
+| `pitcher_recent_starts` | Mar 25 → May 14 | 184 records | K-outcome resolution | Realized K counts. Goes further back than fires. |
+| `ks_bets all (with actual_ks)` | Apr 20 → May 14 | 25 | Outcome verification | All strategies settled. |
+| `historical_pitcher_stats` | **2022-04-07 → 2025-09-28** | 730 | Prior-season baselines | Career K-rates for cold-start pitchers — does NOT include 2026 in-season market data. |
+| `kalshi_price_snapshots` | (empty) | 0 | — | Table exists but unpopulated. |
+
+**Honest floor: April 27, 2026.** From that date forward we have the FULL ladder (`market_snapshots`) + features (`pitcher_signals`) + outcomes (`ks_bets` + `pitcher_recent_starts`) — enough to do a clean replay of any variant on any historical day.
+
+That's **19 days** of replay-grade data. With ~4 fires/day (v3) or ~8 fires/day (v1h), that's:
+- v3: ~76 fires in 19 days — barely statistically meaningful for distinguishing variants
+- v1h: ~150 fires in 19 days — sufficient for ±5pp win-rate detection
+- Combined comparison across both: enough to detect a ≥$1000 P&L difference at p<0.05
+
+**Pre-April-27**: We do NOT have intraday market_snapshot data. The OOS test that killed v3 (`scripts/v3HistoricalTest.mjs`, "Mar 31 - May 6, 858 records") used some other reconstruction method — likely synthesizing the ladder from `historical_pitcher_stats` + a market-price model. That's still useful for sanity checks but it's reconstructed, not actual market quotes — "BS-flavor" relative to April 27+.
+
+### Step F → Updated action plan
+
+| # | Action | Status | Note |
+|---|---|---|---|
+| **G** | Build proper ladder-replay using `market_snapshots` over Apr 27 - May 15 | **NEXT** | This is the real backtest. ~19 days × ~10 fires/day × 3 variants = ~600 replay rows. Should clearly differentiate v3 vs v1h vs pkLight statistically. |
+| **H** | Diagnose K≥10 daily-rate anomaly | NEW | Why does v3 fire 7 K≥10/day in Wk-20 vs 3/day in Wk-19? Is it a pitcher-pool issue (more high-K9 pitchers starting?) or a confidence-threshold drift? Bears on whether v3 fires too eagerly. |
+| **I** | Move replay scripts into repo as permanent tools | RECOMMENDED | `scripts/replayFadeMultiVariant.mjs` (from /tmp/replay_4week.py + market_snapshots ladder integration). |
+| **J** | Fix `calibration_params` write-path | STILL VALUABLE | Engine reports promoted buckets but params table is empty. |
+
+### Files referenced (Step F)
+- `/tmp/diagnose_may12_shift.py` — Wk-19 vs Wk-20 feature diff
+- `/tmp/diagnose_may12_run.log` — formatted output
+
+---
+
 ## System Overview
 
 MLBIE (MLB Innings/Batters Edge) is a quantitative edge-finding system for
